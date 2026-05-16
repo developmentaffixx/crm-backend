@@ -77,6 +77,17 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 
+// ── DB connection check ───────────────────────────────────────────────────────
+app.get('/api/health/db', async (_req, res) => {
+  try {
+    const db = require('./src/config/db');
+    await db.query('SELECT 1');
+    res.json({ status: 'ok', db: 'connected' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', db: err.message });
+  }
+});
+
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
 
