@@ -1,0 +1,56 @@
+const express = require('express');
+const router  = express.Router();
+const multer  = require('multer');
+const { authenticate } = require('../middleware/auth');
+const usersController = require('../controllers/users.controller');
+
+// Multer for avatar upload (max 2MB, images only)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/png', 'image/jpeg', 'image/webp'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Only PNG, JPG, WEBP files are allowed'));
+  },
+});
+
+router.use(authenticate);
+
+// GET /api/users — list active team members
+router.get('/', usersController.list);
+
+// GET /api/users/me
+router.get('/me', usersController.me);
+
+// PUT /api/users/me — update profile
+router.put('/me', usersController.updateMe);
+
+// POST /api/users/me/avatar — upload avatar
+router.post('/me/avatar', upload.single('avatar'), usersController.uploadAvatar);
+
+// DELETE /api/users/me/avatar — remove avatar
+router.delete('/me/avatar', usersController.removeAvatar);
+
+// PUT /api/users/me/password — change password
+router.put('/me/password', usersController.changePassword);
+
+// GET /api/users/me/permissions — current user's role permissions
+router.get('/me/permissions', usersController.myPermissions);
+
+// GET /api/users/me/projects — user's projects
+router.get('/me/projects', usersController.myProjects);
+
+// GET /api/users/me/tasks — user's tasks
+router.get('/me/tasks', usersController.myTasks);
+
+// GET /api/users/me/leaves — user's leaves
+router.get('/me/leaves', usersController.myLeaves);
+
+// POST /api/users/me/leaves — apply for leave
+router.post('/me/leaves', usersController.applyLeave);
+
+// DELETE /api/users/me/leaves/:id — cancel leave
+router.delete('/me/leaves/:id', usersController.cancelLeave);
+
+module.exports = router;

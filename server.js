@@ -1,0 +1,92 @@
+require('dotenv').config();
+const express = require('express');
+const http    = require('http');
+const cors    = require('cors');
+const { initSocket } = require('./src/config/socket');
+
+const authRoutes      = require('./src/routes/auth.routes');
+const tasksRoutes     = require('./src/routes/tasks.routes');
+const approvalsRoutes = require('./src/routes/approvals.routes');
+const usersRoutes     = require('./src/routes/users.routes');
+const settingsRoutes  = require('./src/routes/settings.routes');
+const emailRoutes     = require('./src/routes/email.routes');
+const companyRoutes   = require('./src/routes/company.routes');
+const leadsRoutes     = require('./src/routes/leads.routes');
+const plansRoutes     = require('./src/routes/plans.routes');
+const pitchDeckRoutes = require('./src/routes/pitchDeck.routes');
+const invoicesRoutes  = require('./src/routes/invoices.routes');
+const expensesRoutes  = require('./src/routes/expenses.routes');
+const capitalRoutes   = require('./src/routes/capital.routes');
+const assetsRoutes    = require('./src/routes/assets.routes');
+const payrollRoutes   = require('./src/routes/payroll.routes');
+const projectsRoutes  = require('./src/routes/projects.routes');
+const clientsRoutes   = require('./src/routes/clients.routes');
+const calendarRoutes  = require('./src/routes/calendar.routes');
+const leavesRoutes   = require('./src/routes/leaves.routes');
+const reimbursementsRoutes = require('./src/routes/reimbursements.routes');
+const announcementsRoutes = require('./src/routes/announcements.routes');
+const attendanceRoutes   = require('./src/routes/attendance.routes');
+const dashboardRoutes    = require('./src/routes/dashboard.routes');
+const ticketsRoutes = require('./src/routes/tickets.routes');
+
+const app    = express();
+const server = http.createServer(app);
+const PORT   = process.env.PORT || 5000;
+
+// ── Socket.IO ─────────────────────────────────────────────────────────────────
+initSocket(server);
+
+// ── Middleware ────────────────────────────────────────────────────────────────
+app.use(cors());
+app.use(express.json());
+
+// Attach socket emit helper to all routes
+const socketEmitMiddleware = require('./src/middleware/socketEmit');
+app.use(socketEmitMiddleware);
+
+// ── Routes ────────────────────────────────────────────────────────────────────
+app.use('/api/auth',      authRoutes);
+app.use('/api/tasks',     tasksRoutes);
+app.use('/api/approvals', approvalsRoutes);
+app.use('/api/users',     usersRoutes);
+app.use('/api/settings/email', emailRoutes);
+app.use('/api/settings/company', companyRoutes);
+app.use('/api/settings',  settingsRoutes);
+app.use('/api/leads',            leadsRoutes);
+app.use('/api/plans',            plansRoutes);
+app.use('/api/pitch-decks',      pitchDeckRoutes);
+app.use('/api/invoices',         invoicesRoutes);
+app.use('/api/expenses',         expensesRoutes);
+app.use('/api/capital',          capitalRoutes);
+app.use('/api/assets',           assetsRoutes);
+app.use('/api/payroll',          payrollRoutes);
+app.use('/api/projects',         projectsRoutes);
+app.use('/api/clients',          clientsRoutes);
+app.use('/api/calendar',         calendarRoutes);
+app.use('/api/leaves',           leavesRoutes);
+app.use('/api/reimbursements',   reimbursementsRoutes);
+app.use('/api/announcements',    announcementsRoutes);
+app.use('/api/attendance',       attendanceRoutes);
+app.use('/api/dashboard',        dashboardRoutes);
+app.use('/api/tickets',          ticketsRoutes);
+
+// Serve uploaded files (logos, favicons)
+const path = require('path');
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// ── Health check ──────────────────────────────────────────────────────────────
+app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+
+// ── 404 handler ───────────────────────────────────────────────────────────────
+app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
+
+// ── Global error handler ──────────────────────────────────────────────────────
+app.use((err, _req, res, _next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ message: 'Internal server error' });
+});
+
+server.listen(PORT, () => {
+  console.log(`✅  CRM Task API running on http://localhost:${PORT}`);
+  console.log(`🔌  Socket.IO ready for real-time connections`);
+});
