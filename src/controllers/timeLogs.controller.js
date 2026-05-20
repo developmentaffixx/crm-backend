@@ -12,7 +12,8 @@ async function getTask(id) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/tasks/:id/timer/start
-// Assignee or admin starts the timer. Idempotent if already running.
+// Any assignee/collaborator can start their own timer independently.
+// Multiple users can have timers running on the same task simultaneously.
 // ─────────────────────────────────────────────────────────────────────────────
 exports.startTimer = async (req, res) => {
   try {
@@ -34,19 +35,45 @@ exports.startTimer = async (req, res) => {
       return res.status(400).json({ message: 'Timer can only run on active tasks' });
     }
 
-    if (task.timer_started_at) {
-      return res.status(400).json({ message: 'Timer is already running on this task' });
+    // ── Must be clocked in (attendance check) ─────────────────────────────
+    const [attendance] = await db.query(
+      `SELECT id, clock_in, clock_out FROM attendance
+       WHERE user_id = ? AND date = CURDATE()
+       ORDER BY id DESC LIMIT 1`,
+      [req.user.id]
+    );
+    if (attendance.length === 0 || !attendance[0].clock_in) {
+      return res.status(400).json({ message: 'You must clock in before starting a task timer' });
+    }
+    if (attendance[0].clock_out) {
+      return res.status(400).json({ message: 'You have already clocked out. Task timer cannot be started after clock out.' });
     }
 
-    // ── One active timer per user ──────────────────────────────────────────
-    // Check if this user already has a timer running on a DIFFERENT task
+    // ── Block timer during AFS ────────────────────────────────────────────
+    const [activeAfs] = await db.query(
+      'SELECT id FROM afs_logs WHERE user_id = ? AND end_time IS NULL LIMIT 1',
+      [req.user.id]
+    );
+    if (activeAfs.length > 0) {
+      return res.status(400).json({ message: 'Cannot start timer while AFS is active. End your AFS break first.' });
+    }
+    // ──────────────────────────────────────────────────────────────────────
+
+    // Check if THIS user already has a timer running on THIS task
+    const [existingTimer] = await db.query(
+      'SELECT 1 FROM task_active_timers WHERE task_id = ? AND user_id = ?',
+      [task.id, req.user.id]
+    );
+    if (existingTimer.length > 0) {
+      return res.status(400).json({ message: 'Your timer is already running on this task' });
+    }
+
+    // ── One active timer per user across all tasks ─────────────────────────
     const [running] = await db.query(
-      `SELECT t.id, t.title
-       FROM tasks t
-       WHERE t.timer_started_at IS NOT NULL
-         AND t.deleted = 0
-         AND t.assigned_to = ?
-         AND t.id != ?
+      `SELECT tat.task_id, t.title
+       FROM task_active_timers tat
+       JOIN tasks t ON t.id = tat.task_id
+       WHERE tat.user_id = ? AND tat.task_id != ?
        LIMIT 1`,
       [req.user.id, task.id]
     );
@@ -54,14 +81,24 @@ exports.startTimer = async (req, res) => {
     if (running.length > 0) {
       return res.status(400).json({
         message: `You already have a timer running on "${running[0].title}". Stop it first before starting a new one.`,
-        conflicting_task_id: running[0].id,
+        conflicting_task_id: running[0].task_id,
         conflicting_task_title: running[0].title,
       });
     }
     // ──────────────────────────────────────────────────────────────────────
 
     const now = new Date();
-    await db.query('UPDATE tasks SET timer_started_at = ? WHERE id = ?', [now, task.id]);
+
+    // Insert per-user active timer
+    await db.query(
+      'INSERT INTO task_active_timers (task_id, user_id, started_at) VALUES (?, ?, ?)',
+      [task.id, req.user.id, now]
+    );
+
+    // Also update the legacy timer_started_at if no one else is running (backward compat)
+    if (!task.timer_started_at) {
+      await db.query('UPDATE tasks SET timer_started_at = ? WHERE id = ?', [now, task.id]);
+    }
 
     return res.json({ timer_started_at: now, time_spent: task.time_spent });
   } catch (err) {
@@ -72,7 +109,7 @@ exports.startTimer = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/tasks/:id/timer/stop
-// Stops the timer, saves a time log entry, accumulates time_spent.
+// Stops the current user's timer, saves a time log entry, accumulates time_spent.
 // ─────────────────────────────────────────────────────────────────────────────
 exports.stopTimer = async (req, res) => {
   try {
@@ -89,14 +126,44 @@ exports.stopTimer = async (req, res) => {
       }
     }
 
-    if (!task.timer_started_at) {
-      return res.status(400).json({ message: 'Timer is not running' });
+    // Check if this user has an active timer on this task
+    const [activeTimer] = await db.query(
+      'SELECT * FROM task_active_timers WHERE task_id = ? AND user_id = ?',
+      [task.id, req.user.id]
+    );
+
+    if (activeTimer.length === 0) {
+      // Fallback: check legacy timer_started_at for backward compat
+      if (!task.timer_started_at) {
+        return res.status(400).json({ message: 'Timer is not running' });
+      }
+      // Use legacy timer
+      const now = new Date();
+      const startedAt = new Date(task.timer_started_at);
+      const duration = Math.max(1, Math.floor((now - startedAt) / 1000));
+      const note = req.body.note || null;
+
+      await db.query(
+        `INSERT INTO task_time_logs (task_id, user_id, started_at, ended_at, duration, note)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [task.id, req.user.id, startedAt, now, duration, note]
+      );
+
+      const newTotal = task.time_spent + duration;
+      await db.query(
+        'UPDATE tasks SET time_spent = ?, timer_started_at = NULL WHERE id = ?',
+        [newTotal, task.id]
+      );
+
+      return res.json({ time_spent: newTotal, duration, timer_started_at: null });
     }
 
-    const now        = new Date();
-    const startedAt  = new Date(task.timer_started_at);
-    const duration   = Math.max(1, Math.floor((now - startedAt) / 1000)); // seconds
-    const note       = req.body.note || null;
+    // Use per-user timer
+    const timer = activeTimer[0];
+    const now = new Date();
+    const startedAt = new Date(timer.started_at);
+    const duration = Math.max(1, Math.floor((now - startedAt) / 1000));
+    const note = req.body.note || null;
 
     // Save log entry
     await db.query(
@@ -105,12 +172,27 @@ exports.stopTimer = async (req, res) => {
       [task.id, req.user.id, startedAt, now, duration, note]
     );
 
-    // Accumulate time_spent, clear timer
-    const newTotal = task.time_spent + duration;
+    // Remove the active timer for this user
     await db.query(
-      'UPDATE tasks SET time_spent = ?, timer_started_at = NULL WHERE id = ?',
-      [newTotal, task.id]
+      'DELETE FROM task_active_timers WHERE task_id = ? AND user_id = ?',
+      [task.id, req.user.id]
     );
+
+    // Accumulate time_spent atomically
+    await db.query('UPDATE tasks SET time_spent = time_spent + ? WHERE id = ?', [duration, task.id]);
+
+    // Get updated total
+    const [updatedTask] = await db.query('SELECT time_spent FROM tasks WHERE id = ?', [task.id]);
+    const newTotal = updatedTask[0].time_spent;
+
+    // If no more active timers on this task, clear legacy timer_started_at
+    const [remainingTimers] = await db.query(
+      'SELECT 1 FROM task_active_timers WHERE task_id = ?',
+      [task.id]
+    );
+    if (remainingTimers.length === 0) {
+      await db.query('UPDATE tasks SET timer_started_at = NULL WHERE id = ?', [task.id]);
+    }
 
     return res.json({ time_spent: newTotal, duration, timer_started_at: null });
   } catch (err) {
@@ -121,7 +203,7 @@ exports.stopTimer = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/tasks/:id/time-logs
-// Returns all time log entries for a task. Assignee sees own; admin sees all.
+// Returns all time log entries + active timers (who's currently working)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getLogs = async (req, res) => {
   try {
@@ -150,9 +232,83 @@ exports.getLogs = async (req, res) => {
       [task.id]
     );
 
-    return res.json({ logs, time_spent: task.time_spent, timer_started_at: task.timer_started_at });
+    // Get active timers (who's currently working on this task)
+    const [activeTimers] = await db.query(
+      `SELECT tat.user_id, tat.started_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name
+       FROM task_active_timers tat
+       JOIN users u ON u.id = tat.user_id
+       WHERE tat.task_id = ?`,
+      [task.id]
+    );
+
+    // Per-user time summary
+    const [userSummary] = await db.query(
+      `SELECT tl.user_id,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name,
+              SUM(tl.duration) AS total_seconds,
+              COUNT(*) AS session_count
+       FROM task_time_logs tl
+       JOIN users u ON u.id = tl.user_id
+       WHERE tl.task_id = ?
+       GROUP BY tl.user_id
+       ORDER BY total_seconds DESC`,
+      [task.id]
+    );
+
+    // Calculate actual total from logs (source of truth)
+    const actualTotal = userSummary.reduce((sum, u) => sum + parseInt(u.total_seconds || 0, 10), 0);
+
+    // Ensure user_summary values are numbers for the frontend
+    for (const u of userSummary) {
+      u.total_seconds = parseInt(u.total_seconds || 0, 10);
+      u.session_count = parseInt(u.session_count || 0, 10);
+    }
+
+    // Sync task.time_spent if it drifted
+    if (actualTotal !== task.time_spent) {
+      await db.query('UPDATE tasks SET time_spent = ? WHERE id = ?', [actualTotal, task.id]);
+    }
+
+    return res.json({
+      logs,
+      time_spent: actualTotal,
+      timer_started_at: task.timer_started_at,
+      active_timers: activeTimers,
+      user_summary: userSummary,
+    });
   } catch (err) {
     console.error('getLogs error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/tasks/:id/timer/status
+// Returns the current user's timer status for this task
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getTimerStatus = async (req, res) => {
+  try {
+    const [timer] = await db.query(
+      'SELECT * FROM task_active_timers WHERE task_id = ? AND user_id = ?',
+      [req.params.id, req.user.id]
+    );
+
+    const [allTimers] = await db.query(
+      `SELECT tat.user_id, tat.started_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name
+       FROM task_active_timers tat
+       JOIN users u ON u.id = tat.user_id
+       WHERE tat.task_id = ?`,
+      [req.params.id]
+    );
+
+    return res.json({
+      my_timer: timer.length > 0 ? timer[0] : null,
+      active_timers: allTimers,
+    });
+  } catch (err) {
+    console.error('getTimerStatus error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
@@ -228,7 +384,7 @@ exports.updateLog = async (req, res) => {
     }
 
     const newDuration = Math.max(1, Math.floor((end - start) / 1000));
-    const diff        = newDuration - log.duration; // can be negative
+    const diff        = newDuration - log.duration;
 
     await db.query(
       'UPDATE task_time_logs SET started_at = ?, ended_at = ?, duration = ?, note = ? WHERE id = ?',

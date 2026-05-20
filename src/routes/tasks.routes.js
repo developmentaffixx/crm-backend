@@ -10,6 +10,28 @@ router.use(authenticate);
 // GET  /api/tasks          — list tasks (filtered by role, paginated, searchable, sortable)
 router.get('/', tasksController.list);
 
+// GET  /api/tasks/my-active-timer — get current user's running timer (if any)
+router.get('/my-active-timer', async (req, res) => {
+  try {
+    const db = require('../config/db');
+    const [rows] = await db.query(
+      `SELECT tat.task_id, tat.started_at, t.title AS task_title
+       FROM task_active_timers tat
+       JOIN tasks t ON t.id = tat.task_id
+       WHERE tat.user_id = ?
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (rows.length === 0) {
+      return res.json({ active: false });
+    }
+    res.json({ active: true, task_id: rows[0].task_id, task_title: rows[0].task_title, started_at: rows[0].started_at });
+  } catch (err) {
+    console.error('my-active-timer error:', err);
+    res.json({ active: false });
+  }
+});
+
 // POST /api/tasks          — create task (team member)
 router.post(
   '/',
@@ -50,6 +72,9 @@ router.post('/:id/timer/start', param('id').isInt(), timeLogsController.startTim
 
 // POST /api/tasks/:id/timer/stop   — stop live timer, save log entry
 router.post('/:id/timer/stop',  param('id').isInt(), timeLogsController.stopTimer);
+
+// GET  /api/tasks/:id/timer/status — get current user's timer status + who's working
+router.get('/:id/timer/status', param('id').isInt(), timeLogsController.getTimerStatus);
 
 // GET  /api/tasks/:id/time-logs         — list all log entries
 router.get('/:id/time-logs', param('id').isInt(), timeLogsController.getLogs);

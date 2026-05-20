@@ -28,6 +28,24 @@ function initSocket(httpServer) {
       console.log(`   → ${socket.id} joined user:${userId}`);
     });
 
+    // Chat: typing indicator
+    socket.on('chat:typing', ({ conversationId, userId, userName }) => {
+      socket.to(`conversation:${conversationId}`).emit('chat:typing', { conversationId, userId, userName });
+    });
+
+    socket.on('chat:stop-typing', ({ conversationId, userId }) => {
+      socket.to(`conversation:${conversationId}`).emit('chat:stop-typing', { conversationId, userId });
+    });
+
+    // Chat: join conversation room
+    socket.on('join:conversation', (conversationId) => {
+      socket.join(`conversation:${conversationId}`);
+    });
+
+    socket.on('leave:conversation', (conversationId) => {
+      socket.leave(`conversation:${conversationId}`);
+    });
+
     socket.on('disconnect', () => {
       console.log(`🔌 Socket disconnected: ${socket.id}`);
     });

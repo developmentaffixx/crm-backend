@@ -100,7 +100,8 @@ exports.list = async (req, res) => {
       `SELECT t.id, t.title, t.description, t.assigned_to, t.created_by,
               t.start_date, t.deadline, t.priority, t.status, t.is_active,
               t.deleted, t.created_at, t.updated_at,
-              t.time_spent, t.timer_started_at,
+              COALESCE((SELECT SUM(tl.duration) FROM task_time_logs tl WHERE tl.task_id = t.id), 0) AS time_spent,
+              t.timer_started_at,
               CONCAT(u_assigned.first_name, ' ', u_assigned.last_name) AS assigned_to_name,
               CONCAT(u_created.first_name,  ' ', u_created.last_name)  AS created_by_name,
               (SELECT pt2.project_id FROM project_tasks pt2 WHERE pt2.task_id = t.id LIMIT 1) AS project_id,
@@ -181,15 +182,16 @@ exports.list = async (req, res) => {
 exports.getOne = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT t.*,
+      `SELECT t.id, t.title, t.description, t.assigned_to, t.created_by,
+              t.start_date, t.deadline, t.priority, t.status, t.is_active,
+              t.deleted, t.created_at, t.updated_at, t.timer_started_at,
+              COALESCE((SELECT SUM(tl.duration) FROM task_time_logs tl WHERE tl.task_id = t.id), 0) AS time_spent,
               CONCAT(u_assigned.first_name, ' ', u_assigned.last_name) AS assigned_to_name,
               CONCAT(u_created.first_name,  ' ', u_created.last_name)  AS created_by_name,
               ext.id   AS pending_extension_id,
               ext.requested_deadline,
               fwd.id   AS pending_forward_id,
               fwd.forwarded_to AS forwarded_to_user_id,
-              t.time_spent,
-              t.timer_started_at,
               pt.project_id,
               p.title AS project_name
        FROM tasks t

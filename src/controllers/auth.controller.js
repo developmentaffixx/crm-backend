@@ -60,6 +60,7 @@ exports.login = async (req, res) => {
         is_admin:   user.is_admin === 1,
         role_id:    user.role_id,
         role_name:  roleName,
+        avatar_url: user.avatar_url || null,
       },
     });
   } catch (err) {

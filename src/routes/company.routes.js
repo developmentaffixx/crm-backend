@@ -22,13 +22,15 @@ router.get('/', ctrl.getCompanySettings);
 router.put('/', authenticate, requireAdmin, ctrl.updateCompanySettings);
 
 // Upload images
-router.post('/upload-logo',    authenticate, requireAdmin, upload.single('logo'),    ctrl.uploadLogo);
-router.post('/upload-favicon', authenticate, requireAdmin, upload.single('favicon'), ctrl.uploadFavicon);
-router.post('/upload-upi-qr',  authenticate, requireAdmin, upload.single('upi_qr'), ctrl.uploadUpiQr);
+router.post('/upload-logo',        authenticate, requireAdmin, upload.single('logo'),        ctrl.uploadLogo);
+router.post('/upload-favicon',     authenticate, requireAdmin, upload.single('favicon'),     ctrl.uploadFavicon);
+router.post('/upload-upi-qr',      authenticate, requireAdmin, upload.single('upi_qr'),     ctrl.uploadUpiQr);
+router.post('/upload-letterhead',  authenticate, requireAdmin, upload.single('letterhead'),  ctrl.uploadLetterhead);
 
 // Remove images
-router.delete('/remove-logo',    authenticate, requireAdmin, ctrl.removeLogo);
-router.delete('/remove-favicon', authenticate, requireAdmin, ctrl.removeFavicon);
-router.delete('/remove-upi-qr',  authenticate, requireAdmin, ctrl.removeUpiQr);
+router.delete('/remove-logo',        authenticate, requireAdmin, ctrl.removeLogo);
+router.delete('/remove-favicon',     authenticate, requireAdmin, ctrl.removeFavicon);
+router.delete('/remove-upi-qr',      authenticate, requireAdmin, ctrl.removeUpiQr);
+router.delete('/remove-letterhead',  authenticate, requireAdmin, ctrl.removeLetterhead);
 
 module.exports = router;

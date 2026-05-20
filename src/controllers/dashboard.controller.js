@@ -526,6 +526,64 @@ exports.chartsLeadsPipeline = async (req, res) => {
 
 
 /**
+ * GET /api/dashboard/birthdays
+ * Returns upcoming birthdays (next 7 days) excluding the requesting user.
+ * Also returns whether today is the requesting user's own birthday.
+ */
+exports.getBirthdays = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Check if today is the current user's birthday
+    const [selfRows] = await db.query(
+      `SELECT first_name, last_name, date_of_birth FROM users
+       WHERE id = ? AND deleted = 0 AND date_of_birth IS NOT NULL
+       AND MONTH(date_of_birth) = MONTH(CURDATE()) AND DAY(date_of_birth) = DAY(CURDATE())`,
+      [userId]
+    );
+    const isMyBirthday = selfRows.length > 0;
+    const myName = isMyBirthday ? `${selfRows[0].first_name} ${selfRows[0].last_name}` : null;
+
+    // Get upcoming birthdays in the next 7 days (excluding the requesting user)
+    // Use MONTH/DAY comparison to handle year-end wrapping properly
+    const [upcomingRows] = await db.query(
+      `SELECT id, first_name, last_name, date_of_birth, avatar_url,
+              DATEDIFF(
+                CASE 
+                  WHEN DATE_FORMAT(date_of_birth, '%m-%d') >= DATE_FORMAT(CURDATE(), '%m-%d')
+                  THEN STR_TO_DATE(CONCAT(YEAR(CURDATE()), '-', MONTH(date_of_birth), '-', DAY(date_of_birth)), '%Y-%m-%d')
+                  ELSE STR_TO_DATE(CONCAT(YEAR(CURDATE()) + 1, '-', MONTH(date_of_birth), '-', DAY(date_of_birth)), '%Y-%m-%d')
+                END,
+                CURDATE()
+              ) AS days_until
+       FROM users
+       WHERE deleted = 0 AND is_active = 1 AND date_of_birth IS NOT NULL AND id != ?
+       HAVING days_until BETWEEN 0 AND 7
+       ORDER BY days_until ASC`,
+      [userId]
+    );
+
+    console.log('Birthday API - userId:', userId, 'isMyBirthday:', isMyBirthday, 'upcoming:', upcomingRows.length);
+
+    return res.json({
+      is_my_birthday: isMyBirthday,
+      my_name: myName,
+      upcoming: upcomingRows.map(row => ({
+        id: row.id,
+        name: `${row.first_name} ${row.last_name}`,
+        date_of_birth: row.date_of_birth,
+        avatar_url: row.avatar_url,
+        days_until: row.days_until,
+      })),
+    });
+  } catch (err) {
+    console.error('Get birthdays error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+/**
  * GET /api/dashboard/deadlines
  * Get upcoming deadlines for current user (next 7 days)
  */

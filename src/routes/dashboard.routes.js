@@ -8,6 +8,7 @@ router.use(authenticate);
 
 // ── Member routes ─────────────────────────────────────────────────────────────
 router.get('/member', ctrl.memberStats);
+router.get('/birthdays', ctrl.getBirthdays);
 router.get('/deadlines', ctrl.getDeadlines);
 router.get('/timeline', ctrl.getTimeline);
 

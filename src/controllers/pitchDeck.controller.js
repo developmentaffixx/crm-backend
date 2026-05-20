@@ -9,10 +9,13 @@ exports.list = async (req, res) => {
       `SELECT pd.*,
               l.name AS lead_name,
               l.business_name AS lead_business_name,
-              CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+              CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
+              pdi.name AS industry_name,
+              pdi.icon AS industry_icon
        FROM pitch_decks pd
        LEFT JOIN leads l ON l.id = pd.lead_id
        LEFT JOIN users u ON u.id = pd.created_by
+       LEFT JOIN pitch_deck_industries pdi ON pdi.id = pd.industry_id
        WHERE pd.deleted = 0
        ORDER BY pd.created_at DESC`
     );
@@ -32,10 +35,22 @@ exports.getOne = async (req, res) => {
       `SELECT pd.*,
               l.name AS lead_name,
               l.business_name AS lead_business_name,
-              CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+              CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
+              pdi.name AS industry_name,
+              pdi.slug AS industry_slug,
+              pdi.icon AS industry_icon,
+              pdi.primary_color AS theme_primary,
+              pdi.secondary_color AS theme_secondary,
+              pdi.accent_color AS theme_accent,
+              pdi.light_bg AS theme_light_bg,
+              pdi.light_accent AS theme_light_accent,
+              pdi.layout_variant,
+              pdi.img_hero, pdi.img_team, pdi.img_services,
+              pdi.img_goals, pdi.img_plans, pdi.img_thanks
        FROM pitch_decks pd
        LEFT JOIN leads l ON l.id = pd.lead_id
        LEFT JOIN users u ON u.id = pd.created_by
+       LEFT JOIN pitch_deck_industries pdi ON pdi.id = pd.industry_id
        WHERE pd.id = ? AND pd.deleted = 0`,
       [req.params.id]
     );
@@ -101,7 +116,7 @@ exports.getOne = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
   const {
-    lead_id, title,
+    lead_id, industry_id, title,
     company_name, company_tagline, company_description, company_logo_url,
     problems, selected_services, goals, selected_plans,
     thanks_message, contact_name, contact_email, contact_phone, contact_website,
@@ -114,12 +129,12 @@ exports.create = async (req, res) => {
   try {
     // Insert main pitch deck
     const [result] = await db.query(
-      `INSERT INTO pitch_decks (lead_id, title, company_name, company_tagline, company_description,
+      `INSERT INTO pitch_decks (lead_id, industry_id, title, company_name, company_tagline, company_description,
         company_logo_url, thanks_message, contact_name, contact_email, contact_phone, contact_website,
         status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        lead_id, title, company_name || null, company_tagline || null,
+        lead_id, industry_id || null, title, company_name || null, company_tagline || null,
         company_description || null, company_logo_url || null,
         thanks_message || null, contact_name || null, contact_email || null,
         contact_phone || null, contact_website || null,
@@ -183,7 +198,7 @@ exports.update = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Pitch deck not found' });
 
     const {
-      lead_id, title,
+      lead_id, industry_id, title,
       company_name, company_tagline, company_description, company_logo_url,
       problems, selected_services, goals, selected_plans,
       thanks_message, contact_name, contact_email, contact_phone, contact_website,
@@ -193,13 +208,14 @@ exports.update = async (req, res) => {
     // Update main fields
     await db.query(
       `UPDATE pitch_decks SET
-        lead_id = ?, title = ?, company_name = ?, company_tagline = ?,
+        lead_id = ?, industry_id = ?, title = ?, company_name = ?, company_tagline = ?,
         company_description = ?, company_logo_url = ?,
         thanks_message = ?, contact_name = ?, contact_email = ?,
         contact_phone = ?, contact_website = ?, status = ?
        WHERE id = ?`,
       [
-        lead_id || rows[0].lead_id, title || rows[0].title,
+        lead_id || rows[0].lead_id, industry_id !== undefined ? (industry_id || null) : rows[0].industry_id,
+        title || rows[0].title,
         company_name ?? rows[0].company_name, company_tagline ?? rows[0].company_tagline,
         company_description ?? rows[0].company_description, company_logo_url ?? rows[0].company_logo_url,
         thanks_message ?? rows[0].thanks_message, contact_name ?? rows[0].contact_name,

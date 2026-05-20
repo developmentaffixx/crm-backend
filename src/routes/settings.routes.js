@@ -4,6 +4,8 @@ const multer  = require('multer');
 const { body, param } = require('express-validator');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const ctrl = require('../controllers/settings.controller');
+const docCtrl = require('../controllers/documentTemplates.controller');
+const docGenCtrl = require('../controllers/documentGenerate.controller');
 
 // Multer for avatar upload
 const upload = multer({
@@ -54,5 +56,11 @@ router.put('/task-settings', ctrl.updateTaskSettings);
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────
 router.get('/audit-logs', ctrl.getAuditLogs);
+
+// ─── Document Templates ───────────────────────────────────────────────────────
+router.get('/document-templates',           docCtrl.list);
+router.post('/document-templates/generate', docGenCtrl.generate);
+router.get('/document-templates/:key',      docCtrl.getByKey);
+router.put('/document-templates/:key',      docCtrl.update);
 
 module.exports = router;

@@ -324,37 +324,33 @@ exports.afsStart = async (req, res) => {
       return res.status(400).json({ message: 'An AFS session is already active' });
     }
 
+    // ── Pause the user's active task timer (freeze, don't save log) ──────
     let pausedTask = null;
-    const [runningTasks] = await db.query(
-      'SELECT id, timer_started_at, time_spent FROM tasks WHERE assigned_to = ? AND timer_started_at IS NOT NULL',
+    const [activeTimer] = await db.query(
+      `SELECT tat.task_id, tat.started_at, t.title
+       FROM task_active_timers tat
+       JOIN tasks t ON t.id = tat.task_id
+       WHERE tat.user_id = ?`,
       [userId]
     );
 
-    if (runningTasks.length) {
-      const task = runningTasks[0];
-      const [durationResult] = await db.query(
-        'SELECT TIMESTAMPDIFF(SECOND, ?, NOW()) AS duration',
-        [task.timer_started_at]
+    if (activeTimer.length > 0) {
+      const timer = activeTimer[0];
+      pausedTask = { task_id: timer.task_id, task_title: timer.title };
+    } else {
+      // Fallback: check legacy timer_started_at
+      const [runningTasks] = await db.query(
+        'SELECT id, title, timer_started_at FROM tasks WHERE assigned_to = ? AND timer_started_at IS NOT NULL AND deleted = 0',
+        [userId]
       );
-      const duration = durationResult[0].duration;
-
-      await db.query(
-        `INSERT INTO task_time_logs (task_id, user_id, started_at, ended_at, duration, note)
-         VALUES (?, ?, ?, NOW(), ?, 'Auto-paused for AFS')`,
-        [task.id, userId, task.timer_started_at, duration]
-      );
-
-      await db.query(
-        'UPDATE tasks SET timer_started_at = NULL, time_spent = time_spent + ? WHERE id = ?',
-        [duration, task.id]
-      );
-
-      pausedTask = { task_id: task.id, duration_paused: duration };
+      if (runningTasks.length) {
+        pausedTask = { task_id: runningTasks[0].id, task_title: runningTasks[0].title };
+      }
     }
 
     const [result] = await db.query(
-      'INSERT INTO afs_logs (user_id, attendance_id, start_time) VALUES (?, ?, NOW())',
-      [userId, attendanceId]
+      'INSERT INTO afs_logs (user_id, attendance_id, start_time, paused_task_id) VALUES (?, ?, NOW(), ?)',
+      [userId, attendanceId, pausedTask?.task_id || null]
     );
 
     const [afsLog] = await db.query('SELECT * FROM afs_logs WHERE id = ?', [result.insertId]);
@@ -393,7 +389,46 @@ exports.afsEnd = async (req, res) => {
       [duration_seconds, afsLog.attendance_id]
     );
 
-    return res.json({ afs_log: updatedAfs[0] });
+    // ── Auto-resume the paused task timer (shift started_at forward by AFS duration) ──
+    let resumedTask = null;
+    if (afsLog.paused_task_id) {
+      // Check the task is still active
+      const [taskCheck] = await db.query(
+        'SELECT id, title, is_active FROM tasks WHERE id = ? AND deleted = 0 AND is_active = 1',
+        [afsLog.paused_task_id]
+      );
+
+      if (taskCheck.length > 0) {
+        // Check if the user's timer is still in task_active_timers (it should be — we didn't remove it on AFS start)
+        const [existingTimer] = await db.query(
+          'SELECT * FROM task_active_timers WHERE task_id = ? AND user_id = ?',
+          [afsLog.paused_task_id, userId]
+        );
+
+        if (existingTimer.length > 0) {
+          // Shift started_at forward by AFS duration so elapsed time skips the break
+          await db.query(
+            'UPDATE task_active_timers SET started_at = DATE_ADD(started_at, INTERVAL ? SECOND) WHERE task_id = ? AND user_id = ?',
+            [duration_seconds, afsLog.paused_task_id, userId]
+          );
+        } else {
+          // Timer was removed (shouldn't happen, but handle gracefully) — restart it
+          const now = new Date();
+          await db.query(
+            'INSERT IGNORE INTO task_active_timers (task_id, user_id, started_at) VALUES (?, ?, ?)',
+            [afsLog.paused_task_id, userId, now]
+          );
+          await db.query(
+            'UPDATE tasks SET timer_started_at = ? WHERE id = ? AND timer_started_at IS NULL',
+            [now, afsLog.paused_task_id]
+          );
+        }
+
+        resumedTask = { task_id: taskCheck[0].id, task_title: taskCheck[0].title };
+      }
+    }
+
+    return res.json({ afs_log: updatedAfs[0], resumed_task: resumedTask });
   } catch (err) {
     console.error('AFS end error:', err);
     return res.status(500).json({ message: 'Server error' });

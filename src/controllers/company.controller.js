@@ -91,11 +91,13 @@ async function removeImage(req, res, dbColumn, label) {
 }
 
 // ─── Upload endpoints ─────────────────────────────────────────────────────────
-exports.uploadLogo    = (req, res) => uploadImage(req, res, 'logo', 'logo_url');
-exports.uploadFavicon = (req, res) => uploadImage(req, res, 'favicon', 'favicon_url');
-exports.uploadUpiQr   = (req, res) => uploadImage(req, res, 'upi-qr', 'upi_qr_url');
+exports.uploadLogo       = (req, res) => uploadImage(req, res, 'logo', 'logo_url');
+exports.uploadFavicon    = (req, res) => uploadImage(req, res, 'favicon', 'favicon_url');
+exports.uploadUpiQr      = (req, res) => uploadImage(req, res, 'upi-qr', 'upi_qr_url');
+exports.uploadLetterhead = (req, res) => uploadImage(req, res, 'letterhead', 'letterhead_url');
 
 // ─── Remove endpoints ─────────────────────────────────────────────────────────
-exports.removeLogo    = (req, res) => removeImage(req, res, 'logo_url', 'Logo');
-exports.removeFavicon = (req, res) => removeImage(req, res, 'favicon_url', 'Favicon');
-exports.removeUpiQr   = (req, res) => removeImage(req, res, 'upi_qr_url', 'UPI QR');
+exports.removeLogo       = (req, res) => removeImage(req, res, 'logo_url', 'Logo');
+exports.removeFavicon    = (req, res) => removeImage(req, res, 'favicon_url', 'Favicon');
+exports.removeUpiQr      = (req, res) => removeImage(req, res, 'upi_qr_url', 'UPI QR');
+exports.removeLetterhead = (req, res) => removeImage(req, res, 'letterhead_url', 'Letterhead');

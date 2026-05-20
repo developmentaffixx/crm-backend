@@ -28,6 +28,9 @@ const announcementsRoutes = require('./src/routes/announcements.routes');
 const attendanceRoutes   = require('./src/routes/attendance.routes');
 const dashboardRoutes    = require('./src/routes/dashboard.routes');
 const ticketsRoutes = require('./src/routes/tickets.routes');
+const chatRoutes    = require('./src/routes/chat.routes');
+const vendorAgreementsRoutes = require('./src/routes/vendorAgreements.routes');
+const pitchDeckIndustriesRoutes = require('./src/routes/pitchDeckIndustries.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -82,6 +85,9 @@ app.use('/api/announcements',    announcementsRoutes);
 app.use('/api/attendance',       attendanceRoutes);
 app.use('/api/dashboard',        dashboardRoutes);
 app.use('/api/tickets',          ticketsRoutes);
+app.use('/api/chat',             chatRoutes);
+app.use('/api/vendor-agreements', vendorAgreementsRoutes);
+app.use('/api/pitch-deck-industries', pitchDeckIndustriesRoutes);
 
 // Serve uploaded files (logos, favicons)
 const path = require('path');
