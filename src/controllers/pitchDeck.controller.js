@@ -1,5 +1,21 @@
 const db = require('../config/db');
 
+// ─── Helper: Generate Pitch Deck ID (PCH-CLIENT-###) ─────────────────────────
+// e.g. PCH-AFXCL001-001 — sequence per client, never resets
+async function generatePitchDeckId(leadId) {
+  // Get client_code from the lead
+  const [leadRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [leadId]);
+  const clientCode = leadRows[0]?.client_code || 'UNKNOWN';
+
+  // Count existing pitch decks for this client
+  const [rows] = await db.query(
+    `SELECT COUNT(*) AS cnt FROM pitch_decks WHERE lead_id = ? AND pitch_deck_id IS NOT NULL`,
+    [leadId]
+  );
+  const seq = String((rows[0]?.cnt || 0) + 1).padStart(3, '0');
+  return `PCH-${clientCode}-${seq}`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // LIST all pitch decks
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,13 +143,17 @@ exports.create = async (req, res) => {
   if (!title) return res.status(400).json({ message: 'Title is required' });
 
   try {
+    // Generate pitch deck ID
+    const pitch_deck_id = await generatePitchDeckId(lead_id);
+
     // Insert main pitch deck
     const [result] = await db.query(
-      `INSERT INTO pitch_decks (lead_id, industry_id, title, company_name, company_tagline, company_description,
+      `INSERT INTO pitch_decks (pitch_deck_id, lead_id, industry_id, title, company_name, company_tagline, company_description,
         company_logo_url, thanks_message, contact_name, contact_email, contact_phone, contact_website,
         status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        pitch_deck_id,
         lead_id, industry_id || null, title, company_name || null, company_tagline || null,
         company_description || null, company_logo_url || null,
         thanks_message || null, contact_name || null, contact_email || null,

@@ -1,6 +1,23 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
 
+// ─── Helper: Generate Lead ID (LD-YYMMDD-###) ────────────────────────────────
+// Sequence resets monthly per the ID structure rules
+async function generateLeadId() {
+  const now = new Date();
+  const yy = String(now.getFullYear()).slice(-2);
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const prefix = `LD-${yy}${mm}${dd}`;
+
+  // Count leads created this month to get next sequence (resets monthly)
+  const [rows] = await db.query(
+    `SELECT COUNT(*) AS cnt FROM leads WHERE YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE()) AND lead_id IS NOT NULL`
+  );
+  const seq = String((rows[0]?.cnt || 0) + 1).padStart(3, '0');
+  return `${prefix}-${seq}`;
+}
+
 /**
  * GET /api/leads
  */
@@ -113,12 +130,16 @@ exports.create = async (req, res) => {
   } = req.body;
 
   try {
+    // Generate lead_id
+    const lead_id = await generateLeadId();
+
     const [result] = await db.query(
-      `INSERT INTO leads (name, business_name, service_required, budget_min, budget_max, no_budget_idea,
+      `INSERT INTO leads (lead_id, name, business_name, service_required, budget_min, budget_max, no_budget_idea,
         purpose_of_services, phone, email, address, country, state, city, zip_code,
         temperature, source, status, current_marketing_status, assigned_to, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        lead_id,
         name, business_name || null, service_required || null,
         no_budget_idea ? null : (budget_min || null),
         no_budget_idea ? null : (budget_max || null),
@@ -282,6 +303,48 @@ exports.getFollowUps = async (req, res) => {
     return res.json(followUps);
   } catch (err) {
     console.error('Follow-ups list error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── Helper: Generate Client Code (AFXCL###) ─────────────────────────────────
+// Never resets (per system rules)
+async function generateClientCode() {
+  const [rows] = await db.query(
+    `SELECT COUNT(*) AS cnt FROM leads WHERE client_code IS NOT NULL`
+  );
+  const seq = String((rows[0]?.cnt || 0) + 1).padStart(3, '0');
+  return `AFXCL${seq}`;
+}
+
+/**
+ * POST /api/leads/:id/convert
+ * Convert a lead to client (set status = 'Won') — Admin only
+ */
+exports.convert = async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: 'Only admin can convert leads to clients' });
+    }
+
+    const [rows] = await db.query('SELECT * FROM leads WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Lead not found' });
+
+    const lead = rows[0];
+    if (lead.status === 'Won') {
+      return res.status(400).json({ message: 'Lead is already converted to client' });
+    }
+
+    // Generate client code
+    const client_code = await generateClientCode();
+
+    await db.query("UPDATE leads SET status = 'Won', client_code = ? WHERE id = ?", [client_code, req.params.id]);
+
+    const [updated] = await db.query('SELECT * FROM leads WHERE id = ?', [req.params.id]);
+    res.emitSocket('leads:updated', updated[0]);
+    return res.json({ message: 'Lead converted to client successfully', lead: updated[0] });
+  } catch (err) {
+    console.error('Lead convert error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

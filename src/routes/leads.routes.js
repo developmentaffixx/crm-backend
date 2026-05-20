@@ -26,6 +26,9 @@ router.put('/:id', param('id').isInt(), leadsController.update);
 // DELETE /api/leads/:id    — soft-delete lead
 router.delete('/:id', param('id').isInt(), leadsController.remove);
 
+// POST /api/leads/:id/convert — convert lead to client (admin only)
+router.post('/:id/convert', param('id').isInt(), leadsController.convert);
+
 // ── Follow-ups ────────────────────────────────────────────────────────────────
 
 // GET  /api/leads/:id/follow-ups   — list follow-ups

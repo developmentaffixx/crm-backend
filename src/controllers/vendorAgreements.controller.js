@@ -1,5 +1,20 @@
 const db = require('../config/db');
 
+// ─── Helper: Generate Vendor Agreement ID (VAG-YY-###) ────────────────────────
+// Sequence never resets (per system rules: Client/Employee → never reset)
+async function generateAgreementId() {
+  const now = new Date();
+  const yy = String(now.getFullYear()).slice(-2);
+  const prefix = `VAG-${yy}`;
+
+  // Count all agreements this year to get next sequence
+  const [rows] = await db.query(
+    `SELECT COUNT(*) AS cnt FROM vendor_agreements WHERE YEAR(created_at) = YEAR(CURDATE()) AND agreement_id IS NOT NULL`
+  );
+  const seq = String((rows[0]?.cnt || 0) + 1).padStart(3, '0');
+  return `${prefix}-${seq}`;
+}
+
 // ─── Services list (fixed options) ────────────────────────────────────────────
 const SERVICE_OPTIONS = [
   'Social Media Marketing',
@@ -85,11 +100,15 @@ exports.create = async (req, res) => {
       return res.status(400).json({ message: 'Client, start date, and end date are required' });
     }
 
+    // Generate agreement_id
+    const agreement_id = await generateAgreementId();
+
     const [result] = await db.query(
       `INSERT INTO vendor_agreements
-        (client_id, template_key, start_date, end_date, total_fee, payment_terms, advance_payment, amc_amount, services, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (agreement_id, client_id, template_key, start_date, end_date, total_fee, payment_terms, advance_payment, amc_amount, services, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        agreement_id,
         client_id,
         template_key || 'master',
         start_date,
@@ -104,7 +123,7 @@ exports.create = async (req, res) => {
       ]
     );
 
-    return res.status(201).json({ message: 'Agreement created', id: result.insertId });
+    return res.status(201).json({ message: 'Agreement created', id: result.insertId, agreement_id });
   } catch (err) {
     console.error('Vendor agreement create error:', err);
     return res.status(500).json({ message: 'Server error' });
