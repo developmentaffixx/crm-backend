@@ -42,8 +42,12 @@ const PORT   = process.env.PORT || 5000;
 initSocket(server);
 
 // ── Middleware ────────────────────────────────────────────────────────────────
+const allowedOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map(o => o.trim())
+  : ['http://localhost:5173'];
+
 app.use(cors({
-  origin: ['https://ramachandirane.com', 'https://www.ramachandirane.com', 'http://localhost:5173'],
+  origin: allowedOrigins,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
@@ -51,7 +55,7 @@ app.use(cors({
 
 // Handle preflight requests explicitly
 app.options('*', cors({
-  origin: ['https://ramachandirane.com', 'https://www.ramachandirane.com', 'http://localhost:5173'],
+  origin: allowedOrigins,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
