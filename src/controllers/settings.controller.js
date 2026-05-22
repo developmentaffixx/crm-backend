@@ -68,7 +68,7 @@ exports.createRole = async (req, res) => {
     const roleId = result.insertId;
 
     // Seed empty permissions for all 12 modules
-    const modules = ['dashboard','projects','tasks','tickets','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings'];
+    const modules = ['dashboard','projects','tasks','tickets','meetings','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings'];
     const permValues = modules.map(m => [roleId, m, 0, 0, 0, 0]);
     await db.query(
       'INSERT IGNORE INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete) VALUES ?',

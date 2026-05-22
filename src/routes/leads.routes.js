@@ -7,7 +7,10 @@ const leadsController = require('../controllers/leads.controller');
 // All lead routes require authentication
 router.use(authenticate);
 
-// GET  /api/leads          — list leads (filtered by role)
+// GET  /api/leads/reminders/upcoming — follow-up reminders (must be before /:id)
+router.get('/reminders/upcoming', leadsController.getFollowUpReminders);
+
+// GET  /api/leads          — list leads (filtered by role, paginated, sortable)
 router.get('/', leadsController.list);
 
 // POST /api/leads          — create lead
@@ -22,6 +25,13 @@ router.get('/:id', param('id').isInt(), leadsController.getOne);
 
 // PUT  /api/leads/:id      — update lead
 router.put('/:id', param('id').isInt(), leadsController.update);
+
+// PATCH /api/leads/:id/status — quick status change
+router.patch(
+  '/:id/status',
+  [param('id').isInt(), body('status').notEmpty().withMessage('Status is required')],
+  leadsController.updateStatus
+);
 
 // DELETE /api/leads/:id    — soft-delete lead
 router.delete('/:id', param('id').isInt(), leadsController.remove);
