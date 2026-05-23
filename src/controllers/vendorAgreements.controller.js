@@ -347,11 +347,13 @@ exports.generate = async (req, res) => {
       );
       if (svcTemplates.length) {
         combinedHtml += '<div style="page-break-before: always;"></div>';
+        combinedHtml += '<div class="page-section">';
         let svcHtml = applyReplacements(svcTemplates[0].content);
         if (svc.fee) {
           svcHtml = svcHtml.replace(/{{service_fee}}/g, Number(svc.fee).toLocaleString('en-IN'));
         }
         combinedHtml += svcHtml;
+        combinedHtml += '</div>';
       }
     }
 
@@ -359,6 +361,7 @@ exports.generate = async (req, res) => {
     const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  @page { margin: 0; }
   body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 0; }
   .letterhead-bg {
     position: fixed;
@@ -370,6 +373,7 @@ exports.generate = async (req, res) => {
   }
   .letterhead-bg img { width: 100%; height: 100%; }
   .content-wrapper { padding: 26mm 20mm 22mm 20mm; font-size: 12px; line-height: 1.7; color: #222; }
+  .page-section { padding-top: 26mm; }
   h1 { font-size: 18px; font-weight: 700; text-align: center; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 1px; }
   h2 { font-size: 13px; font-weight: 700; margin: 18px 0 8px; }
   p { margin-bottom: 8px; text-align: justify; }

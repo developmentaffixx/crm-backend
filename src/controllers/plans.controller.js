@@ -244,9 +244,70 @@ exports.deletePlan = async (req, res) => {
   }
 };
 
+/**
+ * PUT /api/plans/plans/reorder — reorder plans within a service
+ * Body: { serviceId, planIds: [id1, id2, id3, ...] }
+ */
+exports.reorderPlans = async (req, res) => {
+  const { serviceId, planIds } = req.body;
+  if (!serviceId || !planIds || !Array.isArray(planIds)) {
+    return res.status(400).json({ message: 'serviceId and planIds array are required' });
+  }
+
+  try {
+    for (let i = 0; i < planIds.length; i++) {
+      await db.query('UPDATE plans SET sort_order = ? WHERE id = ? AND service_id = ?', [i, planIds[i], serviceId]);
+    }
+    return res.json({ message: 'Plans reordered' });
+  } catch (err) {
+    console.error('Plan reorder error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/plans/plans/:id/toggle-active — toggle plan active status
+ */
+exports.togglePlanActive = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM plans WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Plan not found' });
+
+    const newStatus = rows[0].is_active ? 0 : 1;
+    await db.query('UPDATE plans SET is_active = ? WHERE id = ?', [newStatus, req.params.id]);
+
+    const [updated] = await db.query('SELECT * FROM plans WHERE id = ?', [req.params.id]);
+    return res.json(updated[0]);
+  } catch (err) {
+    console.error('Plan toggle active error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SERVICE FEATURES (for comparison table)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * PUT /api/plans/service-features/reorder — reorder service features
+ * Body: { serviceId, featureIds: [id1, id2, id3, ...] }
+ */
+exports.reorderServiceFeatures = async (req, res) => {
+  const { serviceId, featureIds } = req.body;
+  if (!serviceId || !featureIds || !Array.isArray(featureIds)) {
+    return res.status(400).json({ message: 'serviceId and featureIds array are required' });
+  }
+
+  try {
+    for (let i = 0; i < featureIds.length; i++) {
+      await db.query('UPDATE service_features SET sort_order = ? WHERE id = ? AND service_id = ?', [i, featureIds[i], serviceId]);
+    }
+    return res.json({ message: 'Features reordered' });
+  } catch (err) {
+    console.error('Feature reorder error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
 
 /**
  * POST /api/plans/services/:serviceId/features — add a service feature

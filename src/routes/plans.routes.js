@@ -27,6 +27,9 @@ router.delete('/services/:id', param('id').isInt(), plansController.deleteServic
 
 // ── Plans ─────────────────────────────────────────────────────────────────────
 
+// PUT /api/plans/plans/reorder — reorder plans within a service (must be before :id routes)
+router.put('/plans/reorder', plansController.reorderPlans);
+
 // POST /api/plans/services/:serviceId/plans — create plan for a service
 router.post(
   '/services/:serviceId/plans',
@@ -43,7 +46,13 @@ router.put('/plans/:id', param('id').isInt(), plansController.updatePlan);
 // DELETE /api/plans/plans/:id — soft-delete plan
 router.delete('/plans/:id', param('id').isInt(), plansController.deletePlan);
 
+// PUT /api/plans/plans/:id/toggle-active — toggle plan active status
+router.put('/plans/:id/toggle-active', param('id').isInt(), plansController.togglePlanActive);
+
 // ── Service Features (comparison table) ───────────────────────────────────────
+
+// PUT /api/plans/service-features/reorder — reorder features within a service (must be before :id routes)
+router.put('/service-features/reorder', plansController.reorderServiceFeatures);
 
 // POST /api/plans/services/:serviceId/features — add feature row
 router.post(

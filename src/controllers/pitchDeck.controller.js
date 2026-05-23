@@ -1,19 +1,21 @@
 const db = require('../config/db');
 
-// ─── Helper: Generate Pitch Deck ID (PCH-CLIENT-###) ─────────────────────────
-// e.g. PCH-AFXCL001-001 — sequence per client, never resets
+// ─── Helper: Generate Pitch Deck ID (PCH-LEADID-###) ─────────────────────────
+// e.g. PCH-LD250522001-001 — uses lead_id (without dashes), sequence per lead
 async function generatePitchDeckId(leadId) {
-  // Get client_code from the lead
-  const [leadRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [leadId]);
-  const clientCode = leadRows[0]?.client_code || 'UNKNOWN';
+  // Get lead_id (format: LD-YYMMDD-###) from the lead
+  const [leadRows] = await db.query('SELECT lead_id FROM leads WHERE id = ?', [leadId]);
+  const rawLeadId = leadRows[0]?.lead_id || 'UNKNOWN';
+  // Strip dashes: LD-250522-001 → LD250522001
+  const cleanLeadId = rawLeadId.replace(/-/g, '');
 
-  // Count existing pitch decks for this client
+  // Count existing pitch decks for this lead
   const [rows] = await db.query(
     `SELECT COUNT(*) AS cnt FROM pitch_decks WHERE lead_id = ? AND pitch_deck_id IS NOT NULL`,
     [leadId]
   );
   const seq = String((rows[0]?.cnt || 0) + 1).padStart(3, '0');
-  return `PCH-${clientCode}-${seq}`;
+  return `PCH-${cleanLeadId}-${seq}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,6 +63,7 @@ exports.getOne = async (req, res) => {
               pdi.light_bg AS theme_light_bg,
               pdi.light_accent AS theme_light_accent,
               pdi.layout_variant,
+              pdi.slide_config,
               pdi.img_hero, pdi.img_team, pdi.img_services,
               pdi.img_goals, pdi.img_plans, pdi.img_thanks
        FROM pitch_decks pd
@@ -120,6 +123,33 @@ exports.getOne = async (req, res) => {
     }
     deck.selected_plans = plans;
 
+    // Service features from JSON column (What We Deliver slide)
+    if (deck.service_features_data && typeof deck.service_features_data === 'string') {
+      deck.service_features = JSON.parse(deck.service_features_data);
+    } else {
+      deck.service_features = deck.service_features_data || [];
+    }
+
+    // Parse JSON fields
+    if (deck.opportunity_stats && typeof deck.opportunity_stats === 'string') {
+      deck.opportunity_stats = JSON.parse(deck.opportunity_stats);
+    }
+    if (deck.ad_investment && typeof deck.ad_investment === 'string') {
+      deck.ad_investment = JSON.parse(deck.ad_investment);
+    }
+    if (deck.investment_summary && typeof deck.investment_summary === 'string') {
+      deck.investment_summary = JSON.parse(deck.investment_summary);
+    }
+    if (deck.why_us && typeof deck.why_us === 'string') {
+      deck.why_us = JSON.parse(deck.why_us);
+    }
+    if (deck.cta_steps && typeof deck.cta_steps === 'string') {
+      deck.cta_steps = JSON.parse(deck.cta_steps);
+    }
+    if (deck.slide_config && typeof deck.slide_config === 'string') {
+      deck.slide_config = JSON.parse(deck.slide_config);
+    }
+
     return res.json(deck);
   } catch (err) {
     console.error('PitchDeck getOne error:', err);
@@ -134,7 +164,9 @@ exports.create = async (req, res) => {
   const {
     lead_id, industry_id, title,
     company_name, company_tagline, company_description, company_logo_url,
-    problems, selected_services, goals, selected_plans,
+    opportunity_intro, opportunity_stats, ad_investment, investment_summary, why_us,
+    cta_title, cta_subtitle, cta_steps,
+    problems, selected_services, service_features, goals, selected_plans,
     thanks_message, contact_name, contact_email, contact_phone, contact_website,
     status
   } = req.body;
@@ -149,13 +181,22 @@ exports.create = async (req, res) => {
     // Insert main pitch deck
     const [result] = await db.query(
       `INSERT INTO pitch_decks (pitch_deck_id, lead_id, industry_id, title, company_name, company_tagline, company_description,
-        company_logo_url, thanks_message, contact_name, contact_email, contact_phone, contact_website,
+        company_logo_url, opportunity_intro, opportunity_stats, ad_investment, investment_summary, why_us,
+        cta_title, cta_subtitle, cta_steps,
+        thanks_message, contact_name, contact_email, contact_phone, contact_website,
         status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         pitch_deck_id,
         lead_id, industry_id || null, title, company_name || null, company_tagline || null,
         company_description || null, company_logo_url || null,
+        opportunity_intro || null,
+        opportunity_stats ? JSON.stringify(opportunity_stats) : null,
+        ad_investment ? JSON.stringify(ad_investment) : null,
+        investment_summary ? JSON.stringify(investment_summary) : null,
+        why_us ? JSON.stringify(why_us) : null,
+        cta_title || null, cta_subtitle || null,
+        cta_steps ? JSON.stringify(cta_steps) : null,
         thanks_message || null, contact_name || null, contact_email || null,
         contact_phone || null, contact_website || null,
         status || 'final', req.user.id
@@ -200,6 +241,15 @@ exports.create = async (req, res) => {
       );
     }
 
+    // Insert service features (What We Deliver)
+    if (service_features && service_features.length > 0) {
+      // Store all service features as JSON (supports both linked and template-default items)
+      await db.query(
+        'UPDATE pitch_decks SET service_features_data = ? WHERE id = ?',
+        [JSON.stringify(service_features), deckId]
+      );
+    }
+
     // Return the created deck
     const [deck] = await db.query('SELECT * FROM pitch_decks WHERE id = ?', [deckId]);
     return res.status(201).json(deck[0]);
@@ -220,7 +270,9 @@ exports.update = async (req, res) => {
     const {
       lead_id, industry_id, title,
       company_name, company_tagline, company_description, company_logo_url,
-      problems, selected_services, goals, selected_plans,
+      opportunity_intro, opportunity_stats, ad_investment, investment_summary, why_us,
+      cta_title, cta_subtitle, cta_steps,
+      problems, selected_services, service_features, goals, selected_plans,
       thanks_message, contact_name, contact_email, contact_phone, contact_website,
       status
     } = req.body;
@@ -230,6 +282,8 @@ exports.update = async (req, res) => {
       `UPDATE pitch_decks SET
         lead_id = ?, industry_id = ?, title = ?, company_name = ?, company_tagline = ?,
         company_description = ?, company_logo_url = ?,
+        opportunity_intro = ?, opportunity_stats = ?, ad_investment = ?,
+        investment_summary = ?, why_us = ?, cta_title = ?, cta_subtitle = ?, cta_steps = ?,
         thanks_message = ?, contact_name = ?, contact_email = ?,
         contact_phone = ?, contact_website = ?, status = ?
        WHERE id = ?`,
@@ -238,6 +292,14 @@ exports.update = async (req, res) => {
         title || rows[0].title,
         company_name ?? rows[0].company_name, company_tagline ?? rows[0].company_tagline,
         company_description ?? rows[0].company_description, company_logo_url ?? rows[0].company_logo_url,
+        opportunity_intro !== undefined ? (opportunity_intro || null) : rows[0].opportunity_intro,
+        opportunity_stats !== undefined ? (opportunity_stats ? JSON.stringify(opportunity_stats) : null) : rows[0].opportunity_stats,
+        ad_investment !== undefined ? (ad_investment ? JSON.stringify(ad_investment) : null) : rows[0].ad_investment,
+        investment_summary !== undefined ? (investment_summary ? JSON.stringify(investment_summary) : null) : rows[0].investment_summary,
+        why_us !== undefined ? (why_us ? JSON.stringify(why_us) : null) : rows[0].why_us,
+        cta_title !== undefined ? (cta_title || null) : rows[0].cta_title,
+        cta_subtitle !== undefined ? (cta_subtitle || null) : rows[0].cta_subtitle,
+        cta_steps !== undefined ? (cta_steps ? JSON.stringify(cta_steps) : null) : rows[0].cta_steps,
         thanks_message ?? rows[0].thanks_message, contact_name ?? rows[0].contact_name,
         contact_email ?? rows[0].contact_email, contact_phone ?? rows[0].contact_phone,
         contact_website ?? rows[0].contact_website, status || rows[0].status,
@@ -291,6 +353,14 @@ exports.update = async (req, res) => {
           [values]
         );
       }
+    }
+
+    // Replace service features
+    if (service_features !== undefined) {
+      await db.query(
+        'UPDATE pitch_decks SET service_features_data = ? WHERE id = ?',
+        [service_features.length > 0 ? JSON.stringify(service_features) : null, req.params.id]
+      );
     }
 
     const [updated] = await db.query('SELECT * FROM pitch_decks WHERE id = ?', [req.params.id]);
