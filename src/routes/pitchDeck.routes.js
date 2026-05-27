@@ -4,7 +4,15 @@ const { param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const pitchDeckController = require('../controllers/pitchDeck.controller');
 
-// All pitch deck routes require authentication
+// PDF route BEFORE global auth (handles token via query param)
+router.get('/:id/pdf', param('id').isInt(), (req, res, next) => {
+  if (req.query.token) {
+    req.headers['authorization'] = `Bearer ${req.query.token}`;
+  }
+  next();
+}, authenticate, pitchDeckController.generatePdf);
+
+// All other pitch deck routes require authentication via header
 router.use(authenticate);
 
 // GET  /api/pitch-decks — list all pitch decks

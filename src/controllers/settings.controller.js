@@ -235,7 +235,7 @@ exports.updateRolePermissions = async (req, res) => {
 exports.getUsers = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT u.id, u.first_name, u.last_name, u.email, u.phone, u.avatar_url,
+      `SELECT u.id, u.emp_code, u.first_name, u.last_name, u.email, u.phone, u.avatar_url,
               u.department, u.designation, u.date_of_joining, u.reporting_to,
               u.is_admin, u.is_active, u.role_id, u.created_at, u.last_login_at,
               u.invite_token, u.invite_sent_at,
@@ -281,6 +281,10 @@ exports.createUser = async (req, res) => {
     );
 
     const newUserId = result.insertId;
+
+    // Generate emp_code: EMP###
+    const emp_code = `EMP${String(newUserId).padStart(3, '0')}`;
+    await db.query('UPDATE users SET emp_code = ? WHERE id = ?', [emp_code, newUserId]);
 
     // Fix #7: Log initial role assignment in role history if a role was given
     if (role_id) {

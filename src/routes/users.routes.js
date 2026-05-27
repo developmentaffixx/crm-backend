@@ -53,4 +53,13 @@ router.post('/me/leaves', usersController.applyLeave);
 // DELETE /api/users/me/leaves/:id — cancel leave
 router.delete('/me/leaves/:id', usersController.cancelLeave);
 
+// GET  /api/users/:id/employment — get employment/probation status (admin)
+router.get('/:id/employment', usersController.getEmployment);
+
+// PUT  /api/users/:id/employment — update employment/probation status (admin)
+router.put('/:id/employment', usersController.updateEmployment);
+
+// GET  /api/users/:id/leave-balance — get paid leave ledger (admin)
+router.get('/:id/leave-balance', usersController.getLeaveBalance);
+
 module.exports = router;

@@ -56,3 +56,21 @@ exports.update = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+/**
+ * GET /api/rule-book
+ * Public (authenticated) endpoint to fetch rule book content for all users
+ */
+exports.getRuleBook = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM document_templates WHERE template_key = ?',
+      ['rule_book']
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Rule Book not configured' });
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error('Rule book fetch error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};

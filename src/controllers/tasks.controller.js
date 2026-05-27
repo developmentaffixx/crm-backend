@@ -97,7 +97,7 @@ exports.list = async (req, res) => {
 
     // Get paginated results (GROUP BY to avoid duplicates from JOINs)
     const [rows] = await db.query(
-      `SELECT t.id, t.title, t.description, t.assigned_to, t.created_by,
+      `SELECT t.id, t.task_id_code, t.title, t.description, t.assigned_to, t.created_by,
               t.start_date, t.deadline, t.priority, t.status, t.is_active,
               t.deleted, t.created_at, t.updated_at,
               COALESCE((SELECT SUM(tl.duration) FROM task_time_logs tl WHERE tl.task_id = t.id), 0) AS time_spent,
@@ -182,7 +182,7 @@ exports.list = async (req, res) => {
 exports.getOne = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT t.id, t.title, t.description, t.assigned_to, t.created_by,
+      `SELECT t.id, t.task_id_code, t.title, t.description, t.assigned_to, t.created_by,
               t.start_date, t.deadline, t.priority, t.status, t.is_active,
               t.deleted, t.created_at, t.updated_at, t.timer_started_at,
               COALESCE((SELECT SUM(tl.duration) FROM task_time_logs tl WHERE tl.task_id = t.id), 0) AS time_spent,
@@ -259,10 +259,27 @@ exports.create = async (req, res) => {
     const assignee  = assigned_to || req.user.id;
     const isActive  = req.user.is_admin ? 1 : 0;
 
+    // Generate task_id_code: TSK-YYMMDD-###
+    const now = new Date();
+    const yy = String(now.getFullYear()).slice(-2);
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const datePrefix = `TSK-${yy}${mm}${dd}`;
+    const [lastTask] = await db.query(
+      `SELECT task_id_code FROM tasks WHERE task_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
+      [`${datePrefix}-%`]
+    );
+    let taskSeq = 1;
+    if (lastTask.length > 0 && lastTask[0].task_id_code) {
+      const parts = lastTask[0].task_id_code.split('-');
+      taskSeq = parseInt(parts[parts.length - 1], 10) + 1;
+    }
+    const task_id_code = `${datePrefix}-${String(taskSeq).padStart(3, '0')}`;
+
     const [result] = await db.query(
-      `INSERT INTO tasks (title, description, assigned_to, created_by, start_date, deadline, priority, status, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'to_do', ?)`,
-      [title, description || null, assignee, req.user.id, start_date || null, deadline || null, priority || 'medium', isActive]
+      `INSERT INTO tasks (task_id_code, title, description, assigned_to, created_by, start_date, deadline, priority, status, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'to_do', ?)`,
+      [task_id_code, title, description || null, assignee, req.user.id, start_date || null, deadline || null, priority || 'medium', isActive]
     );
 
     const taskId = result.insertId;

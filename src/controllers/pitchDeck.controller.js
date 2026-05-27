@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const puppeteer = require('puppeteer');
 
 // ─── Helper: Generate Pitch Deck ID (PCH-LEADID-###) ─────────────────────────
 // e.g. PCH-LD250522001-001 — uses lead_id (without dashes), sequence per lead
@@ -386,3 +387,82 @@ exports.remove = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GENERATE PDF - Builds HTML directly, renders with Puppeteer, returns URL
+// ─────────────────────────────────────────────────────────────────────────────
+exports.generatePdf = async (req, res) => {
+  try {
+    const puppeteer = require('puppeteer');
+    const path = require('path');
+    const fs = require('fs');
+
+    // Fetch deck data
+    const [rows] = await db.query(
+      `SELECT pd.*, l.name AS lead_name, l.business_name AS lead_business_name, pdi.slug AS industry_slug
+       FROM pitch_decks pd LEFT JOIN leads l ON l.id = pd.lead_id
+       LEFT JOIN pitch_deck_industries pdi ON pdi.id = pd.industry_id
+       WHERE pd.id = ? AND pd.deleted = 0`, [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Pitch deck not found' });
+    const deck = rows[0];
+
+    const [problems] = await db.query('SELECT * FROM pitch_deck_problems WHERE pitch_deck_id = ? ORDER BY type, sort_order', [deck.id]);
+    const [goals] = await db.query('SELECT * FROM pitch_deck_goals WHERE pitch_deck_id = ? ORDER BY month, sort_order', [deck.id]);
+    const [plans] = await db.query(
+      `SELECT pdp.plan_id, p.name, p.price, p.duration, s.name AS service_name
+       FROM pitch_deck_plans pdp JOIN plans p ON p.id = pdp.plan_id JOIN services s ON s.id = p.service_id
+       WHERE pdp.pitch_deck_id = ?`, [deck.id]);
+    for (const plan of plans) {
+      const [features] = await db.query('SELECT feature FROM plan_features WHERE plan_id = ? ORDER BY sort_order', [plan.plan_id]);
+      plan.features = features;
+    }
+
+    const parseJson = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : v || null; } catch { return null; } };
+    const opportunityStats = parseJson(deck.opportunity_stats) || [];
+    const whyUs = parseJson(deck.why_us) || [];
+    const ctaSteps = parseJson(deck.cta_steps) || [];
+    const painPoints = problems.filter(p => p.type === 'pain_point');
+    const gaps = problems.filter(p => p.type === 'gap');
+    const opps = problems.filter(p => p.type === 'opportunity');
+
+    // Convert images to base64
+    const toBase64 = (filename) => {
+      const tryPaths = [
+        path.join(__dirname, '../../../frontend/src/images', filename),
+        path.join(__dirname, '../../uploads', filename),
+      ];
+      for (const p of tryPaths) {
+        if (fs.existsSync(p)) {
+          const ext = path.extname(p).toLowerCase();
+          const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' }[ext] || 'image/png';
+          return `data:${mime};base64,${fs.readFileSync(p).toString('base64')}`;
+        }
+      }
+      return '';
+    };
+    const bg = toBase64(deck.industry_slug === 'd2c-clothing' ? 'clothings.webp' : 'default.jpg');
+    const logo = toBase64('logo2.png');
+    const cn = deck.company_name || '';
+    const buildPdfHtml = require('../helpers/pitchDeckPdfHtml');
+    const html = buildPdfHtml({ deck, painPoints, gaps, opps, goals, plans, opportunityStats, whyUs, ctaSteps, bg, logo });
+
+    const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    await new Promise(r => setTimeout(r, 1500));
+
+    const pdfBuffer = await page.pdf({ width: '1280px', height: '720px', printBackground: true, margin: { top: '0', right: '0', bottom: '0', left: '0' } });
+    await browser.close();
+
+    const tempDir = path.join(__dirname, '../../uploads/documents');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    const filename = `pitch_deck_${req.params.id}_${Date.now()}.pdf`;
+    fs.writeFileSync(path.join(tempDir, filename), pdfBuffer);
+
+    return res.json({ url: `/uploads/documents/${filename}` });
+  } catch (err) {
+    console.error('PitchDeck generatePdf error:', err);
+    return res.status(500).json({ message: 'Failed to generate PDF: ' + err.message });
+  }
+};
+

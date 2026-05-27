@@ -100,7 +100,12 @@ exports.startTimer = async (req, res) => {
       await db.query('UPDATE tasks SET timer_started_at = ? WHERE id = ?', [now, task.id]);
     }
 
-    return res.json({ timer_started_at: now, time_spent: task.time_spent });
+    // Auto-change status to "in_progress" when timer starts (if currently "to_do")
+    if (task.status === 'to_do') {
+      await db.query('UPDATE tasks SET status = ? WHERE id = ?', ['in_progress', task.id]);
+    }
+
+    return res.json({ timer_started_at: now, time_spent: task.time_spent, status: task.status === 'to_do' ? 'in_progress' : task.status });
   } catch (err) {
     console.error('startTimer error:', err);
     return res.status(500).json({ message: 'Server error' });

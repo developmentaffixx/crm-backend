@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { getExpectedHoursForDate, getExpectedHoursForRange } = require('./workSchedule.controller');
 
 exports.clockIn = async (req, res) => {
   try {
@@ -170,11 +171,35 @@ exports.getToday = async (req, res) => {
       [userId]
     );
 
+    // Get today's ticket time
+    const [ticketTimerResult] = await db.query(
+      'SELECT COALESCE(SUM(minutes), 0) AS total FROM ticket_time_logs WHERE user_id = ? AND DATE(created_at) = CURDATE()',
+      [userId]
+    );
+
+    // Get today's meeting time (completed meetings)
+    const [meetingTimerResult] = await db.query(
+      `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE (m.created_by = ? OR mm.user_id = ?) 
+       AND m.status = 'completed' AND m.deleted = 0
+       AND m.meeting_date = CURDATE()`,
+      [userId, userId]
+    );
+
+    // Get today's schedule info (full/half/holiday)
+    const today = new Date().toISOString().split('T')[0];
+    const todaySchedule = await getExpectedHoursForDate(today);
+
     return res.json({
       attendance: attendance[0] || null,
       plans,
       active_afs: activeAfs[0] || null,
-      total_task_seconds: taskTimerResult[0].total
+      total_task_seconds: taskTimerResult[0].total,
+      total_ticket_seconds: ticketTimerResult[0].total * 60,
+      total_meeting_seconds: meetingTimerResult[0].total * 60,
+      today_schedule: todaySchedule
     });
   } catch (err) {
     console.error('Get today error:', err);
@@ -186,49 +211,52 @@ exports.getMyWeek = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const [settings] = await db.query('SELECT * FROM attendance_settings WHERE id = 1');
-    const { work_hours_per_day } = settings[0];
-
     const [weekRange] = await db.query(
       `SELECT DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY) AS week_start,
               DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 6 DAY) AS week_end`
     );
     const { week_start, week_end } = weekRange[0];
 
+    // Only calculate up to today (not future days)
+    const today = new Date();
+    const endDateObj = new Date(Math.min(today, new Date(week_end)));
+    const endDate = endDateObj.toISOString().split('T')[0];
+
+    // Use the new schedule-aware calculation
+    const { totalExpected, dailyBreakdown } = await getExpectedHoursForRange(week_start, endDate, userId);
+
     const [records] = await db.query(
       'SELECT * FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY date',
       [userId, week_start, week_end]
     );
 
-    const [leaves] = await db.query(
-      `SELECT * FROM leaves WHERE user_id = ? AND status = 'approved' AND deleted = 0
-       AND from_date <= ? AND to_date >= ?`,
-      [userId, week_end, week_start]
+    // Calculate completed hours (productive time = task + ticket + meeting)
+    const [taskTimeResult] = await db.query(
+      `SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs 
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?`,
+      [userId, week_start, endDate]
+    );
+    const [ticketTimeResult] = await db.query(
+      `SELECT COALESCE(SUM(minutes), 0) AS total FROM ticket_time_logs 
+       WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ?`,
+      [userId, week_start, endDate]
+    );
+    const [meetingTimeResult] = await db.query(
+      `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE (m.created_by = ? OR mm.user_id = ?) 
+       AND m.status = 'completed' AND m.deleted = 0
+       AND m.meeting_date BETWEEN ? AND ?`,
+      [userId, userId, week_start, endDate]
     );
 
-    let fullLeaveDays = 0;
-    let halfLeaveDays = 0;
-    for (const leave of leaves) {
-      const leaveStart = new Date(Math.max(new Date(leave.from_date), new Date(week_start)));
-      const leaveEnd = new Date(Math.min(new Date(leave.to_date), new Date(week_end)));
-      const days = Math.floor((leaveEnd - leaveStart) / (1000 * 60 * 60 * 24)) + 1;
-      if (leave.leave_type === 'half_day') {
-        halfLeaveDays += days;
-      } else {
-        fullLeaveDays += days;
-      }
-    }
+    const taskHours = taskTimeResult[0].total / 3600;
+    const ticketHours = ticketTimeResult[0].total / 60;
+    const meetingHours = meetingTimeResult[0].total / 60;
+    const completed = taskHours + ticketHours + meetingHours;
 
-    const today = new Date();
-    const endDate = new Date(Math.min(today, new Date(week_end)));
-    let workingDays = 0;
-    for (let d = new Date(week_start); d <= endDate; d.setDate(d.getDate() + 1)) {
-      const day = d.getDay();
-      if (day !== 0 && day !== 6) workingDays++;
-    }
-
-    const required = (workingDays * work_hours_per_day) - (fullLeaveDays * work_hours_per_day) - (halfLeaveDays * work_hours_per_day / 2);
-    const completed = records.reduce((sum, r) => sum + (r.total_served_seconds || 0), 0) / 3600;
+    const required = totalExpected;
     const remaining = Math.max(0, required - completed);
     const deficit = Math.max(0, required - completed);
 
@@ -246,7 +274,8 @@ exports.getMyWeek = async (req, res) => {
       completed: parseFloat(completed.toFixed(2)),
       remaining: parseFloat(remaining.toFixed(2)),
       deficit: parseFloat(deficit.toFixed(2)),
-      daily_breakdown
+      daily_breakdown,
+      schedule_breakdown: dailyBreakdown
     });
   } catch (err) {
     console.error('Get my week error:', err);
@@ -272,13 +301,15 @@ exports.getMyMonth = async (req, res) => {
       [userId]
     );
 
+    // Use schedule-aware working days calculation
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    let totalWorkingDays = 0;
-    for (let d = new Date(monthStart); d <= now; d.setDate(d.getDate() + 1)) {
-      const day = d.getDay();
-      if (day !== 0 && day !== 6) totalWorkingDays++;
-    }
+    const startDate = monthStart.toISOString().split('T')[0];
+    const endDate = now.toISOString().split('T')[0];
+
+    const { dailyBreakdown } = await getExpectedHoursForRange(startDate, endDate, userId);
+    // Count working days = days where expected_hours > 0
+    const totalWorkingDays = dailyBreakdown.filter(d => d.expected_hours > 0).length;
 
     const statusCounts = { on_time: 0, grace: 0, late: 0 };
     for (const row of records) {
@@ -479,9 +510,6 @@ exports.adminGetToday = async (req, res) => {
 
 exports.adminWeekReport = async (req, res) => {
   try {
-    const [settings] = await db.query('SELECT * FROM attendance_settings WHERE id = 1');
-    const { work_hours_per_day } = settings[0];
-
     const [weekRange] = await db.query(
       `SELECT DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY) AS week_start,
               DATE_ADD(DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY), INTERVAL 6 DAY) AS week_end`
@@ -492,50 +520,55 @@ exports.adminWeekReport = async (req, res) => {
       'SELECT id, first_name, last_name, department FROM users WHERE is_active = 1 AND deleted = 0'
     );
 
+    // Only calculate up to today
     const today = new Date();
-    const endDate = new Date(Math.min(today, new Date(week_end)));
-    let workingDays = 0;
-    for (let d = new Date(week_start); d <= endDate; d.setDate(d.getDate() + 1)) {
-      const day = d.getDay();
-      if (day !== 0 && day !== 6) workingDays++;
-    }
+    const endDateObj = new Date(Math.min(today, new Date(week_end)));
+    const endDate = endDateObj.toISOString().split('T')[0];
 
     const report = [];
 
     for (const user of users) {
-      const [records] = await db.query(
-        'SELECT total_served_seconds FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ?',
-        [user.id, week_start, week_end]
+      // Use schedule-aware calculation with leave deduction
+      const { totalExpected } = await getExpectedHoursForRange(week_start, endDate, user.id);
+
+      // Calculate productive hours (tasks + tickets + meetings)
+      const [taskTimeResult] = await db.query(
+        `SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs 
+         WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?`,
+        [user.id, week_start, endDate]
+      );
+      const [ticketTimeResult] = await db.query(
+        `SELECT COALESCE(SUM(minutes), 0) AS total FROM ticket_time_logs 
+         WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ?`,
+        [user.id, week_start, endDate]
+      );
+      const [meetingTimeResult] = await db.query(
+        `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
+         FROM meetings m
+         LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+         WHERE (m.created_by = ? OR mm.user_id = ?) 
+         AND m.status = 'completed' AND m.deleted = 0
+         AND m.meeting_date BETWEEN ? AND ?`,
+        [user.id, user.id, week_start, endDate]
       );
 
-      const [leaves] = await db.query(
-        `SELECT * FROM leaves WHERE user_id = ? AND status = 'approved' AND deleted = 0
-         AND from_date <= ? AND to_date >= ?`,
-        [user.id, week_end, week_start]
-      );
+      const taskHours = taskTimeResult[0].total / 3600;
+      const ticketHours = ticketTimeResult[0].total / 60;
+      const meetingHours = meetingTimeResult[0].total / 60;
+      const completed = taskHours + ticketHours + meetingHours;
 
-      let fullLeaveDays = 0;
-      let halfLeaveDays = 0;
-      for (const leave of leaves) {
-        const leaveStart = new Date(Math.max(new Date(leave.from_date), new Date(week_start)));
-        const leaveEnd = new Date(Math.min(new Date(leave.to_date), new Date(week_end)));
-        const days = Math.floor((leaveEnd - leaveStart) / (1000 * 60 * 60 * 24)) + 1;
-        if (leave.leave_type === 'half_day') halfLeaveDays += days;
-        else fullLeaveDays += days;
-      }
-
-      const required = (workingDays * work_hours_per_day) - (fullLeaveDays * work_hours_per_day) - (halfLeaveDays * work_hours_per_day / 2);
-      const completed = records.reduce((sum, r) => sum + (r.total_served_seconds || 0), 0) / 3600;
-      const deficit = Math.max(0, required - completed);
+      const deficit = Math.max(0, totalExpected - completed);
 
       report.push({
         user_id: user.id,
         name: user.first_name + ' ' + user.last_name,
         department: user.department,
-        required: parseFloat(required.toFixed(2)),
+        required: parseFloat(totalExpected.toFixed(2)),
         completed: parseFloat(completed.toFixed(2)),
         deficit: parseFloat(deficit.toFixed(2)),
-        leave_days: fullLeaveDays + halfLeaveDays * 0.5
+        task_hours: parseFloat(taskHours.toFixed(2)),
+        ticket_hours: parseFloat(ticketHours.toFixed(2)),
+        meeting_hours: parseFloat(meetingHours.toFixed(2))
       });
     }
 

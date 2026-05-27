@@ -10,22 +10,22 @@ exports.login = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { email, password } = req.body;
+  const { login_id, password } = req.body;
 
   try {
     const [rows] = await db.query(
-      'SELECT * FROM users WHERE email = ? AND deleted = 0 AND is_active = 1',
-      [email]
+      'SELECT * FROM users WHERE emp_code = ? AND deleted = 0 AND is_active = 1',
+      [login_id.toUpperCase()]
     );
 
     if (rows.length === 0) {
-      return res.status(401).json({ message: 'Invalid email or password' });
+      return res.status(401).json({ message: 'Invalid Login ID or password' });
     }
 
     const user = rows[0];
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) {
-      return res.status(401).json({ message: 'Invalid email or password' });
+      return res.status(401).json({ message: 'Invalid Login ID or password' });
     }
 
     // Fetch role name if user has a role
@@ -89,6 +89,10 @@ exports.register = async (req, res) => {
       'INSERT INTO users (first_name, last_name, email, password_hash, is_admin) VALUES (?, ?, ?, ?, ?)',
       [first_name, last_name, email, hash, is_admin ? 1 : 0]
     );
+
+    // Generate emp_code: EMP###
+    const emp_code = `EMP${String(result.insertId).padStart(3, '0')}`;
+    await db.query('UPDATE users SET emp_code = ? WHERE id = ?', [emp_code, result.insertId]);
 
     return res.status(201).json({ message: 'User created', id: result.insertId });
   } catch (err) {

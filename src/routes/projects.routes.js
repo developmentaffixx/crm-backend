@@ -41,4 +41,12 @@ router.delete('/:id/tasks/:taskId', [param('id').isInt(), param('taskId').isInt(
 // POST /api/projects/:id/activities  — add activity/note
 router.post('/:id/activities', param('id').isInt(), projectsController.addActivity);
 
+// ── DRS ──
+router.get('/:id/drs', param('id').isInt(), projectsController.getDrs);
+router.post('/:id/drs/:section', param('id').isInt(), projectsController.saveDrs);
+
+// ── IBRS ──
+router.get('/:id/ibrs', param('id').isInt(), projectsController.getIbrs);
+router.post('/:id/ibrs/:section', param('id').isInt(), projectsController.saveIbrs);
+
 module.exports = router;

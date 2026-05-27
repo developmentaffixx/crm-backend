@@ -218,7 +218,7 @@ exports.adminStats = async (req, res) => {
 
 /**
  * GET /api/dashboard/charts/my-productivity
- * Get current user's task timer durations for current week (Mon-Sun)
+ * Get current user's productive hours for current week (tasks + tickets + meetings)
  */
 exports.chartsMyProductivity = async (req, res) => {
   try {
@@ -232,21 +232,67 @@ exports.chartsMyProductivity = async (req, res) => {
     );
     const { week_start, week_end } = weekRange[0];
 
-    const [rows] = await db.query(
+    // Task timer hours per day
+    const [taskRows] = await db.query(
       `SELECT DATE(started_at) AS date, SUM(duration) AS total_seconds
        FROM task_time_logs
        WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
-       GROUP BY DATE(started_at)
-       ORDER BY date`,
+       GROUP BY DATE(started_at)`,
       [userId, week_start, week_end]
     );
 
-    const data = rows.map(row => ({
-      date: row.date,
-      hours: parseFloat((row.total_seconds / 3600).toFixed(2))
-    }));
+    // Ticket time hours per day
+    const [ticketRows] = await db.query(
+      `SELECT DATE(created_at) AS date, SUM(minutes) AS total_minutes
+       FROM ticket_time_logs
+       WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ?
+       GROUP BY DATE(created_at)`,
+      [userId, week_start, week_end]
+    );
 
-    return res.json({ week_start, week_end, data });
+    // Meeting hours per day (completed meetings)
+    const [meetingRows] = await db.query(
+      `SELECT m.meeting_date AS date, SUM(TIMESTAMPDIFF(MINUTE, m.start_time, m.end_time)) AS total_minutes
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE (m.created_by = ? OR mm.user_id = ?)
+       AND m.status = 'completed' AND m.deleted = 0
+       AND m.meeting_date BETWEEN ? AND ?
+       GROUP BY m.meeting_date`,
+      [userId, userId, week_start, week_end]
+    );
+
+    // Get work schedule for reference line
+    const [schedule] = await db.query('SELECT full_day_hours, half_day_hours FROM work_schedule WHERE id = 1');
+    const { full_day_hours } = schedule[0] || { full_day_hours: 8 };
+
+    // Merge all sources by date
+    const dayMap = {};
+    for (const row of taskRows) {
+      const key = row.date instanceof Date ? row.date.toISOString().split('T')[0] : row.date;
+      if (!dayMap[key]) dayMap[key] = { task: 0, ticket: 0, meeting: 0 };
+      dayMap[key].task = row.total_seconds / 3600;
+    }
+    for (const row of ticketRows) {
+      const key = row.date instanceof Date ? row.date.toISOString().split('T')[0] : row.date;
+      if (!dayMap[key]) dayMap[key] = { task: 0, ticket: 0, meeting: 0 };
+      dayMap[key].ticket = row.total_minutes / 60;
+    }
+    for (const row of meetingRows) {
+      const key = row.date instanceof Date ? row.date.toISOString().split('T')[0] : row.date;
+      if (!dayMap[key]) dayMap[key] = { task: 0, ticket: 0, meeting: 0 };
+      dayMap[key].meeting = row.total_minutes / 60;
+    }
+
+    const data = Object.entries(dayMap).map(([date, vals]) => ({
+      date,
+      hours: parseFloat((vals.task + vals.ticket + vals.meeting).toFixed(2)),
+      task_hours: parseFloat(vals.task.toFixed(2)),
+      ticket_hours: parseFloat(vals.ticket.toFixed(2)),
+      meeting_hours: parseFloat(vals.meeting.toFixed(2))
+    })).sort((a, b) => a.date.localeCompare(b.date));
+
+    return res.json({ week_start, week_end, data, target_hours: parseFloat(full_day_hours) });
   } catch (err) {
     console.error('Charts my productivity error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -260,6 +306,7 @@ exports.chartsMyProductivity = async (req, res) => {
 exports.chartsMyAttendance = async (req, res) => {
   try {
     const userId = req.user.id;
+    const { getExpectedHoursForRange } = require('./workSchedule.controller');
 
     // Get current month attendance records grouped by status
     const [records] = await db.query(
@@ -277,14 +324,14 @@ exports.chartsMyAttendance = async (req, res) => {
       [userId]
     );
 
-    // Calculate working days in current month up to today
+    // Use schedule-aware working days calculation
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    let totalWorkingDays = 0;
-    for (let d = new Date(monthStart); d <= now; d.setDate(d.getDate() + 1)) {
-      const day = d.getDay();
-      if (day !== 0 && day !== 6) totalWorkingDays++;
-    }
+    const startDate = monthStart.toISOString().split('T')[0];
+    const endDate = now.toISOString().split('T')[0];
+
+    const { dailyBreakdown } = await getExpectedHoursForRange(startDate, endDate, userId);
+    const totalWorkingDays = dailyBreakdown.filter(d => d.expected_hours > 0).length;
 
     const statusCounts = { on_time: 0, grace: 0, late: 0 };
     for (const row of records) {
@@ -404,11 +451,12 @@ exports.chartsTeamAttendance = async (req, res) => {
 
 /**
  * GET /api/dashboard/charts/team-productivity
- * Admin: Average productive hours across all users for last 7 days
+ * Admin: Average productive hours across all users for last 7 days (tasks + tickets + meetings)
  */
 exports.chartsTeamProductivity = async (req, res) => {
   try {
-    const [rows] = await db.query(
+    // Task hours per day
+    const [taskRows] = await db.query(
       `SELECT DATE(started_at) AS date,
               SUM(duration) / COUNT(DISTINCT user_id) / 3600 AS avg_hours
        FROM task_time_logs
@@ -417,12 +465,56 @@ exports.chartsTeamProductivity = async (req, res) => {
        ORDER BY date`
     );
 
-    const data = rows.map(row => ({
-      date: row.date,
-      avg_hours: parseFloat(parseFloat(row.avg_hours).toFixed(2))
-    }));
+    // Ticket hours per day
+    const [ticketRows] = await db.query(
+      `SELECT DATE(created_at) AS date,
+              SUM(minutes) / COUNT(DISTINCT user_id) / 60 AS avg_hours
+       FROM ticket_time_logs
+       WHERE DATE(created_at) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+       GROUP BY DATE(created_at)
+       ORDER BY date`
+    );
 
-    return res.json({ data });
+    // Meeting hours per day
+    const [meetingRows] = await db.query(
+      `SELECT m.meeting_date AS date,
+              SUM(TIMESTAMPDIFF(MINUTE, m.start_time, m.end_time)) / COUNT(DISTINCT COALESCE(mm.user_id, m.created_by)) / 60 AS avg_hours
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE m.status = 'completed' AND m.deleted = 0
+       AND m.meeting_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+       GROUP BY m.meeting_date
+       ORDER BY date`
+    );
+
+    // Get target from work schedule
+    const [schedule] = await db.query('SELECT full_day_hours FROM work_schedule WHERE id = 1');
+    const targetHours = schedule[0]?.full_day_hours || 8;
+
+    // Merge by date
+    const dayMap = {};
+    for (const row of taskRows) {
+      const key = row.date instanceof Date ? row.date.toISOString().split('T')[0] : row.date;
+      if (!dayMap[key]) dayMap[key] = 0;
+      dayMap[key] += parseFloat(row.avg_hours) || 0;
+    }
+    for (const row of ticketRows) {
+      const key = row.date instanceof Date ? row.date.toISOString().split('T')[0] : row.date;
+      if (!dayMap[key]) dayMap[key] = 0;
+      dayMap[key] += parseFloat(row.avg_hours) || 0;
+    }
+    for (const row of meetingRows) {
+      const key = row.date instanceof Date ? row.date.toISOString().split('T')[0] : row.date;
+      if (!dayMap[key]) dayMap[key] = 0;
+      dayMap[key] += parseFloat(row.avg_hours) || 0;
+    }
+
+    const data = Object.entries(dayMap).map(([date, avg_hours]) => ({
+      date,
+      avg_hours: parseFloat(avg_hours.toFixed(2))
+    })).sort((a, b) => a.date.localeCompare(b.date));
+
+    return res.json({ data, target_hours: parseFloat(targetHours) });
   } catch (err) {
     console.error('Charts team productivity error:', err);
     return res.status(500).json({ message: 'Server error' });

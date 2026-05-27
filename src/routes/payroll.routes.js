@@ -29,6 +29,9 @@ router.delete('/structures/:id', param('id').isInt(), payrollController.removeSt
 // POST /api/payroll/generate — bulk generate payroll for a month
 router.post('/generate', payrollController.generate);
 
+// GET  /api/payroll/cron-logs — last 10 auto-generate run logs
+router.get('/cron-logs', payrollController.cronLogs);
+
 // GET  /api/payroll — list all payroll records
 router.get('/', payrollController.list);
 

@@ -320,3 +320,72 @@ exports.cancelLeave = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+/**
+ * GET /api/users/:id/employment
+ * Get employment status + probation info for an employee (admin only)
+ */
+exports.getEmployment = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, first_name, last_name, employment_status, probation_end_date, date_of_joining
+       FROM users WHERE id = ? AND deleted = 0`,
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'User not found' });
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error('getEmployment error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/users/:id/employment
+ * Update employment_status and probation_end_date (admin only)
+ */
+exports.updateEmployment = async (req, res) => {
+  try {
+    const { employment_status, probation_end_date } = req.body;
+    const [rows] = await db.query('SELECT id FROM users WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ message: 'User not found' });
+
+    await db.query(
+      `UPDATE users SET employment_status = ?, probation_end_date = ?, updated_at = NOW() WHERE id = ?`,
+      [
+        employment_status || 'probation',
+        probation_end_date || null,
+        req.params.id,
+      ]
+    );
+    return res.json({ message: 'Employment status updated' });
+  } catch (err) {
+    console.error('updateEmployment error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/users/:id/leave-balance
+ * Get paid leave ledger for an employee (admin only)
+ */
+exports.getLeaveBalance = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT pll.*
+       FROM paid_leave_ledger pll
+       WHERE pll.employee_id = ?
+       ORDER BY pll.ledger_year DESC, pll.ledger_month DESC
+       LIMIT 12`,
+      [req.params.id]
+    );
+
+    // Current balance = latest closing_balance
+    const currentBalance = rows.length > 0 ? parseFloat(rows[0].closing_balance) : 0;
+
+    return res.json({ ledger: rows, current_balance: currentBalance });
+  } catch (err) {
+    console.error('getLeaveBalance error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};

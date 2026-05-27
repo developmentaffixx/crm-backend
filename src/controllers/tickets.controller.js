@@ -208,12 +208,39 @@ exports.create = async (req, res) => {
   const toInt = (val) => { const n = parseInt(val); return isNaN(n) ? null : n; };
 
   try {
+    // Generate ticket_id_code: TKT-YYMM-CLIENT-###
+    const now = new Date();
+    const yy = String(now.getFullYear()).slice(-2);
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const ymPrefix = `${yy}${mm}`;
+
+    // Get client code from brand_id (which references leads table)
+    let clientCode = 'GEN';
+    if (brand_id) {
+      const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [parseInt(brand_id)]);
+      if (clientRows.length > 0 && clientRows[0].client_code) {
+        clientCode = clientRows[0].client_code;
+      }
+    }
+    const ticketPrefix = `TKT-${ymPrefix}-${clientCode}`;
+    const [lastTicket] = await db.query(
+      `SELECT ticket_id_code FROM tickets WHERE ticket_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
+      [`${ticketPrefix}-%`]
+    );
+    let ticketSeq = 1;
+    if (lastTicket.length > 0 && lastTicket[0].ticket_id_code) {
+      const parts = lastTicket[0].ticket_id_code.split('-');
+      ticketSeq = parseInt(parts[parts.length - 1], 10) + 1;
+    }
+    const ticket_id_code = `${ticketPrefix}-${String(ticketSeq).padStart(3, '0')}`;
+
     const [result] = await db.query(
-      `INSERT INTO tickets (mode, title, description, ticket_type, priority, status,
+      `INSERT INTO tickets (ticket_id_code, mode, title, description, ticket_type, priority, status,
         related_to_type, related_to_id, vendor_name, brand_id, project_id,
         assigned_to, reported_by, due_date, internal_notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        ticket_id_code,
         mode || 'support', title, toNull(description),
         ticket_type || 'General Request', priority || 'medium', status || 'open',
         toNull(related_to_type), toInt(related_to_id), toNull(vendor_name),

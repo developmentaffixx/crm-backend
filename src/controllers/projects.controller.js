@@ -146,6 +146,58 @@ exports.getOne = async (req, res) => {
     );
     project.activities = activities;
 
+    // Fetch related tickets (tickets have project_id field)
+    const [tickets] = await db.query(
+      `SELECT tk.id, tk.title, tk.status, tk.priority, tk.ticket_type, tk.due_date,
+              CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name
+       FROM tickets tk
+       LEFT JOIN users u ON u.id = tk.assigned_to
+       WHERE tk.project_id = ? AND tk.deleted = 0
+       ORDER BY tk.created_at DESC`,
+      [project.id]
+    );
+    project.tickets = tickets;
+
+    // Fetch related shoots (via client)
+    const [shoots] = await db.query(
+      `SELECT s.id, s.project_campaign_name, s.shoot_date, s.start_time, s.end_time,
+              s.location_type, s.city, s.status, s.shoot_status
+       FROM shoots s
+       WHERE s.client_brand_id = ? AND s.deleted = 0
+       ORDER BY s.shoot_date DESC`,
+      [project.client_id || 0]
+    );
+    project.shoots = shoots;
+
+    // Fetch project DRS sections
+    const [drs] = await db.query(
+      `SELECT pd.*, CONCAT(u.first_name, ' ', u.last_name) AS completed_by_name
+       FROM project_drs pd
+       LEFT JOIN users u ON u.id = pd.completed_by
+       WHERE pd.project_id = ?`,
+      [project.id]
+    );
+    project.drs = drs;
+
+    // Fetch project IBRS sections
+    const [ibrs] = await db.query(
+      `SELECT pi.*, CONCAT(u.first_name, ' ', u.last_name) AS completed_by_name
+       FROM project_ibrs pi
+       LEFT JOIN users u ON u.id = pi.completed_by
+       WHERE pi.project_id = ?`,
+      [project.id]
+    );
+    project.ibrs = ibrs;
+
+    // Fetch onboarding B data from client (if external project with client)
+    if (project.client_id) {
+      const [onbB] = await db.query(
+        `SELECT * FROM client_onboarding_b WHERE client_id = ?`,
+        [project.client_id]
+      );
+      project.onboarding_b = onbB[0] || null;
+    }
+
     return res.json(project);
   } catch (err) {
     console.error('Project getOne error:', err);
@@ -163,14 +215,35 @@ exports.create = async (req, res) => {
   const { title, description, project_type, client_id, service_id, start_date, end_date, status, members } = req.body;
 
   try {
+    // Generate project_id_code: PRJ-CLIENT-###
+    let clientCode = 'INT';
+    const actualClientId = project_type === 'external' ? (client_id || null) : null;
+    if (actualClientId) {
+      const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [actualClientId]);
+      if (clientRows.length > 0 && clientRows[0].client_code) {
+        clientCode = clientRows[0].client_code;
+      }
+    }
+    const [lastProject] = await db.query(
+      `SELECT project_id_code FROM projects WHERE project_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
+      [`PRJ-${clientCode}-%`]
+    );
+    let projectSeq = 1;
+    if (lastProject.length > 0 && lastProject[0].project_id_code) {
+      const parts = lastProject[0].project_id_code.split('-');
+      projectSeq = parseInt(parts[parts.length - 1], 10) + 1;
+    }
+    const project_id_code = `PRJ-${clientCode}-${String(projectSeq).padStart(3, '0')}`;
+
     const [result] = await db.query(
-      `INSERT INTO projects (title, description, project_type, client_id, service_id, start_date, end_date, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (project_id_code, title, description, project_type, client_id, service_id, start_date, end_date, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        project_id_code,
         title,
         description || null,
         project_type || 'internal',
-        project_type === 'external' ? (client_id || null) : null,
+        actualClientId,
         service_id || null,
         start_date || null,
         end_date || null,
@@ -348,3 +421,98 @@ exports.getClients = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROJECT DRS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/projects/:id/drs — get all DRS sections
+exports.getDrs = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT pd.*, CONCAT(u.first_name, ' ', u.last_name) AS completed_by_name
+       FROM project_drs pd
+       LEFT JOIN users u ON u.id = pd.completed_by
+       WHERE pd.project_id = ?`,
+      [req.params.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('Get project DRS error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// POST /api/projects/:id/drs/:section — save DRS section
+exports.saveDrs = async (req, res) => {
+  try {
+    const { data, completed } = req.body;
+    const section = req.params.section;
+
+    await db.query(
+      `INSERT INTO project_drs (project_id, section, data, completed, completed_by, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE data = VALUES(data), completed = VALUES(completed),
+         completed_by = VALUES(completed_by), completed_at = VALUES(completed_at)`,
+      [
+        req.params.id, section, JSON.stringify(data),
+        completed ? 1 : 0,
+        completed ? req.user.id : null,
+        completed ? new Date() : null
+      ]
+    );
+
+    return res.json({ message: 'DRS section saved' });
+  } catch (err) {
+    console.error('Save project DRS error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROJECT IBRS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/projects/:id/ibrs — get all IBRS sections
+exports.getIbrs = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT pi.*, CONCAT(u.first_name, ' ', u.last_name) AS completed_by_name
+       FROM project_ibrs pi
+       LEFT JOIN users u ON u.id = pi.completed_by
+       WHERE pi.project_id = ?`,
+      [req.params.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('Get project IBRS error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// POST /api/projects/:id/ibrs/:section — save IBRS section
+exports.saveIbrs = async (req, res) => {
+  try {
+    const { data, completed } = req.body;
+    const section = req.params.section;
+
+    await db.query(
+      `INSERT INTO project_ibrs (project_id, section, data, completed, completed_by, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE data = VALUES(data), completed = VALUES(completed),
+         completed_by = VALUES(completed_by), completed_at = VALUES(completed_at)`,
+      [
+        req.params.id, section, JSON.stringify(data),
+        completed ? 1 : 0,
+        completed ? req.user.id : null,
+        completed ? new Date() : null
+      ]
+    );
+
+    return res.json({ message: 'IBRS section saved' });
+  } catch (err) {
+    console.error('Save project IBRS error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+

@@ -4,13 +4,18 @@ const fs = require('fs');
 
 // ─── Helper: Generate next asset tag ──────────────────────────────────────────
 async function generateAssetTag() {
+  const now = new Date();
+  const yy = String(now.getFullYear()).slice(-2);
+  const prefix = `AST-${yy}`;
   const [rows] = await db.query(
-    `SELECT asset_tag FROM assets ORDER BY id DESC LIMIT 1`
+    `SELECT asset_tag FROM assets WHERE asset_tag LIKE ? ORDER BY id DESC LIMIT 1`,
+    [`${prefix}-%`]
   );
-  if (rows.length === 0) return 'AST-001';
-  const last = rows[0].asset_tag; // e.g. AST-042
-  const num = parseInt(last.replace('AST-', ''), 10) + 1;
-  return `AST-${String(num).padStart(3, '0')}`;
+  if (rows.length === 0) return `${prefix}-001`;
+  const last = rows[0].asset_tag; // e.g. AST-25-042
+  const parts = last.split('-');
+  const num = parseInt(parts[parts.length - 1], 10) + 1;
+  return `${prefix}-${String(num).padStart(3, '0')}`;
 }
 
 // ─── Helper: Save uploaded file ───────────────────────────────────────────────

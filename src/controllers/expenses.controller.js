@@ -92,10 +92,27 @@ exports.create = async (req, res) => {
       bill_copy = `/uploads/${filename}`;
     }
 
+    // Generate expense_id_code: EXP-YYMM-###
+    const expDate = expense_date ? new Date(expense_date) : new Date();
+    const eyy = String(expDate.getFullYear()).slice(-2);
+    const emm = String(expDate.getMonth() + 1).padStart(2, '0');
+    const expPrefix = `EXP-${eyy}${emm}`;
+    const [lastExp] = await db.query(
+      `SELECT expense_id_code FROM expenses WHERE expense_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
+      [`${expPrefix}-%`]
+    );
+    let expSeq = 1;
+    if (lastExp.length > 0 && lastExp[0].expense_id_code) {
+      const parts = lastExp[0].expense_id_code.split('-');
+      expSeq = parseInt(parts[parts.length - 1], 10) + 1;
+    }
+    const expense_id_code = `${expPrefix}-${String(expSeq).padStart(3, '0')}`;
+
     const [result] = await db.query(
-      `INSERT INTO expenses (title, expense_date, expense_type, client_id, project_id, category, vendor_name, amount, payment_mode, bill_copy, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO expenses (expense_id_code, title, expense_date, expense_type, client_id, project_id, category, vendor_name, amount, payment_mode, bill_copy, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        expense_id_code,
         title,
         expense_date || new Date().toISOString().split('T')[0],
         expense_type || 'company',

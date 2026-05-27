@@ -33,6 +33,13 @@ const vendorAgreementsRoutes = require('./src/routes/vendorAgreements.routes');
 const pitchDeckIndustriesRoutes = require('./src/routes/pitchDeckIndustries.routes');
 const meetingsRoutes = require('./src/routes/meetings.routes');
 const reportsRoutes  = require('./src/routes/reports.routes');
+const contentWriteRoutes = require('./src/routes/contentWrite.routes');
+const shootsRoutes = require('./src/routes/shoots.routes');
+const ibrsSettingsRoutes = require('./src/routes/ibrsSettings.routes');
+const clientPlansRoutes  = require('./src/routes/clientPlans.routes');
+const workScheduleRoutes = require('./src/routes/workSchedule.routes');
+const holidaysRoutes     = require('./src/routes/holidays.routes');
+const onboardingRoutes   = require('./src/routes/onboarding.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -96,6 +103,18 @@ app.use('/api/vendor-agreements', vendorAgreementsRoutes);
 app.use('/api/pitch-deck-industries', pitchDeckIndustriesRoutes);
 app.use('/api/meetings',              meetingsRoutes);
 app.use('/api/reports',               reportsRoutes);
+app.use('/api/content-write',         contentWriteRoutes);
+app.use('/api/shoots',                shootsRoutes);
+app.use('/api/ibrs-settings',         ibrsSettingsRoutes);
+app.use('/api/client-plans',          clientPlansRoutes);
+app.use('/api/work-schedule',         workScheduleRoutes);
+app.use('/api/holidays',              holidaysRoutes);
+app.use('/api/onboarding',            onboardingRoutes);
+
+// Rule Book — accessible to all authenticated users (not admin-only)
+const { authenticate: authMiddleware } = require('./src/middleware/auth');
+const docTemplatesCtrl = require('./src/controllers/documentTemplates.controller');
+app.get('/api/rule-book', authMiddleware, docTemplatesCtrl.getRuleBook);
 
 // Serve uploaded files (logos, favicons)
 const path = require('path');
@@ -127,4 +146,8 @@ app.use((err, _req, res, _next) => {
 server.listen(PORT, () => {
   console.log(`✅  CRM Task API running on http://localhost:${PORT}`);
   console.log(`🔌  Socket.IO ready for real-time connections`);
+
+  // ── Start Payroll Auto-Generate Cron ────────────────────────────────────────
+  const { startPayrollCron } = require('./src/jobs/payrollCron');
+  startPayrollCron();
 });
