@@ -6,6 +6,7 @@ const clientsReportController = require('../controllers/clientsReport.controller
 const projectsReportController = require('../controllers/projectsReport.controller');
 const ticketsReportController = require('../controllers/ticketsReport.controller');
 const employeesReportController = require('../controllers/employeesReport.controller');
+const financeReportController = require('../controllers/financeReport.controller');
 
 // All report routes require authentication
 router.use(authenticate);
@@ -33,5 +34,8 @@ router.get('/projects/:id', projectsReportController.getSingleProjectReport);
 
 // GET /api/reports/employees — advanced employee analytics
 router.get('/employees', employeesReportController.getEmployeesReport);
+
+// GET /api/reports/finance — advanced finance analytics
+router.get('/finance', financeReportController.getFinanceReport);
 
 module.exports = router;
