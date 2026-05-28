@@ -1,4 +1,4 @@
-USE crm_task_module;
+USE u627061298_database_crm;
 
 -- ============================================================
 -- Interview Scheduler Module - Database Migration

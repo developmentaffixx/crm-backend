@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { sendTemplateEmail } = require('../services/email.service');
 
 // ── GET /api/interview-scheduler/candidates ───────────────────────────────────
 exports.listCandidates = async (req, res) => {
@@ -225,6 +226,34 @@ exports.createRound = async (req, res) => {
       `UPDATE interview_candidates SET status = 'in_process' WHERE id = ? AND status = 'shortlisted'`,
       [id]
     );
+
+    // Send interview scheduled email to candidate
+    try {
+      const [candidates] = await db.query(`SELECT full_name, email FROM interview_candidates WHERE id = ?`, [id]);
+      const candidate = candidates[0];
+
+      if (candidate && candidate.email) {
+        const interviewerName = interviewer_id
+          ? await db.query(`SELECT name FROM users WHERE id = ?`, [interviewer_id]).then(([r]) => r[0]?.name || 'HR Team')
+          : 'HR Team';
+
+        const formattedDate = scheduled_date ? new Date(scheduled_date).toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : 'To be confirmed';
+        const formattedTime = scheduled_time || 'To be confirmed';
+        const modeLabel = mode === 'in_person' ? 'In Person' : mode === 'video' ? 'Video Call' : 'Phone Call';
+
+        await sendTemplateEmail('interview_scheduled', candidate.email, {
+          candidate_name: candidate.full_name,
+          round_name: round_name || `Round ${nextRound}`,
+          scheduled_date: formattedDate,
+          scheduled_time: formattedTime,
+          mode: modeLabel,
+          interviewer_name: interviewerName,
+        });
+      }
+    } catch (emailErr) {
+      console.error('Interview schedule email failed:', emailErr.message);
+      // Don't fail the request if email fails
+    }
 
     return res.status(201).json({ message: 'Round scheduled', id: result.insertId, round_number: nextRound });
   } catch (err) {
