@@ -9,7 +9,7 @@ exports.listCandidates = async (req, res) => {
     let sql = `
       SELECT
         ic.*,
-        u.name AS shortlisted_by_name
+        CONCAT(u.first_name, ' ', u.last_name) AS shortlisted_by_name
       FROM interview_candidates ic
       LEFT JOIN users u ON u.id = ic.shortlisted_by
       WHERE ic.deleted = 0
@@ -52,7 +52,7 @@ exports.getCandidate = async (req, res) => {
     if (!candidates.length) return res.status(404).json({ message: 'Candidate not found' });
 
     const [rounds] = await db.query(
-      `SELECT ir.*, u.name AS interviewer_name
+      `SELECT ir.*, CONCAT(u.first_name, ' ', u.last_name) AS interviewer_name
        FROM interview_rounds ir
        LEFT JOIN users u ON u.id = ir.interviewer_id
        WHERE ir.candidate_id = ? AND ir.deleted = 0
@@ -234,7 +234,7 @@ exports.createRound = async (req, res) => {
 
       if (candidate && candidate.email) {
         const interviewerName = interviewer_id
-          ? await db.query(`SELECT name FROM users WHERE id = ?`, [interviewer_id]).then(([r]) => r[0]?.name || 'HR Team')
+          ? await db.query(`SELECT CONCAT(first_name, ' ', last_name) AS name FROM users WHERE id = ?`, [interviewer_id]).then(([r]) => r[0]?.name || 'HR Team')
           : 'HR Team';
 
         const formattedDate = scheduled_date ? new Date(scheduled_date).toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : 'To be confirmed';
@@ -323,7 +323,7 @@ exports.getSchedule = async (req, res) => {
         ir.*,
         ic.full_name AS candidate_name,
         ic.position_applied,
-        u.name AS interviewer_name
+        CONCAT(u.first_name, ' ', u.last_name) AS interviewer_name
       FROM interview_rounds ir
       JOIN interview_candidates ic ON ic.id = ir.candidate_id
       LEFT JOIN users u ON u.id = ir.interviewer_id
