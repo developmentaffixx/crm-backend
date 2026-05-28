@@ -256,7 +256,11 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
 
         // ── Salary calculation ────────────────────────────────────────────────
         const basicRaw    = parseFloat(structure.basic_salary);
+        const wDaysConfig = parseInt(structure.working_days_per_month) || 26;
+        const wHoursConfig = parseInt(structure.working_hours_per_day) || 8;
         const perDaySal   = workingDays > 0 ? basicRaw / workingDays : 0;
+        const perDayDisplay  = parseFloat((basicRaw / wDaysConfig).toFixed(2));
+        const perHourDisplay = parseFloat((basicRaw / wDaysConfig / wHoursConfig).toFixed(2));
         const lopDeduction = parseFloat((lopDays * perDaySal).toFixed(2));
 
         const basicActual = parseFloat((basicRaw - lopDeduction).toFixed(2));
@@ -284,8 +288,9 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
             gross_salary, pf_deduction, esi_deduction, professional_tax, other_deductions,
             total_deductions, net_salary,
             is_probation, paid_leave_used, paid_leave_balance,
+            per_day_salary, per_hour_salary,
             payment_mode, status, auto_generated, created_by
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Bank', 'Draft', 1, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Bank', 'Draft', 1, ?)`,
           [
             payrollIdCode, empId, targetMonth, targetYear,
             basicActual, hraAmt, allowAmt,
@@ -293,6 +298,7 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
             grossSalary, pfAmt, esiAmt, ptAmt, otherAmt,
             totalDeductions, netSalary,
             inProbation ? 1 : 0, paidLeaveUsed, paidLeaveBalance,
+            perDayDisplay, perHourDisplay,
             SYSTEM_USER,
           ]
         );

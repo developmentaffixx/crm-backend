@@ -34,12 +34,14 @@ const pitchDeckIndustriesRoutes = require('./src/routes/pitchDeckIndustries.rout
 const meetingsRoutes = require('./src/routes/meetings.routes');
 const reportsRoutes  = require('./src/routes/reports.routes');
 const contentWriteRoutes = require('./src/routes/contentWrite.routes');
+const contentCalendarRoutes = require('./src/routes/contentCalendar.routes');
 const shootsRoutes = require('./src/routes/shoots.routes');
 const ibrsSettingsRoutes = require('./src/routes/ibrsSettings.routes');
 const clientPlansRoutes  = require('./src/routes/clientPlans.routes');
 const workScheduleRoutes = require('./src/routes/workSchedule.routes');
 const holidaysRoutes     = require('./src/routes/holidays.routes');
 const onboardingRoutes   = require('./src/routes/onboarding.routes');
+const interviewSchedulerRoutes = require('./src/routes/interviewScheduler.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -104,12 +106,14 @@ app.use('/api/pitch-deck-industries', pitchDeckIndustriesRoutes);
 app.use('/api/meetings',              meetingsRoutes);
 app.use('/api/reports',               reportsRoutes);
 app.use('/api/content-write',         contentWriteRoutes);
+app.use('/api/content-calendar',      contentCalendarRoutes);
 app.use('/api/shoots',                shootsRoutes);
 app.use('/api/ibrs-settings',         ibrsSettingsRoutes);
 app.use('/api/client-plans',          clientPlansRoutes);
 app.use('/api/work-schedule',         workScheduleRoutes);
 app.use('/api/holidays',              holidaysRoutes);
 app.use('/api/onboarding',            onboardingRoutes);
+app.use('/api/interview-scheduler',   interviewSchedulerRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
 const { authenticate: authMiddleware } = require('./src/middleware/auth');

@@ -371,6 +371,9 @@ exports.createStructure = async (req, res) => {
     const {
       employee_id, basic_salary, hra, allowances,
       pf_deduction, esi_deduction, professional_tax, other_deductions, effective_from,
+      probation_start_date, probation_end_date, employment_status,
+      hike_amount, post_probation_salary, per_day_salary, per_hour_salary,
+      working_days_per_month, working_hours_per_day,
     } = req.body;
 
     if (!employee_id || !basic_salary) {
@@ -378,9 +381,13 @@ exports.createStructure = async (req, res) => {
     }
 
     const [result] = await db.query(
-      `INSERT INTO salary_structures (employee_id, basic_salary, hra, allowances,
-        pf_deduction, esi_deduction, professional_tax, other_deductions, effective_from, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO salary_structures (
+        employee_id, basic_salary, hra, allowances,
+        pf_deduction, esi_deduction, professional_tax, other_deductions, effective_from,
+        probation_start_date, probation_end_date, employment_status,
+        hike_amount, post_probation_salary, per_day_salary, per_hour_salary,
+        working_days_per_month, working_hours_per_day, created_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         employee_id,
         parseFloat(basic_salary  || 0),
@@ -391,9 +398,26 @@ exports.createStructure = async (req, res) => {
         parseFloat(professional_tax  || 0),
         parseFloat(other_deductions  || 0),
         effective_from || new Date().toISOString().split('T')[0],
+        probation_start_date || null,
+        probation_end_date || null,
+        employment_status || 'probation',
+        parseFloat(hike_amount || 0),
+        parseFloat(post_probation_salary || 0),
+        parseFloat(per_day_salary || 0),
+        parseFloat(per_hour_salary || 0),
+        parseInt(working_days_per_month) || 26,
+        parseInt(working_hours_per_day) || 8,
         req.user.id,
       ]
     );
+
+    // Also update the users table employment fields
+    if (employment_status || probation_end_date) {
+      await db.query(
+        `UPDATE users SET employment_status = ?, probation_end_date = ? WHERE id = ?`,
+        [employment_status || 'probation', probation_end_date || null, employee_id]
+      );
+    }
 
     const [created] = await db.query(
       `SELECT ss.*, CONCAT(u.first_name, ' ', u.last_name) AS employee_name, u.department, u.designation
@@ -416,13 +440,19 @@ exports.updateStructure = async (req, res) => {
     const {
       basic_salary, hra, allowances,
       pf_deduction, esi_deduction, professional_tax, other_deductions, effective_from,
+      probation_start_date, probation_end_date, employment_status,
+      hike_amount, post_probation_salary, per_day_salary, per_hour_salary,
+      working_days_per_month, working_hours_per_day,
     } = req.body;
 
     await db.query(
       `UPDATE salary_structures SET
         basic_salary = ?, hra = ?, allowances = ?,
         pf_deduction = ?, esi_deduction = ?, professional_tax = ?, other_deductions = ?,
-        effective_from = ?
+        effective_from = ?,
+        probation_start_date = ?, probation_end_date = ?, employment_status = ?,
+        hike_amount = ?, post_probation_salary = ?, per_day_salary = ?, per_hour_salary = ?,
+        working_days_per_month = ?, working_hours_per_day = ?
        WHERE id = ?`,
       [
         basic_salary    !== undefined ? parseFloat(basic_salary)    : ex.basic_salary,
@@ -433,8 +463,25 @@ exports.updateStructure = async (req, res) => {
         professional_tax!== undefined ? parseFloat(professional_tax): ex.professional_tax,
         other_deductions!== undefined ? parseFloat(other_deductions): ex.other_deductions,
         effective_from  || ex.effective_from,
+        probation_start_date !== undefined ? (probation_start_date || null) : ex.probation_start_date,
+        probation_end_date   !== undefined ? (probation_end_date || null)   : ex.probation_end_date,
+        employment_status    || ex.employment_status || 'probation',
+        hike_amount          !== undefined ? parseFloat(hike_amount)          : (ex.hike_amount || 0),
+        post_probation_salary!== undefined ? parseFloat(post_probation_salary): (ex.post_probation_salary || 0),
+        per_day_salary       !== undefined ? parseFloat(per_day_salary)       : (ex.per_day_salary || 0),
+        per_hour_salary      !== undefined ? parseFloat(per_hour_salary)      : (ex.per_hour_salary || 0),
+        working_days_per_month !== undefined ? parseInt(working_days_per_month) : (ex.working_days_per_month || 26),
+        working_hours_per_day  !== undefined ? parseInt(working_hours_per_day)  : (ex.working_hours_per_day || 8),
         req.params.id,
       ]
+    );
+
+    // Also update users table employment fields
+    const empStatus = employment_status || ex.employment_status;
+    const probEnd   = probation_end_date !== undefined ? (probation_end_date || null) : ex.probation_end_date;
+    await db.query(
+      `UPDATE users SET employment_status = ?, probation_end_date = ? WHERE id = ?`,
+      [empStatus, probEnd, ex.employee_id]
     );
 
     const [updated] = await db.query(
