@@ -85,6 +85,40 @@ exports.startTimer = async (req, res) => {
         conflicting_task_title: running[0].title,
       });
     }
+
+    // ── Also block if a ticket timer is running ───────────────────────────
+    const [runningTicket] = await db.query(
+      `SELECT tat.ticket_id, t.title
+       FROM ticket_active_timers tat
+       JOIN tickets t ON t.id = tat.ticket_id
+       WHERE tat.user_id = ?
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (runningTicket.length > 0) {
+      return res.status(400).json({
+        message: `You already have a timer running on ticket "${runningTicket[0].title}". Stop it first before starting a task timer.`,
+        conflicting_ticket_id: runningTicket[0].ticket_id,
+        conflicting_ticket_title: runningTicket[0].title,
+      });
+    }
+
+    // ── Also block if a meeting timer is running ──────────────────────────
+    const [runningMeeting] = await db.query(
+      `SELECT mat.meeting_id, m.title
+       FROM meeting_active_timers mat
+       JOIN meetings m ON m.id = mat.meeting_id
+       WHERE mat.user_id = ?
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (runningMeeting.length > 0) {
+      return res.status(400).json({
+        message: `You already have a timer running on meeting "${runningMeeting[0].title}". Stop it first before starting a task timer.`,
+        conflicting_meeting_id: runningMeeting[0].meeting_id,
+        conflicting_meeting_title: runningMeeting[0].title,
+      });
+    }
     // ──────────────────────────────────────────────────────────────────────
 
     const now = new Date();

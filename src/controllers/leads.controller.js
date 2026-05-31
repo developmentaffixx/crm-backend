@@ -1,6 +1,33 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
 
+/**
+ * GET /api/leads/dropdown
+ * Lightweight list for dropdowns — returns id, name, business_name only
+ */
+exports.dropdown = async (req, res) => {
+  try {
+    let where = 'deleted = 0';
+    const params = [];
+
+    // Non-admin: only see leads assigned to or created by them
+    if (!req.user.is_admin) {
+      where += ' AND (assigned_to = ? OR created_by = ?)';
+      params.push(req.user.id, req.user.id);
+    }
+
+    const [rows] = await db.query(
+      `SELECT id, name, business_name FROM leads WHERE ${where} ORDER BY business_name ASC, name ASC`,
+      params
+    );
+
+    return res.json({ leads: rows });
+  } catch (err) {
+    console.error('Leads dropdown error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── Helper: Generate Lead ID (LD-YYMMDD-###) — Race-condition safe ──────────
 async function generateLeadId(connection) {
   const now = new Date();

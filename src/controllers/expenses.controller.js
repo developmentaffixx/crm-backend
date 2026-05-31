@@ -1,6 +1,5 @@
 const db = require('../config/db');
-const path = require('path');
-const fs = require('fs');
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
 
 // ─── GET /api/expenses ────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
@@ -84,12 +83,8 @@ exports.create = async (req, res) => {
     // Handle file upload
     let bill_copy = null;
     if (req.file) {
-      const filename = `expense-bill-${Date.now()}${path.extname(req.file.originalname)}`;
-      const uploadDir = path.join(__dirname, '../../uploads');
-      if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-      const filepath = path.join(uploadDir, filename);
-      fs.writeFileSync(filepath, req.file.buffer);
-      bill_copy = `/uploads/${filename}`;
+      const { url } = await uploadToCloudinary(req.file.buffer, 'crm/expenses', 'auto');
+      bill_copy = url;
     }
 
     // Generate expense_id_code: EXP-YYMM-###
@@ -156,15 +151,15 @@ exports.update = async (req, res) => {
       category, vendor_name, amount, payment_mode
     } = req.body;
 
-    // Handle file upload
+    // Handle file upload — delete old from Cloudinary, upload new
     let bill_copy = existing.bill_copy;
     if (req.file) {
-      const filename = `expense-bill-${Date.now()}${path.extname(req.file.originalname)}`;
-      const uploadDir = path.join(__dirname, '../../uploads');
-      if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-      const filepath = path.join(uploadDir, filename);
-      fs.writeFileSync(filepath, req.file.buffer);
-      bill_copy = `/uploads/${filename}`;
+      if (existing.bill_copy) {
+        const oldPublicId = extractPublicId(existing.bill_copy);
+        if (oldPublicId) await deleteFromCloudinary(oldPublicId, 'raw');
+      }
+      const { url } = await uploadToCloudinary(req.file.buffer, 'crm/expenses', 'auto');
+      bill_copy = url;
     }
 
     await db.query(

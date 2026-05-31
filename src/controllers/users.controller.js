@@ -1,6 +1,5 @@
 const db = require('../config/db');
-const path = require('path');
-const fs   = require('fs');
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
 
 /**
  * GET /api/users
@@ -75,21 +74,14 @@ exports.uploadAvatar = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-    const filename = `avatar-${req.user.id}-${Date.now()}${path.extname(req.file.originalname)}`;
-    const uploadDir = path.join(__dirname, '../../uploads');
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-
-    // Delete old avatar if exists
+    // Delete old avatar from Cloudinary
     const [current] = await db.query('SELECT avatar_url FROM users WHERE id = ?', [req.user.id]);
     if (current[0]?.avatar_url) {
-      const oldPath = path.join(__dirname, '../../', current[0].avatar_url);
-      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      const oldPublicId = extractPublicId(current[0].avatar_url);
+      if (oldPublicId) await deleteFromCloudinary(oldPublicId, 'image');
     }
 
-    const filepath = path.join(uploadDir, filename);
-    fs.writeFileSync(filepath, req.file.buffer);
-
-    const url = `/uploads/${filename}`;
+    const { url } = await uploadToCloudinary(req.file.buffer, 'crm/avatars', 'image');
     await db.query('UPDATE users SET avatar_url = ? WHERE id = ?', [url, req.user.id]);
 
     return res.json({ message: 'Avatar uploaded', url });
@@ -140,7 +132,7 @@ exports.changePassword = async (req, res) => {
     if (!match) return res.status(401).json({ message: 'Current password is incorrect' });
 
     const hash = await bcrypt.hash(new_password, 10);
-    await db.query('UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?', [hash, req.user.id]);
+    await db.query('UPDATE users SET password_hash = ?, password_changed_at = NOW(), updated_at = NOW() WHERE id = ?', [hash, req.user.id]);
 
     return res.json({ message: 'Password changed successfully' });
   } catch (err) {
@@ -161,7 +153,22 @@ exports.myPermissions = async (req, res) => {
         acc[m] = { can_view: 2, can_create: 1, can_edit: 2, can_delete: 1 };
         return acc;
       }, {});
-      return res.json({ is_admin: true, role_id: null, role_name: 'Admin', permissions: perms });
+
+      // Try to fetch responsibilities from Admin role or user's assigned role
+      let responsibilities = null;
+      const [adminUser] = await db.query('SELECT role_id FROM users WHERE id = ? AND deleted = 0', [req.user.id]);
+      const roleId = adminUser[0]?.role_id;
+      if (roleId) {
+        const [roleRows] = await db.query('SELECT responsibilities FROM roles WHERE id = ?', [roleId]);
+        responsibilities = roleRows[0]?.responsibilities || null;
+      }
+      if (!responsibilities) {
+        // Fallback: check the system "Admin" role
+        const [adminRole] = await db.query("SELECT responsibilities FROM roles WHERE name = 'Admin' AND is_system = 1 LIMIT 1");
+        responsibilities = adminRole[0]?.responsibilities || null;
+      }
+
+      return res.json({ is_admin: true, role_id: roleId || null, role_name: 'Admin', responsibilities, permissions: perms });
     }
 
     const [userRows] = await db.query(
@@ -176,8 +183,9 @@ exports.myPermissions = async (req, res) => {
       return res.json({ is_admin: false, role_id: null, role_name: null, permissions: {} });
     }
 
-    const [roleRows] = await db.query('SELECT name FROM roles WHERE id = ?', [roleId]);
+    const [roleRows] = await db.query('SELECT name, responsibilities FROM roles WHERE id = ?', [roleId]);
     const roleName = roleRows[0]?.name || null;
+    const responsibilities = roleRows[0]?.responsibilities || null;
 
     const [permRows] = await db.query(
       'SELECT module, can_view, can_create, can_edit, can_delete FROM role_permissions WHERE role_id = ?',
@@ -194,7 +202,7 @@ exports.myPermissions = async (req, res) => {
       return acc;
     }, {});
 
-    return res.json({ is_admin: false, role_id: roleId, role_name: roleName, permissions });
+    return res.json({ is_admin: false, role_id: roleId, role_name: roleName, responsibilities, permissions });
   } catch (err) {
     console.error('myPermissions error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -386,6 +394,400 @@ exports.getLeaveBalance = async (req, res) => {
     return res.json({ ledger: rows, current_balance: currentBalance });
   } catch (err) {
     console.error('getLeaveBalance error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADVANCED PROFILE FEATURES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/users/me/activity
+ * Returns recent activity timeline for the current user
+ */
+exports.myActivity = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const activities = [];
+
+    // Recent logins from user_activity_log (if table exists)
+    try {
+      const [logs] = await db.query(
+        `SELECT action, description, metadata, ip_address, created_at
+         FROM user_activity_log WHERE user_id = ? ORDER BY created_at DESC LIMIT 10`,
+        [userId]
+      );
+      logs.forEach(l => activities.push({
+        type: l.action,
+        description: l.description,
+        metadata: l.metadata,
+        ip_address: l.ip_address,
+        timestamp: l.created_at,
+      }));
+    } catch (e) { /* table may not exist yet */ }
+
+    // Recent task completions
+    const [taskLogs] = await db.query(
+      `SELECT t.title, tal.action, tal.created_at
+       FROM task_activity_log tal
+       JOIN tasks t ON t.id = tal.task_id
+       WHERE tal.user_id = ? AND tal.action IN ('status_change','created')
+       ORDER BY tal.created_at DESC LIMIT 10`,
+      [userId]
+    );
+    taskLogs.forEach(l => activities.push({
+      type: 'task',
+      description: `${l.action === 'created' ? 'Created task' : 'Updated task'}: ${l.title}`,
+      timestamp: l.created_at,
+    }));
+
+    // Recent leave actions
+    const [leaveLogs] = await db.query(
+      `SELECT leave_type, status, from_date, to_date, created_at, updated_at
+       FROM leaves WHERE user_id = ? AND deleted = 0
+       ORDER BY updated_at DESC LIMIT 5`,
+      [userId]
+    );
+    leaveLogs.forEach(l => activities.push({
+      type: 'leave',
+      description: `${l.leave_type} leave ${l.status}`,
+      timestamp: l.updated_at || l.created_at,
+    }));
+
+    // Recent attendance
+    const [attendanceLogs] = await db.query(
+      `SELECT date, clock_in, clock_out, clock_in_status
+       FROM attendance WHERE user_id = ?
+       ORDER BY date DESC LIMIT 5`,
+      [userId]
+    );
+    attendanceLogs.forEach(a => activities.push({
+      type: 'attendance',
+      description: `Clocked in (${a.clock_in_status})${a.clock_out ? ' and clocked out' : ''}`,
+      timestamp: a.clock_in,
+    }));
+
+    // Sort all by timestamp descending
+    activities.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    return res.json(activities.slice(0, 30));
+  } catch (err) {
+    console.error('myActivity error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/users/me/sessions
+ * Returns active sessions for the current user
+ */
+exports.mySessions = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, device, browser, ip_address, last_active, created_at, is_current
+       FROM user_sessions WHERE user_id = ?
+       ORDER BY last_active DESC`,
+      [req.user.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('mySessions error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/users/me/sessions/:id
+ * Revoke a specific session
+ */
+exports.revokeSession = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await db.query(
+      'SELECT id, is_current FROM user_sessions WHERE id = ? AND user_id = ?',
+      [id, req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Session not found' });
+    if (rows[0].is_current) return res.status(400).json({ message: 'Cannot revoke current session' });
+
+    await db.query('DELETE FROM user_sessions WHERE id = ?', [id]);
+    return res.json({ message: 'Session revoked' });
+  } catch (err) {
+    console.error('revokeSession error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/users/me/emergency-contacts
+ */
+exports.getEmergencyContacts = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM emergency_contacts WHERE user_id = ? ORDER BY created_at',
+      [req.user.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('getEmergencyContacts error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/users/me/emergency-contacts
+ */
+exports.addEmergencyContact = async (req, res) => {
+  try {
+    const { name, relationship, phone, email } = req.body;
+    if (!name || !relationship || !phone) {
+      return res.status(400).json({ message: 'Name, relationship, and phone are required' });
+    }
+    const [result] = await db.query(
+      'INSERT INTO emergency_contacts (user_id, name, relationship, phone, email) VALUES (?, ?, ?, ?, ?)',
+      [req.user.id, name, relationship, phone, email || null]
+    );
+    return res.status(201).json({ message: 'Contact added', id: result.insertId });
+  } catch (err) {
+    console.error('addEmergencyContact error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/users/me/emergency-contacts/:id
+ */
+exports.updateEmergencyContact = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, relationship, phone, email } = req.body;
+    const [rows] = await db.query(
+      'SELECT id FROM emergency_contacts WHERE id = ? AND user_id = ?',
+      [id, req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Contact not found' });
+
+    await db.query(
+      'UPDATE emergency_contacts SET name = ?, relationship = ?, phone = ?, email = ? WHERE id = ?',
+      [name, relationship, phone, email || null, id]
+    );
+    return res.json({ message: 'Contact updated' });
+  } catch (err) {
+    console.error('updateEmergencyContact error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/users/me/emergency-contacts/:id
+ */
+exports.deleteEmergencyContact = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await db.query(
+      'SELECT id FROM emergency_contacts WHERE id = ? AND user_id = ?',
+      [id, req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Contact not found' });
+
+    await db.query('DELETE FROM emergency_contacts WHERE id = ?', [id]);
+    return res.json({ message: 'Contact deleted' });
+  } catch (err) {
+    console.error('deleteEmergencyContact error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/users/me/skills
+ */
+exports.getSkills = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT id, skill FROM user_skills WHERE user_id = ? ORDER BY skill',
+      [req.user.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('getSkills error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/users/me/skills
+ */
+exports.addSkill = async (req, res) => {
+  try {
+    const { skill } = req.body;
+    if (!skill || !skill.trim()) {
+      return res.status(400).json({ message: 'Skill is required' });
+    }
+    const [result] = await db.query(
+      'INSERT IGNORE INTO user_skills (user_id, skill) VALUES (?, ?)',
+      [req.user.id, skill.trim()]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(409).json({ message: 'Skill already exists' });
+    }
+    return res.status(201).json({ message: 'Skill added', id: result.insertId });
+  } catch (err) {
+    console.error('addSkill error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/users/me/skills/:id
+ */
+exports.deleteSkill = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await db.query(
+      'SELECT id FROM user_skills WHERE id = ? AND user_id = ?',
+      [id, req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Skill not found' });
+
+    await db.query('DELETE FROM user_skills WHERE id = ?', [id]);
+    return res.json({ message: 'Skill deleted' });
+  } catch (err) {
+    console.error('deleteSkill error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/users/me/timesheet
+ * Returns attendance + time tracking data for the current week
+ */
+exports.myTimesheet = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { start_date, end_date } = req.query;
+
+    // Default to current week (Monday to Sunday)
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(now);
+    monday.setDate(now.getDate() + mondayOffset);
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+
+    const startStr = start_date || monday.toISOString().split('T')[0];
+    const endStr = end_date || sunday.toISOString().split('T')[0];
+
+    // Attendance records
+    const [attendance] = await db.query(
+      `SELECT date, clock_in, clock_out, clock_in_status, total_served_seconds, total_afs_seconds
+       FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ?
+       ORDER BY date ASC`,
+      [userId, startStr, endStr]
+    );
+
+    // Task time logs
+    const [taskTime] = await db.query(
+      `SELECT DATE(started_at) AS log_date, SUM(duration) AS total_seconds
+       FROM task_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       GROUP BY DATE(started_at)`,
+      [userId, startStr, endStr]
+    );
+
+    // Ticket time logs
+    const [ticketTime] = await db.query(
+      `SELECT log_date, SUM(minutes) AS total_minutes
+       FROM ticket_time_logs WHERE user_id = ? AND log_date BETWEEN ? AND ?
+       GROUP BY log_date`,
+      [userId, startStr, endStr]
+    );
+
+    // Meeting time
+    const [meetingTime] = await db.query(
+      `SELECT m.meeting_date AS log_date,
+              SUM(TIMESTAMPDIFF(MINUTE, m.start_time, m.end_time)) AS total_minutes
+       FROM (
+         SELECT DISTINCT m2.id, m2.meeting_date, m2.start_time, m2.end_time
+         FROM meetings m2
+         LEFT JOIN meeting_members mm2 ON mm2.meeting_id = m2.id
+         WHERE (m2.created_by = ? OR mm2.user_id = ?)
+         AND m2.status = 'completed' AND m2.deleted = 0
+         AND m2.meeting_date BETWEEN ? AND ?
+       ) m
+       GROUP BY m.meeting_date`,
+      [userId, userId, startStr, endStr]
+    );
+
+    // Summary
+    const totalServed = attendance.reduce((sum, a) => sum + (Number(a.total_served_seconds) || 0), 0);
+    const totalAfs = attendance.reduce((sum, a) => sum + (Number(a.total_afs_seconds) || 0), 0);
+    const totalTaskSeconds = taskTime.reduce((sum, t) => sum + (Number(t.total_seconds) || 0), 0);
+    const totalTicketMinutes = ticketTime.reduce((sum, t) => sum + (Number(t.total_minutes) || 0), 0);
+    const totalMeetingMinutes = meetingTime.reduce((sum, m) => sum + (Number(m.total_minutes) || 0), 0);
+
+    return res.json({
+      period: { start: startStr, end: endStr },
+      attendance,
+      taskTime,
+      ticketTime,
+      meetingTime,
+      summary: {
+        total_served_seconds: totalServed,
+        total_afs_seconds: totalAfs,
+        productive_seconds: totalTaskSeconds + (totalTicketMinutes * 60) + (totalMeetingMinutes * 60),
+        total_task_seconds: totalTaskSeconds,
+        total_ticket_minutes: totalTicketMinutes,
+        total_meeting_minutes: totalMeetingMinutes,
+        days_present: attendance.length,
+      },
+    });
+  } catch (err) {
+    console.error('myTimesheet error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/users/me/tickets
+ * Returns tickets assigned to or reported by the user
+ */
+exports.myTickets = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, title, status, priority, ticket_type, due_date, created_at
+       FROM tickets
+       WHERE (assigned_to = ? OR reported_by = ?) AND deleted = 0
+       ORDER BY FIELD(status, 'open', 'in_progress', 'hold', 'resolved', 'closed'), created_at DESC
+       LIMIT 50`,
+      [req.user.id, req.user.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('myTickets error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/users/me/meetings
+ * Returns meetings the user is part of
+ */
+exports.myMeetings = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT m.id, m.title, m.meeting_date, m.start_time, m.end_time, m.status, m.meeting_type
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE (m.created_by = ? OR mm.user_id = ?) AND m.deleted = 0
+       GROUP BY m.id
+       ORDER BY m.meeting_date DESC, m.start_time DESC
+       LIMIT 50`,
+      [req.user.id, req.user.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('myMeetings error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

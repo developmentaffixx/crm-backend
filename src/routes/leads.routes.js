@@ -10,6 +10,9 @@ router.use(authenticate);
 // GET  /api/leads/reminders/upcoming — follow-up reminders (must be before /:id)
 router.get('/reminders/upcoming', leadsController.getFollowUpReminders);
 
+// GET  /api/leads/dropdown — lightweight list for dropdowns (id, name, business_name)
+router.get('/dropdown', leadsController.dropdown);
+
 // GET  /api/leads          — list leads (filtered by role, paginated, sortable)
 router.get('/', leadsController.list);
 

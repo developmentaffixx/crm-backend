@@ -47,6 +47,9 @@ router.use(authenticate);
 // GET  /api/tickets/stats   — dashboard stats
 router.get('/stats', ticketsController.stats);
 
+// GET  /api/tickets/my-active-timer — get current user's running ticket timer
+router.get('/my-active-timer', ticketsController.getMyActiveTimer);
+
 // GET  /api/tickets         — list tickets
 router.get('/', ticketsController.list);
 
@@ -84,7 +87,21 @@ router.post(
   ticketsController.addComment
 );
 
-// ── Time Logs ─────────────────────────────────────────────────────────────────
+// ── Timer (Work mode — start/stop) ────────────────────────────────────────────
+
+// POST /api/tickets/:id/timer/start
+router.post('/:id/timer/start', param('id').isInt(), ticketsController.startTimer);
+
+// POST /api/tickets/:id/timer/stop
+router.post('/:id/timer/stop', param('id').isInt(), ticketsController.stopTimer);
+
+// GET /api/tickets/:id/timer/status
+router.get('/:id/timer/status', param('id').isInt(), ticketsController.getTimerStatus);
+
+// GET /api/tickets/:id/timer/logs
+router.get('/:id/timer/logs', param('id').isInt(), ticketsController.getTimerLogs);
+
+// ── Time Logs (legacy manual entry) ──────────────────────────────────────────
 
 // POST /api/tickets/:id/time-logs
 router.post(

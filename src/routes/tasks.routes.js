@@ -25,7 +25,15 @@ router.get('/my-active-timer', async (req, res) => {
     if (rows.length === 0) {
       return res.json({ active: false });
     }
-    res.json({ active: true, task_id: rows[0].task_id, task_title: rows[0].task_title, started_at: rows[0].started_at });
+
+    // Check if AFS is currently active (timer should show as paused)
+    const [activeAfs] = await db.query(
+      'SELECT id FROM afs_logs WHERE user_id = ? AND end_time IS NULL LIMIT 1',
+      [req.user.id]
+    );
+    const paused = activeAfs.length > 0;
+
+    res.json({ active: true, paused, task_id: rows[0].task_id, task_title: rows[0].task_title, started_at: rows[0].started_at });
   } catch (err) {
     console.error('my-active-timer error:', err);
     res.json({ active: false });

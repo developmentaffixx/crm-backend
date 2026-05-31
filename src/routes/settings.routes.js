@@ -32,9 +32,13 @@ router.delete('/roles/:id', [param('id').isInt({ min: 1 })], ctrl.deleteRole);
 router.get('/roles/:id/permissions', [param('id').isInt({ min: 1 })], ctrl.getRolePermissions);
 router.put('/roles/:id/permissions', [param('id').isInt({ min: 1 })], ctrl.updateRolePermissions);
 
+// ─── Role Members ─────────────────────────────────────────────────────────────
+router.get('/roles/:id/members', [param('id').isInt({ min: 1 })], ctrl.getRoleMembers);
+
 // ─── Users ────────────────────────────────────────────────────────────────────
-router.get('/users', ctrl.getUsers);
-router.get('/users/:id', [param('id').isInt({ min: 1 })], ctrl.getUserDetail);
+router.get('/users',              ctrl.getUsers);
+router.get('/users/next-emp-code', ctrl.getNextEmpCode);
+router.get('/users/:id',          [param('id').isInt({ min: 1 })], ctrl.getUserDetail);
 router.post('/users', [
   body('email').isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
@@ -53,6 +57,10 @@ router.post('/users/:id/upload-avatar',   [param('id').isInt({ min: 1 })], uploa
 // ─── Task Settings ────────────────────────────────────────────────────────────
 router.get('/task-settings', ctrl.getTaskSettings);
 router.put('/task-settings', ctrl.updateTaskSettings);
+
+// ─── Daily Targets Settings ───────────────────────────────────────────────────
+router.get('/daily-targets', ctrl.getDailyTargets);
+router.put('/daily-targets', ctrl.updateDailyTargets);
 
 // ─── Audit Log ────────────────────────────────────────────────────────────────
 router.get('/audit-logs', ctrl.getAuditLogs);

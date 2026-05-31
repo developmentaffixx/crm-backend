@@ -27,6 +27,7 @@ const reimbursementsRoutes = require('./src/routes/reimbursements.routes');
 const announcementsRoutes = require('./src/routes/announcements.routes');
 const attendanceRoutes   = require('./src/routes/attendance.routes');
 const dashboardRoutes    = require('./src/routes/dashboard.routes');
+const compensationRoutes = require('./src/routes/compensation.routes');
 const ticketsRoutes = require('./src/routes/tickets.routes');
 const chatRoutes    = require('./src/routes/chat.routes');
 const vendorAgreementsRoutes = require('./src/routes/vendorAgreements.routes');
@@ -42,6 +43,11 @@ const workScheduleRoutes = require('./src/routes/workSchedule.routes');
 const holidaysRoutes     = require('./src/routes/holidays.routes');
 const onboardingRoutes   = require('./src/routes/onboarding.routes');
 const interviewSchedulerRoutes = require('./src/routes/interviewScheduler.routes');
+const dailyReportsRoutes = require('./src/routes/dailyReports.routes');
+const weeklyReviewsRoutes = require('./src/routes/weeklyReviews.routes');
+const monthlyEvaluationsRoutes = require('./src/routes/monthlyEvaluations.routes');
+const notificationsRoutes = require('./src/routes/notifications.routes');
+const recurringExpensesRoutes = require('./src/routes/recurringExpenses.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -99,6 +105,7 @@ app.use('/api/reimbursements',   reimbursementsRoutes);
 app.use('/api/announcements',    announcementsRoutes);
 app.use('/api/attendance',       attendanceRoutes);
 app.use('/api/dashboard',        dashboardRoutes);
+app.use('/api/compensation',    compensationRoutes);
 app.use('/api/tickets',          ticketsRoutes);
 app.use('/api/chat',             chatRoutes);
 app.use('/api/vendor-agreements', vendorAgreementsRoutes);
@@ -114,6 +121,11 @@ app.use('/api/work-schedule',         workScheduleRoutes);
 app.use('/api/holidays',              holidaysRoutes);
 app.use('/api/onboarding',            onboardingRoutes);
 app.use('/api/interview-scheduler',   interviewSchedulerRoutes);
+app.use('/api/daily-reports',         dailyReportsRoutes);
+app.use('/api/weekly-reviews',        weeklyReviewsRoutes);
+app.use('/api/monthly-evaluations',   monthlyEvaluationsRoutes);
+app.use('/api/notifications',         notificationsRoutes);
+app.use('/api/recurring-expenses',    recurringExpensesRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
 const { authenticate: authMiddleware } = require('./src/middleware/auth');
@@ -154,4 +166,34 @@ server.listen(PORT, () => {
   // ── Start Payroll Auto-Generate Cron ────────────────────────────────────────
   const { startPayrollCron } = require('./src/jobs/payrollCron');
   startPayrollCron();
+
+  // ── Start Performance Review Cron ──────────────────────────────────────────
+  const { startPerformanceCron } = require('./src/jobs/performanceCron');
+  startPerformanceCron();
+
+  // ── Start Recurring Expenses Cron ───────────────────────────────────────────
+  const { startRecurringExpensesCron } = require('./src/jobs/recurringExpensesCron');
+  startRecurringExpensesCron();
+
+  // ── Start Auto Clock-Out Cron (7:00 PM daily) ──────────────────────────────
+  const { autoClockOut } = require('./src/jobs/autoClockOutCron');
+  const scheduleAutoClockOut = () => {
+    const now = new Date();
+    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 19, 0, 0); // 7:00 PM
+    let delay = target - now;
+
+    // If already past 7 PM today, run immediately for missed clock-outs then schedule tomorrow
+    if (delay < 0) {
+      console.log('⏰  Past 7 PM — running auto clock-out immediately for any missed users');
+      autoClockOut();
+      delay += 24 * 60 * 60 * 1000; // Schedule for tomorrow 7 PM
+    }
+
+    setTimeout(() => {
+      autoClockOut();
+      setInterval(autoClockOut, 24 * 60 * 60 * 1000); // Repeat every 24h
+    }, delay);
+    console.log(`⏰  Auto clock-out scheduled for 7:00 PM (in ${Math.round(delay / 60000)} minutes)`);
+  };
+  scheduleAutoClockOut();
 });

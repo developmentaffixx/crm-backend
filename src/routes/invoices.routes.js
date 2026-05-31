@@ -12,6 +12,9 @@ router.use(authenticate);
 
 // ── Invoices CRUD ─────────────────────────────────────────────────────────────
 
+// GET  /api/invoices/preview-number — preview next invoice number (must be before /:id)
+router.get('/preview-number', invoicesController.previewNumber);
+
 // GET  /api/invoices — list all invoices
 router.get('/', invoicesController.list);
 

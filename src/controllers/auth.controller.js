@@ -90,8 +90,21 @@ exports.register = async (req, res) => {
       [first_name, last_name, email, hash, is_admin ? 1 : 0]
     );
 
-    // Generate emp_code: EMP###
-    const emp_code = `EMP${String(result.insertId).padStart(3, '0')}`;
+    // Generate emp_code: DOUBT for admin, AFID#### for team members
+    let emp_code;
+    if (is_admin) {
+      emp_code = 'DOUBT';
+    } else {
+      const [codeRows] = await db.query(
+        `SELECT emp_code FROM users WHERE emp_code LIKE 'AFID%' AND deleted = 0`
+      );
+      const usedNumbers = codeRows
+        .map(r => parseInt(r.emp_code.replace('AFID', ''), 10))
+        .filter(n => !isNaN(n));
+      let next = 1;
+      while (usedNumbers.includes(next)) next++;
+      emp_code = `AFID${String(next).padStart(4, '0')}`;
+    }
     await db.query('UPDATE users SET emp_code = ? WHERE id = ?', [emp_code, result.insertId]);
 
     return res.status(201).json({ message: 'User created', id: result.insertId });

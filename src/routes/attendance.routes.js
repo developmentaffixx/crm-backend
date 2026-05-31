@@ -9,7 +9,11 @@ router.use(authenticate);
 // ── Member routes ─────────────────────────────────────────────────────────────
 router.post('/clock-in', ctrl.clockIn);
 router.post('/clock-out', ctrl.clockOut);
+router.post('/force-clock-out', ctrl.forceClockOut);
 router.get('/today', ctrl.getToday);
+router.get('/check-running-timers', ctrl.checkRunningTimers);
+router.get('/check-auto-clockout', ctrl.checkAutoClockOut);
+router.post('/correct-clockout', ctrl.correctClockOut);
 router.get('/my-week', ctrl.getMyWeek);
 router.get('/my-month', ctrl.getMyMonth);
 router.post('/afs/start', ctrl.afsStart);

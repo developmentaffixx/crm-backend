@@ -169,15 +169,19 @@ exports.getOne = async (req, res) => {
     );
     project.shoots = shoots;
 
-    // Fetch project DRS sections
-    const [drs] = await db.query(
-      `SELECT pd.*, CONCAT(u.first_name, ' ', u.last_name) AS completed_by_name
-       FROM project_drs pd
-       LEFT JOIN users u ON u.id = pd.completed_by
-       WHERE pd.project_id = ?`,
-      [project.id]
-    );
-    project.drs = drs;
+    // Fetch DRS sections from client_drs (shared with client)
+    if (project.client_id) {
+      const [drs] = await db.query(
+        `SELECT cd.*, CONCAT(u.first_name, ' ', u.last_name) AS completed_by_name
+         FROM client_drs cd
+         LEFT JOIN users u ON u.id = cd.completed_by
+         WHERE cd.client_id = ?`,
+        [project.client_id]
+      );
+      project.drs = drs;
+    } else {
+      project.drs = [];
+    }
 
     // Fetch project IBRS sections
     const [ibrs] = await db.query(
@@ -426,15 +430,21 @@ exports.getClients = async (req, res) => {
 // PROJECT DRS
 // ─────────────────────────────────────────────────────────────────────────────
 
-// GET /api/projects/:id/drs — get all DRS sections
+// GET /api/projects/:id/drs — get all DRS sections (from client_drs via project's client_id)
 exports.getDrs = async (req, res) => {
   try {
+    // Get the project's client_id
+    const [proj] = await db.query('SELECT client_id FROM projects WHERE id = ?', [req.params.id]);
+    if (proj.length === 0) return res.status(404).json({ message: 'Project not found' });
+    const clientId = proj[0].client_id;
+    if (!clientId) return res.json([]);
+
     const [rows] = await db.query(
-      `SELECT pd.*, CONCAT(u.first_name, ' ', u.last_name) AS completed_by_name
-       FROM project_drs pd
-       LEFT JOIN users u ON u.id = pd.completed_by
-       WHERE pd.project_id = ?`,
-      [req.params.id]
+      `SELECT cd.*, CONCAT(u.first_name, ' ', u.last_name) AS completed_by_name
+       FROM client_drs cd
+       LEFT JOIN users u ON u.id = cd.completed_by
+       WHERE cd.client_id = ?`,
+      [clientId]
     );
     return res.json(rows);
   } catch (err) {
@@ -443,24 +453,37 @@ exports.getDrs = async (req, res) => {
   }
 };
 
-// POST /api/projects/:id/drs/:section — save DRS section
+// POST /api/projects/:id/drs/:section — save DRS section (to client_drs via project's client_id)
 exports.saveDrs = async (req, res) => {
   try {
     const { data, completed } = req.body;
     const section = req.params.section;
 
-    await db.query(
-      `INSERT INTO project_drs (project_id, section, data, completed, completed_by, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE data = VALUES(data), completed = VALUES(completed),
-         completed_by = VALUES(completed_by), completed_at = VALUES(completed_at)`,
-      [
-        req.params.id, section, JSON.stringify(data),
-        completed ? 1 : 0,
-        completed ? req.user.id : null,
-        completed ? new Date() : null
-      ]
-    );
+    // Get the project's client_id
+    const [proj] = await db.query('SELECT client_id FROM projects WHERE id = ?', [req.params.id]);
+    if (proj.length === 0) return res.status(404).json({ message: 'Project not found' });
+    const clientId = proj[0].client_id;
+    if (!clientId) return res.status(400).json({ message: 'Project has no linked client' });
+
+    const validSections = ['account_manager', 'content_writer', 'graphic_designer', 'video_editor', 'videographer', 'ads_manager'];
+    if (!validSections.includes(section)) {
+      return res.status(400).json({ message: 'Invalid DRS section' });
+    }
+
+    const jsonData = JSON.stringify(data || {});
+    const [existing] = await db.query('SELECT id FROM client_drs WHERE client_id = ? AND section = ?', [clientId, section]);
+
+    if (existing.length > 0) {
+      await db.query(
+        `UPDATE client_drs SET data = ?, completed = ?, completed_by = ?, completed_at = ? WHERE client_id = ? AND section = ?`,
+        [jsonData, completed ? 1 : 0, completed ? req.user.id : null, completed ? new Date() : null, clientId, section]
+      );
+    } else {
+      await db.query(
+        `INSERT INTO client_drs (client_id, section, data, completed, completed_by, completed_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [clientId, section, jsonData, completed ? 1 : 0, completed ? req.user.id : null, completed ? new Date() : null]
+      );
+    }
 
     return res.json({ message: 'DRS section saved' });
   } catch (err) {

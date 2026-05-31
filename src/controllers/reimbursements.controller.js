@@ -1,6 +1,5 @@
 const db = require('../config/db');
-const path = require('path');
-const fs   = require('fs');
+const { uploadToCloudinary } = require('../config/cloudinary');
 
 /**
  * GET /api/reimbursements
@@ -91,12 +90,8 @@ exports.create = async (req, res) => {
 
     let receiptUrl = null;
     if (req.file) {
-      const filename = `receipt-${req.user.id}-${Date.now()}${path.extname(req.file.originalname)}`;
-      const uploadDir = path.join(__dirname, '../../uploads');
-      if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-      const filepath = path.join(uploadDir, filename);
-      fs.writeFileSync(filepath, req.file.buffer);
-      receiptUrl = `/uploads/${filename}`;
+      const { url } = await uploadToCloudinary(req.file.buffer, 'crm/reimbursements', 'auto');
+      receiptUrl = url;
     }
 
     const [result] = await db.query(

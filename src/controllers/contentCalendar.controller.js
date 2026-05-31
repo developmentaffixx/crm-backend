@@ -4,6 +4,21 @@ const db = require('../config/db');
 const toNull = (val) => (val === '' || val === undefined || val === null) ? null : val;
 const toInt = (val) => { const n = parseInt(val); return isNaN(n) ? null : n; };
 
+// ─── Generate next global Ad No (e.g. AD-001, AD-002 ...) ────────────────────
+// Queries the MAX numeric suffix across ALL ads in the table so every ad
+// across every plan and every user gets a unique sequential number.
+async function generateNextAdNo(conn) {
+  const [rows] = await conn.query(
+    `SELECT ad_no FROM content_calendar_ads WHERE ad_no REGEXP '^AD-[0-9]+$' ORDER BY CAST(SUBSTRING(ad_no, 4) AS UNSIGNED) DESC LIMIT 1`
+  );
+  let next = 1;
+  if (rows.length > 0) {
+    const last = parseInt(rows[0].ad_no.replace('AD-', ''), 10);
+    if (!isNaN(last)) next = last + 1;
+  }
+  return `AD-${String(next).padStart(3, '0')}`;
+}
+
 // ─── LIST PLANS ───────────────────────────────────────────────────────────────
 
 exports.list = async (req, res) => {
@@ -77,20 +92,25 @@ exports.getOne = async (req, res) => {
 
     // Fetch children
     const [posts] = await db.query(
-      `SELECT cp.*, cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code
+      `SELECT cp.*,
+              cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
+              cwr.content_type AS brief_content_type, cwr.platform AS brief_platform,
+              cwr.call_to_action AS brief_cta
        FROM content_calendar_posts cp
        LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
        WHERE cp.plan_id = ?
-       ORDER BY cp.posting_date ASC, cp.post_no ASC`,
+       ORDER BY cp.id ASC`,
       [plan.id]
     );
 
     const [shoots] = await db.query(
-      `SELECT cs.*, s.shoot_id_code AS linked_shoot_code
+      `SELECT cs.*,
+              s.shoot_id_code AS linked_shoot_code, s.project_campaign_name AS shoot_name,
+              s.shoot_date AS linked_shoot_date, s.city AS shoot_city, s.location_type AS shoot_location_type
        FROM content_calendar_shoots cs
        LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
        WHERE cs.plan_id = ?
-       ORDER BY cs.shoot_date ASC`,
+       ORDER BY cs.id ASC`,
       [plan.id]
     );
 
@@ -114,17 +134,22 @@ exports.create = async (req, res) => {
 
   const { client_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, posts, shoots, ads } = req.body;
 
+  const conn = await db.getConnection();
   try {
+    await conn.beginTransaction();
+
     // Check for duplicate client+month
-    const [existing] = await db.query(
+    const [existing] = await conn.query(
       'SELECT id FROM content_calendar_plans WHERE client_id = ? AND plan_month = ? AND deleted = 0',
       [client_id, plan_month]
     );
     if (existing.length > 0) {
+      await conn.rollback();
+      conn.release();
       return res.status(400).json({ message: 'A plan already exists for this client and month' });
     }
 
-    const [result] = await db.query(
+    const [result] = await conn.query(
       `INSERT INTO content_calendar_plans 
         (client_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, created_by)
        VALUES (?, ?, ?, ?, ?, ?, 'draft', ?)`,
@@ -136,12 +161,13 @@ exports.create = async (req, res) => {
     // Insert posts
     if (posts && posts.length > 0) {
       for (const post of posts) {
-        await db.query(
+        await conn.query(
           `INSERT INTO content_calendar_posts 
             (plan_id, linked_brief_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [planId, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform), post.format, post.topic,
-           post.ad_target || 'organic', toNull(post.shoot_date), post.posting_date, toNull(post.cta), post.status || 'planned']
+          [planId, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform),
+           toNull(post.format), toNull(post.topic), post.ad_target || 'organic',
+           toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta), post.status || 'planned']
         );
       }
     }
@@ -149,31 +175,35 @@ exports.create = async (req, res) => {
     // Insert shoots
     if (shoots && shoots.length > 0) {
       for (const shoot of shoots) {
-        await db.query(
+        await conn.query(
           `INSERT INTO content_calendar_shoots 
             (plan_id, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [planId, toInt(shoot.linked_shoot_id), shoot.shoot_date, toNull(shoot.location), toNull(shoot.description),
-           shoot.num_videos || 0, shoot.num_photos || 0, toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned']
+          [planId, toInt(shoot.linked_shoot_id), toNull(shoot.shoot_date), toNull(shoot.location),
+           toNull(shoot.description), shoot.num_videos || 0, shoot.num_photos || 0,
+           toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned']
         );
       }
     }
 
-    // Insert ads
+    // Insert ads — generate ad_no sequentially from global max
     if (ads && ads.length > 0) {
       for (const ad of ads) {
-        await db.query(
+        const adNo = await generateNextAdNo(conn);
+        await conn.query(
           `INSERT INTO content_calendar_ads 
             (plan_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [planId, toNull(ad.ad_no), toNull(ad.creative_name), ad.campaign_objective, toNull(ad.platform),
+          [planId, adNo, toNull(ad.creative_name), ad.campaign_objective, toNull(ad.platform),
            ad.ad_status || 'planned', toNull(ad.target_audience), toNull(ad.budget), ad.start_date, toNull(ad.end_date), toNull(ad.expected_outcomes)]
         );
       }
     }
 
+    await conn.commit();
+
     // Fetch full plan
-    const [plans] = await db.query(
+    const [plans] = await conn.query(
       `SELECT p.*, l.business_name AS client_name
        FROM content_calendar_plans p
        LEFT JOIN leads l ON l.id = p.client_id
@@ -181,9 +211,12 @@ exports.create = async (req, res) => {
       [planId]
     );
 
+    conn.release();
     res.emitSocket('content-calendar:created', plans[0]);
     return res.status(201).json(plans[0]);
   } catch (err) {
+    await conn.rollback();
+    conn.release();
     console.error('Content calendar create error:', err.message, err.sql || '');
     return res.status(500).json({ message: 'Server error: ' + err.message });
   }
@@ -192,12 +225,19 @@ exports.create = async (req, res) => {
 // ─── UPDATE PLAN ──────────────────────────────────────────────────────────────
 
 exports.update = async (req, res) => {
+  const conn = await db.getConnection();
   try {
-    const [plans] = await db.query('SELECT * FROM content_calendar_plans WHERE id = ? AND deleted = 0', [req.params.id]);
-    if (plans.length === 0) return res.status(404).json({ message: 'Plan not found' });
+    await conn.beginTransaction();
+
+    const [plans] = await conn.query('SELECT * FROM content_calendar_plans WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (plans.length === 0) {
+      await conn.rollback(); conn.release();
+      return res.status(404).json({ message: 'Plan not found' });
+    }
 
     const plan = plans[0];
     if (!req.user.is_admin && plan.created_by !== req.user.id) {
+      await conn.rollback(); conn.release();
       return res.status(403).json({ message: 'Access denied' });
     }
 
@@ -215,20 +255,21 @@ exports.update = async (req, res) => {
 
     if (Object.keys(planUpdates).length > 0) {
       const setClauses = Object.keys(planUpdates).map(k => `${k} = ?`).join(', ');
-      await db.query(`UPDATE content_calendar_plans SET ${setClauses} WHERE id = ?`, [...Object.values(planUpdates), req.params.id]);
+      await conn.query(`UPDATE content_calendar_plans SET ${setClauses} WHERE id = ?`, [...Object.values(planUpdates), req.params.id]);
     }
 
     // Replace posts (delete all + re-insert)
     if (posts !== undefined) {
-      await db.query('DELETE FROM content_calendar_posts WHERE plan_id = ?', [req.params.id]);
+      await conn.query('DELETE FROM content_calendar_posts WHERE plan_id = ?', [req.params.id]);
       if (posts.length > 0) {
         for (const post of posts) {
-          await db.query(
+          await conn.query(
             `INSERT INTO content_calendar_posts 
               (plan_id, linked_brief_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.params.id, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform), post.format, post.topic,
-             post.ad_target || 'organic', toNull(post.shoot_date), post.posting_date, toNull(post.cta), post.status || 'planned']
+            [req.params.id, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform),
+             toNull(post.format), toNull(post.topic), post.ad_target || 'organic',
+             toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta), post.status || 'planned']
           );
         }
       }
@@ -236,38 +277,49 @@ exports.update = async (req, res) => {
 
     // Replace shoots
     if (shoots !== undefined) {
-      await db.query('DELETE FROM content_calendar_shoots WHERE plan_id = ?', [req.params.id]);
+      await conn.query('DELETE FROM content_calendar_shoots WHERE plan_id = ?', [req.params.id]);
       if (shoots.length > 0) {
         for (const shoot of shoots) {
-          await db.query(
+          await conn.query(
             `INSERT INTO content_calendar_shoots 
               (plan_id, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.params.id, toInt(shoot.linked_shoot_id), shoot.shoot_date, toNull(shoot.location), toNull(shoot.description),
-             shoot.num_videos || 0, shoot.num_photos || 0, toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned']
+            [req.params.id, toInt(shoot.linked_shoot_id), toNull(shoot.shoot_date), toNull(shoot.location),
+             toNull(shoot.description), shoot.num_videos || 0, shoot.num_photos || 0,
+             toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned']
           );
         }
       }
     }
 
-    // Replace ads
+    // Replace ads — preserve existing ad_no if already set, generate new ones for new ads
     if (ads !== undefined) {
-      await db.query('DELETE FROM content_calendar_ads WHERE plan_id = ?', [req.params.id]);
+      // Fetch existing ads to preserve their ad_no values
+      const [existingAds] = await conn.query(
+        'SELECT id, ad_no FROM content_calendar_ads WHERE plan_id = ? ORDER BY id ASC',
+        [req.params.id]
+      );
+      await conn.query('DELETE FROM content_calendar_ads WHERE plan_id = ?', [req.params.id]);
       if (ads.length > 0) {
-        for (const ad of ads) {
-          await db.query(
+        for (let i = 0; i < ads.length; i++) {
+          const ad = ads[i];
+          // Reuse existing ad_no if available, otherwise generate a new global one
+          let adNo = (existingAds[i] && existingAds[i].ad_no) ? existingAds[i].ad_no : await generateNextAdNo(conn);
+          await conn.query(
             `INSERT INTO content_calendar_ads 
               (plan_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.params.id, toNull(ad.ad_no), toNull(ad.creative_name), ad.campaign_objective, toNull(ad.platform),
+            [req.params.id, adNo, toNull(ad.creative_name), ad.campaign_objective, toNull(ad.platform),
              ad.ad_status || 'planned', toNull(ad.target_audience), toNull(ad.budget), ad.start_date, toNull(ad.end_date), toNull(ad.expected_outcomes)]
           );
         }
       }
     }
 
+    await conn.commit();
+
     // Fetch updated plan
-    const [updated] = await db.query(
+    const [updated] = await conn.query(
       `SELECT p.*, l.business_name AS client_name
        FROM content_calendar_plans p
        LEFT JOIN leads l ON l.id = p.client_id
@@ -275,9 +327,12 @@ exports.update = async (req, res) => {
       [req.params.id]
     );
 
+    conn.release();
     res.emitSocket('content-calendar:updated', updated[0]);
     return res.json(updated[0]);
   } catch (err) {
+    await conn.rollback();
+    conn.release();
     console.error('Content calendar update error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
@@ -351,24 +406,30 @@ exports.calendarView = async (req, res) => {
 
     // Fetch posts for these plans within the month
     const [posts] = await db.query(
-      `SELECT cp.*, p.client_id, l.business_name AS client_name
+      `SELECT cp.*, p.client_id, l.business_name AS client_name,
+              cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
+              cwr.content_type AS brief_content_type, cwr.platform AS brief_platform
        FROM content_calendar_posts cp
        JOIN content_calendar_plans p ON p.id = cp.plan_id
        LEFT JOIN leads l ON l.id = p.client_id
-       WHERE cp.plan_id IN (?) AND cp.posting_date BETWEEN ? AND ?
-       ORDER BY cp.posting_date ASC`,
-      [planIds, startDate, endDate]
+       LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
+       WHERE cp.plan_id IN (?)
+       ORDER BY cp.id ASC`,
+      [planIds]
     );
 
     // Fetch shoots for these plans within the month
     const [shoots] = await db.query(
-      `SELECT cs.*, p.client_id, l.business_name AS client_name
+      `SELECT cs.*, p.client_id, l.business_name AS client_name,
+              s.shoot_id_code AS linked_shoot_code, s.project_campaign_name AS shoot_name,
+              s.shoot_date AS linked_shoot_date, s.city AS shoot_city
        FROM content_calendar_shoots cs
        JOIN content_calendar_plans p ON p.id = cs.plan_id
        LEFT JOIN leads l ON l.id = p.client_id
-       WHERE cs.plan_id IN (?) AND cs.shoot_date BETWEEN ? AND ?
-       ORDER BY cs.shoot_date ASC`,
-      [planIds, startDate, endDate]
+       LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
+       WHERE cs.plan_id IN (?)
+       ORDER BY cs.id ASC`,
+      [planIds]
     );
 
     // Fetch ads for these plans that overlap with the month
@@ -377,9 +438,9 @@ exports.calendarView = async (req, res) => {
        FROM content_calendar_ads ca
        JOIN content_calendar_plans p ON p.id = ca.plan_id
        LEFT JOIN leads l ON l.id = p.client_id
-       WHERE ca.plan_id IN (?) AND ca.start_date <= ? AND (ca.end_date >= ? OR ca.end_date IS NULL)
+       WHERE ca.plan_id IN (?)
        ORDER BY ca.start_date ASC`,
-      [planIds, endDate, startDate]
+      [planIds]
     );
 
     return res.json({ posts, shoots, ads, plans });

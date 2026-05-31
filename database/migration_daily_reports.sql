@@ -1,0 +1,25 @@
+-- Daily Reports table for ACQS team daily reporting
+CREATE TABLE IF NOT EXISTS daily_reports (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  report_date DATE NOT NULL,
+  industries_focused VARCHAR(255) DEFAULT NULL,
+  leads_sourced INT DEFAULT 0,
+  instagram_outreach INT DEFAULT 0,
+  whatsapp_outreach INT DEFAULT 0,
+  email_outreach INT DEFAULT 0,
+  linkedin_outreach INT DEFAULT 0,
+  calls_done INT DEFAULT 0,
+  follow_ups_done INT DEFAULT 0,
+  replies_received INT DEFAULT 0,
+  interested_leads INT DEFAULT 0,
+  meetings_booked INT DEFAULT 0,
+  crm_updated TINYINT(1) DEFAULT 0,
+  hot_leads TEXT DEFAULT NULL,
+  problems_faced TEXT DEFAULT NULL,
+  tomorrow_focus TEXT DEFAULT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_user_id (user_id),
+  UNIQUE KEY unique_user_date (user_id, report_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -1,25 +1,47 @@
 const db = require('../config/db');
-const path = require('path');
-const fs = require('fs');
+const { uploadToCloudinary } = require('../config/cloudinary');
 
 // ─── Helper: Generate invoice number ──────────────────────────────────────────
-async function generateInvoiceNumber() {
+// Format: INV-YYMM-CLIENTCODE-### (e.g. INV-2504-AFXCL001-001)
+// Sequence resets to 001 every month per client
+async function generateInvoiceNumber(leadId) {
   const now = new Date();
-  const prefix = `INV-${String(now.getDate()).padStart(2, '0')}${String(now.getMonth() + 1).padStart(2, '0')}`;
-  
-  // Get company short code
-  const [company] = await db.query('SELECT company_name FROM company_settings WHERE id = 1');
-  const companyName = company[0]?.company_name || 'CRM';
-  const code = companyName.replace(/[^A-Z]/gi, '').substring(0, 5).toUpperCase() || 'CRM';
+  const yymm = `${String(now.getFullYear()).slice(-2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-  // Get next sequence for today
+  // Get client code from leads table
+  let clientCode = 'CLIENT';
+  if (leadId) {
+    const [leadRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [leadId]);
+    if (leadRows[0]?.client_code) {
+      clientCode = leadRows[0].client_code;
+    }
+  }
+
+  // Count invoices for this client in the current month (resets monthly per client)
   const [count] = await db.query(
-    `SELECT COUNT(*) as cnt FROM invoices WHERE DATE(created_at) = CURDATE()`
+    `SELECT COUNT(*) AS cnt
+     FROM invoices
+     WHERE lead_id = ?
+       AND DATE_FORMAT(created_at, '%y%m') = ?
+       AND deleted = 0`,
+    [leadId || null, yymm]
   );
   const seq = String((count[0]?.cnt || 0) + 1).padStart(3, '0');
 
-  return `${prefix}-${code}-${seq}`;
+  return `INV-${yymm}-${clientCode}-${seq}`;
 }
+
+// ─── GET /api/invoices/preview-number — preview next invoice number ───────────
+// Pass ?lead_id=<id> to get the correct client-specific preview
+exports.previewNumber = async (req, res) => {
+  try {
+    const number = await generateInvoiceNumber(req.query.lead_id || null);
+    return res.json({ invoice_number: number });
+  } catch (err) {
+    console.error('Invoice previewNumber error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
 
 // ─── GET /api/invoices ────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
@@ -133,7 +155,7 @@ exports.create = async (req, res) => {
   } = req.body;
 
   try {
-    const invoice_number = await generateInvoiceNumber();
+    const invoice_number = await generateInvoiceNumber(lead_id || null);
 
     // Calculate totals
     let subtotal = 0;
@@ -363,14 +385,7 @@ exports.uploadQR = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-    const filename = `invoice-qr-${Date.now()}${path.extname(req.file.originalname)}`;
-    const uploadDir = path.join(__dirname, '../../uploads');
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-
-    const filepath = path.join(uploadDir, filename);
-    fs.writeFileSync(filepath, req.file.buffer);
-
-    const url = `/uploads/${filename}`;
+    const { url } = await uploadToCloudinary(req.file.buffer, 'crm/invoice-qr', 'image');
     await db.query('UPDATE invoices SET qr_code_url = ? WHERE id = ?', [url, req.params.id]);
 
     return res.json({ message: 'QR code uploaded', url });

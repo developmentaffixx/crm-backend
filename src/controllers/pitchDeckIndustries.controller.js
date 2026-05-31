@@ -1,6 +1,5 @@
 const db = require('../config/db');
-const path = require('path');
-const fs = require('fs');
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LIST all active industries
@@ -47,9 +46,42 @@ exports.create = async (req, res) => {
 
   if (!name) return res.status(400).json({ message: 'Name is required' });
 
-  const generatedSlug = slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  let generatedSlug = slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
   try {
+    // Check if a deactivated industry with the same slug exists — reactivate it
+    const [existing] = await db.query(
+      'SELECT * FROM pitch_deck_industries WHERE slug = ?',
+      [generatedSlug]
+    );
+
+    if (existing.length > 0 && existing[0].is_active === 0) {
+      // Reactivate the soft-deleted industry with updated details
+      await db.query(
+        `UPDATE pitch_deck_industries SET
+          name = ?, is_active = 1, description = ?, icon = ?,
+          primary_color = ?, secondary_color = ?, accent_color = ?,
+          light_bg = ?, light_accent = ?, layout_variant = ?,
+          is_default = ?, sort_order = ?
+         WHERE id = ?`,
+        [
+          name, description || existing[0].description, icon || existing[0].icon || '📊',
+          primary_color || existing[0].primary_color, secondary_color || existing[0].secondary_color,
+          accent_color || existing[0].accent_color, light_bg || existing[0].light_bg,
+          light_accent || existing[0].light_accent, layout_variant || existing[0].layout_variant,
+          is_default ? 1 : 0, sort_order || 0,
+          existing[0].id
+        ]
+      );
+      const [reactivated] = await db.query('SELECT * FROM pitch_deck_industries WHERE id = ?', [existing[0].id]);
+      return res.status(201).json(reactivated[0]);
+    }
+
+    // If slug already exists and is active, make the slug unique
+    if (existing.length > 0) {
+      generatedSlug = `${generatedSlug}-${Date.now()}`;
+    }
+
     const [result] = await db.query(
       `INSERT INTO pitch_deck_industries (name, slug, description, icon, primary_color, secondary_color, accent_color, light_bg, light_accent, layout_variant, img_hero, img_team, img_services, img_goals, img_plans, img_thanks, is_default, sort_order)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -68,7 +100,7 @@ exports.create = async (req, res) => {
     return res.status(201).json(created[0]);
   } catch (err) {
     console.error('PitchDeckIndustries create error:', err);
-    if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ message: 'Industry slug already exists' });
+    if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ message: 'An industry with this name already exists' });
     return res.status(500).json({ message: 'Server error' });
   }
 };
@@ -137,14 +169,14 @@ exports.uploadImage = async (req, res) => {
 
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-    const filename = `industry-${id}-${slot}-${Date.now()}${path.extname(req.file.originalname)}`;
-    const uploadDir = path.join(__dirname, '../../uploads');
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+    // Delete old image from Cloudinary
+    const oldUrl = rows[0]?.[slot];
+    if (oldUrl) {
+      const oldPublicId = extractPublicId(oldUrl);
+      if (oldPublicId) await deleteFromCloudinary(oldPublicId, 'image');
+    }
 
-    const filepath = path.join(uploadDir, filename);
-    fs.writeFileSync(filepath, req.file.buffer);
-
-    const url = `/uploads/${filename}`;
+    const { url } = await uploadToCloudinary(req.file.buffer, 'crm/pitch-deck-industries', 'image');
     await db.query(`UPDATE pitch_deck_industries SET ${slot} = ? WHERE id = ?`, [url, id]);
 
     return res.json({ message: 'Image uploaded', url, slot });

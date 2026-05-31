@@ -47,6 +47,12 @@ router.put('/:id', param('id').isInt(), payrollController.update);
 // PUT  /api/payroll/:id/mark-paid — mark as paid
 router.put('/:id/mark-paid', param('id').isInt(), payrollController.markPaid);
 
+// POST /api/payroll/:id/payslip-pdf — generate & download payslip PDF
+router.post('/:id/payslip-pdf', param('id').isInt(), payrollController.generatePayslipPdf);
+
+// POST /api/payroll/payslip-range-pdf — generate multi-month payslip PDF for one employee
+router.post('/payslip-range-pdf', payrollController.generatePayslipRangePdf);
+
 // DELETE /api/payroll/:id — soft delete
 router.delete('/:id', param('id').isInt(), payrollController.remove);
 

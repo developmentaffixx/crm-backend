@@ -107,6 +107,44 @@ exports.stats = async (req, res) => {
 };
 
 /**
+ * GET /api/tickets/my-active-timer
+ * Returns the current user's active ticket timer (if any)
+ */
+exports.getMyActiveTimer = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT tat.ticket_id, tat.started_at, t.title AS ticket_title
+       FROM ticket_active_timers tat
+       JOIN tickets t ON t.id = tat.ticket_id
+       WHERE tat.user_id = ?
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (rows.length === 0) {
+      return res.json({ active: false });
+    }
+
+    // Check if AFS is currently active (timer should show as paused)
+    const [activeAfs] = await db.query(
+      'SELECT id FROM afs_logs WHERE user_id = ? AND end_time IS NULL LIMIT 1',
+      [req.user.id]
+    );
+    const paused = activeAfs.length > 0;
+
+    return res.json({
+      active: true,
+      paused,
+      ticket_id: rows[0].ticket_id,
+      ticket_title: rows[0].ticket_title,
+      started_at: rows[0].started_at,
+    });
+  } catch (err) {
+    console.error('my-active-ticket-timer error:', err);
+    return res.json({ active: false });
+  }
+};
+
+/**
  * GET /api/tickets/:id
  */
 exports.getOne = async (req, res) => {
@@ -479,6 +517,289 @@ exports.addTimeLog = async (req, res) => {
     return res.status(201).json(timeLog[0]);
   } catch (err) {
     console.error('Ticket time log error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TIMER ENDPOINTS (Work mode — start/stop like tasks)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/tickets/:id/timer/start
+ */
+exports.startTimer = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM tickets WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Ticket not found' });
+
+    const ticket = rows[0];
+
+    if (ticket.mode !== 'work') {
+      return res.status(400).json({ message: 'Timer is only available for Work mode tickets' });
+    }
+
+    // Only assigned user or admin can start timer
+    if (!req.user.is_admin && ticket.assigned_to !== req.user.id) {
+      return res.status(403).json({ message: 'Only the assigned user can track time on this ticket' });
+    }
+
+    if (['resolved', 'closed'].includes(ticket.status)) {
+      return res.status(400).json({ message: 'Cannot start timer on resolved/closed tickets' });
+    }
+
+    // Must be clocked in
+    const [attendance] = await db.query(
+      `SELECT id, clock_in, clock_out FROM attendance
+       WHERE user_id = ? AND date = CURDATE()
+       ORDER BY id DESC LIMIT 1`,
+      [req.user.id]
+    );
+    if (attendance.length === 0 || !attendance[0].clock_in) {
+      return res.status(400).json({ message: 'You must clock in before starting a ticket timer' });
+    }
+    if (attendance[0].clock_out) {
+      return res.status(400).json({ message: 'You have already clocked out. Timer cannot be started after clock out.' });
+    }
+
+    // Block timer during AFS
+    const [activeAfs] = await db.query(
+      'SELECT id FROM afs_logs WHERE user_id = ? AND end_time IS NULL LIMIT 1',
+      [req.user.id]
+    );
+    if (activeAfs.length > 0) {
+      return res.status(400).json({ message: 'Cannot start timer while AFS is active. End your AFS break first.' });
+    }
+
+    // Check if user already has a timer running on this ticket
+    const [existingTimer] = await db.query(
+      'SELECT 1 FROM ticket_active_timers WHERE ticket_id = ? AND user_id = ?',
+      [ticket.id, req.user.id]
+    );
+    if (existingTimer.length > 0) {
+      return res.status(400).json({ message: 'Your timer is already running on this ticket' });
+    }
+
+    // One active timer per user across all tasks AND tickets
+    const [runningTask] = await db.query(
+      `SELECT tat.task_id, t.title
+       FROM task_active_timers tat
+       JOIN tasks t ON t.id = tat.task_id
+       WHERE tat.user_id = ?
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (runningTask.length > 0) {
+      return res.status(400).json({
+        message: `You already have a timer running on task "${runningTask[0].title}". Stop it first.`,
+        conflicting_task_id: runningTask[0].task_id,
+      });
+    }
+
+    const [runningTicket] = await db.query(
+      `SELECT tat.ticket_id, t.title
+       FROM ticket_active_timers tat
+       JOIN tickets t ON t.id = tat.ticket_id
+       WHERE tat.user_id = ? AND tat.ticket_id != ?
+       LIMIT 1`,
+      [req.user.id, ticket.id]
+    );
+    if (runningTicket.length > 0) {
+      return res.status(400).json({
+        message: `You already have a timer running on ticket "${runningTicket[0].title}". Stop it first.`,
+        conflicting_ticket_id: runningTicket[0].ticket_id,
+      });
+    }
+
+    // Block if a meeting timer is running
+    const [runningMeeting] = await db.query(
+      `SELECT mat.meeting_id, m.title
+       FROM meeting_active_timers mat
+       JOIN meetings m ON m.id = mat.meeting_id
+       WHERE mat.user_id = ?
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (runningMeeting.length > 0) {
+      return res.status(400).json({
+        message: `You already have a timer running on meeting "${runningMeeting[0].title}". Stop it first.`,
+        conflicting_meeting_id: runningMeeting[0].meeting_id,
+      });
+    }
+
+    const now = new Date();
+
+    await db.query(
+      'INSERT INTO ticket_active_timers (ticket_id, user_id, started_at) VALUES (?, ?, ?)',
+      [ticket.id, req.user.id, now]
+    );
+
+    // Update legacy timer_started_at
+    if (!ticket.timer_started_at) {
+      await db.query('UPDATE tickets SET timer_started_at = ? WHERE id = ?', [now, ticket.id]);
+    }
+
+    // Auto-change status to in_progress if currently open
+    if (ticket.status === 'open') {
+      await db.query('UPDATE tickets SET status = ? WHERE id = ?', ['in_progress', ticket.id]);
+    }
+
+    return res.json({ timer_started_at: now, status: ticket.status === 'open' ? 'in_progress' : ticket.status });
+  } catch (err) {
+    console.error('Ticket startTimer error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/tickets/:id/timer/stop
+ */
+exports.stopTimer = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM tickets WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Ticket not found' });
+
+    const ticket = rows[0];
+
+    if (!req.user.is_admin && ticket.assigned_to !== req.user.id) {
+      return res.status(403).json({ message: 'Only the assigned user can track time on this ticket' });
+    }
+
+    // Check if user has an active timer on this ticket
+    const [activeTimer] = await db.query(
+      'SELECT * FROM ticket_active_timers WHERE ticket_id = ? AND user_id = ?',
+      [ticket.id, req.user.id]
+    );
+
+    if (activeTimer.length === 0) {
+      return res.status(400).json({ message: 'Timer is not running' });
+    }
+
+    const timer = activeTimer[0];
+    const now = new Date();
+    const startedAt = new Date(timer.started_at);
+    const durationSec = Math.max(1, Math.floor((now - startedAt) / 1000));
+    const durationMin = Math.max(1, Math.round(durationSec / 60));
+    const note = req.body.note || null;
+
+    // Save time log entry with both minutes (legacy) and duration (new)
+    await db.query(
+      `INSERT INTO ticket_time_logs (ticket_id, user_id, minutes, description, log_date, started_at, ended_at, duration)
+       VALUES (?, ?, ?, ?, CURDATE(), ?, ?, ?)`,
+      [ticket.id, req.user.id, durationMin, note, startedAt, now, durationSec]
+    );
+
+    // Remove active timer
+    await db.query(
+      'DELETE FROM ticket_active_timers WHERE ticket_id = ? AND user_id = ?',
+      [ticket.id, req.user.id]
+    );
+
+    // Update total_time_minutes
+    await db.query(
+      'UPDATE tickets SET total_time_minutes = total_time_minutes + ? WHERE id = ?',
+      [durationMin, ticket.id]
+    );
+
+    // If no more active timers, clear legacy timer_started_at
+    const [remaining] = await db.query(
+      'SELECT 1 FROM ticket_active_timers WHERE ticket_id = ?',
+      [ticket.id]
+    );
+    if (remaining.length === 0) {
+      await db.query('UPDATE tickets SET timer_started_at = NULL WHERE id = ?', [ticket.id]);
+    }
+
+    // Log activity
+    const hours = Math.floor(durationMin / 60);
+    const mins = durationMin % 60;
+    const timeStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, new_value, comment)
+       VALUES (?, ?, 'time_log', ?, ?)`,
+      [ticket.id, req.user.id, timeStr, note]
+    );
+
+    // Get updated ticket
+    const [updated] = await db.query('SELECT total_time_minutes FROM tickets WHERE id = ?', [ticket.id]);
+
+    return res.json({
+      total_time_minutes: updated[0].total_time_minutes,
+      duration: durationSec,
+      timer_started_at: null,
+    });
+  } catch (err) {
+    console.error('Ticket stopTimer error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/tickets/:id/timer/status
+ */
+exports.getTimerStatus = async (req, res) => {
+  try {
+    const [timer] = await db.query(
+      'SELECT * FROM ticket_active_timers WHERE ticket_id = ? AND user_id = ?',
+      [req.params.id, req.user.id]
+    );
+
+    const [allTimers] = await db.query(
+      `SELECT tat.user_id, tat.started_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name
+       FROM ticket_active_timers tat
+       JOIN users u ON u.id = tat.user_id
+       WHERE tat.ticket_id = ?`,
+      [req.params.id]
+    );
+
+    return res.json({
+      my_timer: timer.length > 0 ? timer[0] : null,
+      active_timers: allTimers,
+    });
+  } catch (err) {
+    console.error('Ticket getTimerStatus error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/tickets/:id/timer/logs
+ * Returns time log entries + active timers for the ticket
+ */
+exports.getTimerLogs = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM tickets WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Ticket not found' });
+
+    const ticket = rows[0];
+
+    const [logs] = await db.query(
+      `SELECT tl.*, CONCAT(u.first_name, ' ', u.last_name) AS user_name
+       FROM ticket_time_logs tl
+       JOIN users u ON u.id = tl.user_id
+       WHERE tl.ticket_id = ?
+       ORDER BY tl.created_at DESC`,
+      [ticket.id]
+    );
+
+    const [activeTimers] = await db.query(
+      `SELECT tat.user_id, tat.started_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name
+       FROM ticket_active_timers tat
+       JOIN users u ON u.id = tat.user_id
+       WHERE tat.ticket_id = ?`,
+      [ticket.id]
+    );
+
+    return res.json({
+      logs,
+      active_timers: activeTimers,
+      total_time_minutes: ticket.total_time_minutes,
+      timer_started_at: ticket.timer_started_at,
+    });
+  } catch (err) {
+    console.error('Ticket getTimerLogs error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

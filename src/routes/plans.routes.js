@@ -9,6 +9,9 @@ router.use(authenticate);
 
 // ── Services ──────────────────────────────────────────────────────────────────
 
+// GET  /api/plans/services/invoice-list — lightweight list for invoice dropdown
+router.get('/services/invoice-list', plansController.listServicesForInvoice);
+
 // GET  /api/plans/services — list all services with plans
 router.get('/services', plansController.listServices);
 

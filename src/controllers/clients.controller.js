@@ -542,6 +542,120 @@ exports.saveDrs = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CLIENT SERVICES
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/clients/:id/services
+ * Returns all services (with their plans) assigned to this client via client_plans
+ */
+exports.getClientServices = async (req, res) => {
+  try {
+    const clientId = req.params.id;
+
+    // Fetch all active client_plans for this client, grouped by service
+    const [rows] = await db.query(
+      `SELECT
+         s.id          AS service_id,
+         s.name        AS service_name,
+         s.description AS service_description,
+         s.icon        AS service_icon,
+         cp.id         AS client_plan_id,
+         cp.status     AS plan_status,
+         cp.start_date,
+         cp.end_date,
+         cp.amount,
+         cp.notes,
+         cp.created_at AS assigned_at,
+         p.id          AS plan_id,
+         p.name        AS plan_name,
+         p.price       AS plan_price,
+         p.duration    AS plan_duration,
+         CONCAT(u.first_name, ' ', u.last_name) AS assigned_by_name
+       FROM client_plans cp
+       INNER JOIN services s ON s.id = cp.service_id
+       INNER JOIN plans    p ON p.id = cp.plan_id
+       LEFT  JOIN users    u ON u.id = cp.created_by
+       WHERE cp.client_id = ?
+       ORDER BY cp.status = 'active' DESC, s.name ASC, cp.start_date DESC`,
+      [clientId]
+    );
+
+    // Group by service
+    const servicesMap = {};
+    for (const row of rows) {
+      if (!servicesMap[row.service_id]) {
+        servicesMap[row.service_id] = {
+          id: row.service_id,
+          name: row.service_name,
+          description: row.service_description,
+          icon: row.service_icon,
+          plans: [],
+        };
+      }
+      servicesMap[row.service_id].plans.push({
+        client_plan_id: row.client_plan_id,
+        plan_id: row.plan_id,
+        plan_name: row.plan_name,
+        plan_price: row.plan_price,
+        plan_duration: row.plan_duration,
+        status: row.plan_status,
+        start_date: row.start_date,
+        end_date: row.end_date,
+        amount: row.amount,
+        notes: row.notes,
+        assigned_at: row.assigned_at,
+        assigned_by_name: row.assigned_by_name,
+      });
+    }
+
+    return res.json(Object.values(servicesMap));
+  } catch (err) {
+    console.error('Get client services error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/clients/:id/services
+ * Assign a service+plan to this client (delegates to client_plans)
+ */
+exports.addClientService = async (req, res) => {
+  try {
+    const clientId = req.params.id;
+    const { plan_id, service_id, start_date, end_date, amount, notes } = req.body;
+
+    if (!plan_id || !service_id || !start_date) {
+      return res.status(400).json({ message: 'plan_id, service_id, and start_date are required' });
+    }
+
+    const [result] = await db.query(
+      `INSERT INTO client_plans (client_id, plan_id, service_id, start_date, end_date, amount, notes, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [clientId, plan_id, service_id, start_date, end_date || null, amount || 0, notes || null, req.user.id]
+    );
+
+    const [row] = await db.query(
+      `SELECT cp.*,
+              p.name AS plan_name, p.price AS plan_price, p.duration AS plan_duration,
+              s.name AS service_name, s.icon AS service_icon,
+              CONCAT(u.first_name, ' ', u.last_name) AS assigned_by_name
+       FROM client_plans cp
+       INNER JOIN plans    p ON p.id = cp.plan_id
+       INNER JOIN services s ON s.id = cp.service_id
+       LEFT  JOIN users    u ON u.id = cp.created_by
+       WHERE cp.id = ?`,
+      [result.insertId]
+    );
+
+    return res.status(201).json(row[0]);
+  } catch (err) {
+    console.error('Add client service error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CLIENT RECENT ACTIVITY (aggregated timeline)
 // ─────────────────────────────────────────────────────────────────────────────
 

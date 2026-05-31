@@ -612,6 +612,76 @@ exports.getEmployeesReport = async (req, res) => {
       [...employeeParams]
     );
 
+    // ─── 29. Deadline Extension KPIs ────────────────────────────────────────────
+    const [extensionKpi] = await db.query(
+      `SELECT
+        COUNT(*) AS total_extension_requests,
+        SUM(CASE WHEN ext.status = 'approved' THEN 1 ELSE 0 END) AS approved_extensions,
+        SUM(CASE WHEN ext.status = 'rejected' THEN 1 ELSE 0 END) AS rejected_extensions,
+        SUM(CASE WHEN ext.status = 'pending'  THEN 1 ELSE 0 END) AS pending_extensions,
+        COUNT(DISTINCT ext.task_id) AS tasks_with_extensions,
+        -- Extension requested AFTER the original deadline = genuinely overdue when asked
+        SUM(CASE WHEN DATE(ext.created_at) > t.deadline THEN 1 ELSE 0 END) AS extensions_after_deadline
+       FROM task_deadline_extension_requests ext
+       JOIN tasks t ON t.id = ext.task_id
+       JOIN users u ON u.id = t.assigned_to
+       WHERE t.deleted = 0 AND ext.deleted = 0 ${employeeFilter}`,
+      [...employeeParams]
+    );
+
+    // ─── 30. Extension Analytics per Employee ───────────────────────────────────
+    const [extensionByEmployee] = await db.query(
+      `SELECT
+        t.assigned_to AS user_id,
+        CONCAT(u.first_name, ' ', u.last_name) AS name,
+        COUNT(ext.id) AS total_extensions,
+        SUM(CASE WHEN ext.status = 'approved' THEN 1 ELSE 0 END) AS approved,
+        SUM(CASE WHEN ext.status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+        SUM(CASE WHEN ext.status = 'pending'  THEN 1 ELSE 0 END) AS pending,
+        -- How many were requested after the deadline had already passed
+        SUM(CASE WHEN DATE(ext.created_at) > t.deadline THEN 1 ELSE 0 END) AS after_deadline,
+        COUNT(DISTINCT ext.task_id) AS tasks_extended,
+        -- Max extensions on a single task for this employee
+        MAX(ext_counts.ext_count) AS max_extensions_on_one_task
+       FROM task_deadline_extension_requests ext
+       JOIN tasks t ON t.id = ext.task_id
+       JOIN users u ON u.id = t.assigned_to
+       JOIN (
+         SELECT task_id, COUNT(*) AS ext_count
+         FROM task_deadline_extension_requests
+         WHERE deleted = 0
+         GROUP BY task_id
+       ) ext_counts ON ext_counts.task_id = ext.task_id
+       WHERE t.deleted = 0 AND ext.deleted = 0 ${employeeFilter}
+       GROUP BY t.assigned_to, u.first_name, u.last_name
+       ORDER BY total_extensions DESC
+       LIMIT 15`,
+      [...employeeParams]
+    );
+
+    // ─── 31. Most Extended Tasks ─────────────────────────────────────────────────
+    const [mostExtendedTasks] = await db.query(
+      `SELECT
+        t.id AS task_id,
+        t.title,
+        CONCAT(u.first_name, ' ', u.last_name) AS assigned_to,
+        t.deadline AS original_deadline,
+        COUNT(ext.id) AS extension_count,
+        MAX(ext.requested_deadline) AS latest_requested_deadline,
+        CASE WHEN t.is_active = 3 THEN 'completed'
+             WHEN t.deadline < CURDATE() AND t.is_active NOT IN (3) THEN 'overdue'
+             WHEN t.is_active = 1 THEN 'active'
+             ELSE 'pending' END AS current_status
+       FROM task_deadline_extension_requests ext
+       JOIN tasks t ON t.id = ext.task_id
+       JOIN users u ON u.id = t.assigned_to
+       WHERE t.deleted = 0 AND ext.deleted = 0 ${employeeFilter}
+       GROUP BY t.id, t.title, u.first_name, u.last_name, t.deadline, t.is_active
+       ORDER BY extension_count DESC
+       LIMIT 10`,
+      [...employeeParams]
+    );
+
     return res.json({
       workforce: workforceKpi[0],
       attendance: {
@@ -626,6 +696,11 @@ exports.getEmployeesReport = async (req, res) => {
         byEmployee: taskByEmployee,
         priority: taskPriority,
         weeklyTrend: taskWeeklyTrend,
+        extensions: {
+          kpi: extensionKpi[0],
+          byEmployee: extensionByEmployee,
+          mostExtended: mostExtendedTasks,
+        },
       },
       leaves: {
         kpi: leaveKpi[0],

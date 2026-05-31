@@ -29,7 +29,7 @@ ALTER TABLE shoots ADD UNIQUE INDEX uk_shoot_id_code (shoot_id_code);
 ALTER TABLE expenses ADD COLUMN IF NOT EXISTS expense_id_code VARCHAR(20) DEFAULT NULL AFTER id;
 ALTER TABLE expenses ADD UNIQUE INDEX uk_expense_id_code (expense_id_code);
 
--- Users/Employees: EMP### (e.g., EMP001)
+-- Users/Employees: DOUBT for admin, AFID### for team members (e.g., AFID001)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS emp_code VARCHAR(10) DEFAULT NULL AFTER id;
 ALTER TABLE users ADD UNIQUE INDEX uk_emp_code (emp_code);
 

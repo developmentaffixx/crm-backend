@@ -65,12 +65,12 @@ exports.createService = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { name, description, icon } = req.body;
+  const { name, description, hsn_code, icon } = req.body;
 
   try {
     const [result] = await db.query(
-      `INSERT INTO services (name, description, icon, created_by) VALUES (?, ?, ?, ?)`,
-      [name, description || null, icon || '🌐', req.user.id]
+      `INSERT INTO services (name, description, hsn_code, icon, created_by) VALUES (?, ?, ?, ?, ?)`,
+      [name, description || null, hsn_code || '', icon || '🌐', req.user.id]
     );
 
     const [rows] = await db.query('SELECT * FROM services WHERE id = ?', [result.insertId]);
@@ -92,10 +92,11 @@ exports.updateService = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM services WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Service not found' });
 
-    const { name, description, icon, is_active } = req.body;
+    const { name, description, hsn_code, icon, is_active } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (description !== undefined) updates.description = description;
+    if (hsn_code !== undefined) updates.hsn_code = hsn_code;
     if (icon !== undefined) updates.icon = icon;
     if (is_active !== undefined) updates.is_active = is_active;
 
@@ -404,6 +405,22 @@ exports.updateFeatureValues = async (req, res) => {
     return res.json({ message: 'Feature values updated' });
   } catch (err) {
     console.error('Feature values update error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/plans/services/invoice-list
+ * Lightweight list for invoice dropdown: id, name, hsn_code only
+ */
+exports.listServicesForInvoice = async (req, res) => {
+  try {
+    const [services] = await db.query(
+      `SELECT id, name, hsn_code FROM services WHERE deleted = 0 AND is_active = 1 ORDER BY name ASC`
+    );
+    return res.json({ services });
+  } catch (err) {
+    console.error('listServicesForInvoice error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

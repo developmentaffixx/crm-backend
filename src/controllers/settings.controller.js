@@ -93,7 +93,7 @@ exports.updateRole = async (req, res) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const roleId = parseInt(req.params.id, 10);
-  const { name, description } = req.body;
+  const { name, description, responsibilities } = req.body;
 
   try {
     const [rows] = await db.query('SELECT * FROM roles WHERE id = ?', [roleId]);
@@ -110,10 +110,11 @@ exports.updateRole = async (req, res) => {
       if (dup.length > 0) return res.status(409).json({ message: 'A role with that name already exists' });
     }
 
-    const newName        = name        !== undefined ? name        : role.name;
-    const newDescription = description !== undefined ? description : role.description;
+    const newName             = name             !== undefined ? name             : role.name;
+    const newDescription      = description      !== undefined ? description      : role.description;
+    const newResponsibilities = responsibilities !== undefined ? responsibilities : (role.responsibilities || null);
 
-    await db.query('UPDATE roles SET name = ?, description = ? WHERE id = ?', [newName, newDescription, roleId]);
+    await db.query('UPDATE roles SET name = ?, description = ?, responsibilities = ? WHERE id = ?', [newName, newDescription, newResponsibilities, roleId]);
     await logAudit(db, req.user.id, 'role_updated', 'role', roleId, { name: newName }, req.ip);
 
     return res.json({ message: 'Role updated' });
@@ -176,6 +177,30 @@ exports.getRolePermissions = async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error('getRolePermissions error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/settings/roles/:id/members
+ * Returns users assigned to this role
+ */
+exports.getRoleMembers = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const roleId = parseInt(req.params.id, 10);
+
+  try {
+    const [rows] = await db.query(
+      `SELECT id, first_name, last_name, email, avatar_url, designation, department
+       FROM users WHERE role_id = ? AND deleted = 0 AND is_active = 1
+       ORDER BY first_name, last_name`,
+      [roleId]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('getRoleMembers error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
@@ -255,6 +280,31 @@ exports.getUsers = async (req, res) => {
 };
 
 /**
+ * GET /api/settings/users/next-emp-code
+ * Returns the next suggested AFID### code (skips any already in use).
+ */
+exports.getNextEmpCode = async (req, res) => {
+  try {
+    // Get all existing AFID#### codes
+    const [rows] = await db.query(
+      `SELECT emp_code FROM users WHERE emp_code LIKE 'AFID%' AND deleted = 0`
+    );
+    const usedNumbers = rows
+      .map(r => parseInt(r.emp_code.replace('AFID', ''), 10))
+      .filter(n => !isNaN(n));
+
+    // Find the next available number
+    let next = 1;
+    while (usedNumbers.includes(next)) next++;
+
+    return res.json({ emp_code: `AFID${String(next).padStart(4, '0')}` });
+  } catch (err) {
+    console.error('getNextEmpCode error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * POST /api/settings/users
  * Create a new user.
  */
@@ -282,8 +332,22 @@ exports.createUser = async (req, res) => {
 
     const newUserId = result.insertId;
 
-    // Generate emp_code: EMP###
-    const emp_code = `EMP${String(newUserId).padStart(3, '0')}`;
+    // Auto-generate emp_code: DOUBT for admin, AFID#### for employees
+    let emp_code;
+    if (is_admin) {
+      emp_code = 'DOUBT';
+    } else {
+      // Find next available AFID number
+      const [codeRows] = await db.query(
+        `SELECT emp_code FROM users WHERE emp_code LIKE 'AFID%' AND deleted = 0`
+      );
+      const usedNumbers = codeRows
+        .map(r => parseInt(r.emp_code.replace('AFID', ''), 10))
+        .filter(n => !isNaN(n));
+      let next = 1;
+      while (usedNumbers.includes(next)) next++;
+      emp_code = `AFID${String(next).padStart(4, '0')}`;
+    }
     await db.query('UPDATE users SET emp_code = ? WHERE id = ?', [emp_code, newUserId]);
 
     // Fix #7: Log initial role assignment in role history if a role was given
@@ -356,13 +420,15 @@ exports.updateUser = async (req, res) => {
     const newDesignation   = designation    !== undefined ? designation    : (user.designation || '');
     const newDateOfJoining = date_of_joining !== undefined ? (date_of_joining || null) : user.date_of_joining;
     const newReportingTo   = reporting_to   !== undefined ? (reporting_to || null) : user.reporting_to;
+    // emp_code is auto-generated and not editable — keep existing value
+    const newEmpCode       = user.emp_code;
 
     await db.query(
       `UPDATE users SET first_name = ?, last_name = ?, email = ?, role_id = ?, is_active = ?, is_admin = ?,
-       phone = ?, department = ?, designation = ?, date_of_joining = ?, reporting_to = ?
+       phone = ?, department = ?, designation = ?, date_of_joining = ?, reporting_to = ?, emp_code = ?
        WHERE id = ?`,
       [newFirstName, newLastName, newEmail, newRoleId, newIsActive, newIsAdmin,
-       newPhone, newDepartment, newDesignation, newDateOfJoining, newReportingTo, userId]
+       newPhone, newDepartment, newDesignation, newDateOfJoining, newReportingTo, newEmpCode, userId]
     );
 
     // Log role change if role_id changed
@@ -403,6 +469,7 @@ exports.updateUser = async (req, res) => {
       last_name:  newLastName,
       email:      newEmail,
       is_admin:   newIsAdmin,
+      emp_code:   newEmpCode,
     }, req.ip);
 
     return res.json({ message: 'User updated' });
@@ -459,7 +526,7 @@ exports.resetPassword = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
 
     const hash = await bcrypt.hash(password, 10);
-    await db.query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, userId]);
+    await db.query('UPDATE users SET password_hash = ?, password_changed_at = NOW() WHERE id = ?', [hash, userId]);
     await logAudit(db, req.user.id, 'password_reset', 'user', userId, {}, req.ip);
 
     // Send password reset email (fire-and-forget)
@@ -565,16 +632,16 @@ exports.uploadAvatar = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-    const path = require('path');
-    const fs   = require('fs');
-    const filename = `avatar-${userId}-${Date.now()}${path.extname(req.file.originalname)}`;
-    const uploadDir = path.join(__dirname, '../../uploads/avatars');
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+    const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
 
-    const filepath = path.join(uploadDir, filename);
-    fs.writeFileSync(filepath, req.file.buffer);
+    // Delete old avatar from Cloudinary
+    const [current] = await db.query('SELECT avatar_url FROM users WHERE id = ?', [userId]);
+    if (current[0]?.avatar_url) {
+      const oldPublicId = extractPublicId(current[0].avatar_url);
+      if (oldPublicId) await deleteFromCloudinary(oldPublicId, 'image');
+    }
 
-    const url = `/uploads/avatars/${filename}`;
+    const { url } = await uploadToCloudinary(req.file.buffer, 'crm/avatars', 'image');
     await db.query('UPDATE users SET avatar_url = ? WHERE id = ?', [url, userId]);
 
     return res.json({ message: 'Avatar uploaded', url });
@@ -658,6 +725,79 @@ exports.updateTaskSettings = async (req, res) => {
     return res.json({ message: 'Task settings updated', settings: newSettings });
   } catch (err) {
     console.error('updateTaskSettings error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── DAILY TARGETS SETTINGS ───────────────────────────────────────────────────
+
+/**
+ * GET /api/settings/daily-targets
+ * Returns the configurable daily targets for the Daily Reporting tab.
+ */
+exports.getDailyTargets = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM daily_targets_settings WHERE id = 1');
+    if (rows.length === 0) return res.status(404).json({ message: 'Daily targets settings not found' });
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error('getDailyTargets error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/settings/daily-targets
+ * Update daily targets settings (admin only).
+ */
+exports.updateDailyTargets = async (req, res) => {
+  const {
+    leads_sourced_min, leads_sourced_max,
+    total_outreach_min, total_outreach_max,
+    follow_ups_min, follow_ups_max,
+    calls_min, calls_max,
+    meetings_booked_min, meetings_booked_max,
+  } = req.body;
+
+  try {
+    const [existing] = await db.query('SELECT * FROM daily_targets_settings WHERE id = 1');
+    const current = existing[0] || {};
+
+    const newSettings = {
+      leads_sourced_min:   leads_sourced_min   !== undefined ? parseInt(leads_sourced_min, 10)   : current.leads_sourced_min,
+      leads_sourced_max:   leads_sourced_max   !== undefined ? parseInt(leads_sourced_max, 10)   : current.leads_sourced_max,
+      total_outreach_min:  total_outreach_min  !== undefined ? parseInt(total_outreach_min, 10)  : current.total_outreach_min,
+      total_outreach_max:  total_outreach_max  !== undefined ? parseInt(total_outreach_max, 10)  : current.total_outreach_max,
+      follow_ups_min:      follow_ups_min      !== undefined ? parseInt(follow_ups_min, 10)      : current.follow_ups_min,
+      follow_ups_max:      follow_ups_max      !== undefined ? parseInt(follow_ups_max, 10)      : current.follow_ups_max,
+      calls_min:           calls_min           !== undefined ? parseInt(calls_min, 10)           : current.calls_min,
+      calls_max:           calls_max           !== undefined ? parseInt(calls_max, 10)           : current.calls_max,
+      meetings_booked_min: meetings_booked_min !== undefined ? parseInt(meetings_booked_min, 10) : current.meetings_booked_min,
+      meetings_booked_max: meetings_booked_max !== undefined ? parseInt(meetings_booked_max, 10) : current.meetings_booked_max,
+    };
+
+    await db.query(
+      `UPDATE daily_targets_settings
+       SET leads_sourced_min   = ?, leads_sourced_max   = ?,
+           total_outreach_min  = ?, total_outreach_max  = ?,
+           follow_ups_min      = ?, follow_ups_max      = ?,
+           calls_min           = ?, calls_max           = ?,
+           meetings_booked_min = ?, meetings_booked_max = ?
+       WHERE id = 1`,
+      [
+        newSettings.leads_sourced_min, newSettings.leads_sourced_max,
+        newSettings.total_outreach_min, newSettings.total_outreach_max,
+        newSettings.follow_ups_min, newSettings.follow_ups_max,
+        newSettings.calls_min, newSettings.calls_max,
+        newSettings.meetings_booked_min, newSettings.meetings_booked_max,
+      ]
+    );
+
+    await logAudit(db, req.user.id, 'daily_targets_updated', 'daily_targets_settings', 1, newSettings, req.ip);
+
+    return res.json({ message: 'Daily targets updated', settings: newSettings });
+  } catch (err) {
+    console.error('updateDailyTargets error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

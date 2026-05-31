@@ -1,27 +1,14 @@
 const db = require('../config/db');
 const { emitEvent } = require('../config/socket');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const { uploadToCloudinary } = require('../config/cloudinary');
 
-// ─── File upload config ───────────────────────────────────────────────────────
-const uploadDir = path.join(__dirname, '../../uploads/chat');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (_req, file, cb) => {
-    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${path.extname(file.originalname)}`;
-    cb(null, uniqueName);
-  },
-});
-
+// ─── File upload config (memory storage → Cloudinary) ────────────────────────
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
   fileFilter: (_req, file, cb) => {
+    const path = require('path');
     const allowed = /jpeg|jpg|png|gif|webp|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|zip|rar|csv|mp4|mp3/;
     const ext = allowed.test(path.extname(file.originalname).toLowerCase());
     cb(ext ? null : new Error('File type not allowed'), ext);
@@ -428,10 +415,14 @@ exports.sendMessage = async (req, res) => {
       return res.status(403).json({ message: 'Not a member of this conversation' });
     }
 
-    // Handle file upload
+    // Handle file upload → Cloudinary
     let fileUrl = null, fileName = null, fileSize = null;
     if (req.file) {
-      fileUrl = `/uploads/chat/${req.file.filename}`;
+      const path = require('path');
+      const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(req.file.originalname);
+      const resourceType = isImage ? 'image' : 'raw';
+      const { url } = await uploadToCloudinary(req.file.buffer, 'crm/chat', resourceType);
+      fileUrl = url;
       fileName = req.file.originalname;
       fileSize = req.file.size;
     }

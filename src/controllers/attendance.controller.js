@@ -167,9 +167,10 @@ exports.getToday = async (req, res) => {
     );
 
     const [taskTimerResult] = await db.query(
-      'SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs WHERE user_id = ? AND DATE(started_at) = CURDATE()',
+      'SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs WHERE user_id = ? AND DATE(started_at) = CURDATE() AND ended_at IS NOT NULL AND duration > 0',
       [userId]
     );
+    const totalTaskSecondsToday = taskTimerResult[0].total;
 
     // Get today's ticket time
     const [ticketTimerResult] = await db.query(
@@ -188,6 +189,14 @@ exports.getToday = async (req, res) => {
       [userId, userId]
     );
 
+    console.log('DEBUG CLOCK WIDGET:', {
+      userId,
+      taskSeconds: totalTaskSecondsToday,
+      ticketMinutes: ticketTimerResult[0].total,
+      meetingMinutes: meetingTimerResult[0].total,
+      totalProductive: totalTaskSecondsToday + (ticketTimerResult[0].total * 60) + (meetingTimerResult[0].total * 60)
+    });
+
     // Get today's schedule info (full/half/holiday)
     const today = new Date().toISOString().split('T')[0];
     const todaySchedule = await getExpectedHoursForDate(today);
@@ -196,9 +205,9 @@ exports.getToday = async (req, res) => {
       attendance: attendance[0] || null,
       plans,
       active_afs: activeAfs[0] || null,
-      total_task_seconds: taskTimerResult[0].total,
-      total_ticket_seconds: ticketTimerResult[0].total * 60,
-      total_meeting_seconds: meetingTimerResult[0].total * 60,
+      total_task_seconds: parseInt(totalTaskSecondsToday) || 0,
+      total_ticket_seconds: (parseInt(ticketTimerResult[0].total) || 0) * 60,
+      total_meeting_seconds: (parseInt(meetingTimerResult[0].total) || 0) * 60,
       today_schedule: todaySchedule
     });
   } catch (err) {
@@ -225,6 +234,8 @@ exports.getMyWeek = async (req, res) => {
     // Use the new schedule-aware calculation
     const { totalExpected, dailyBreakdown } = await getExpectedHoursForRange(week_start, endDate, userId);
 
+    console.log('DEBUG WEEKLY TRACKER:', { week_start, endDate, totalExpected, days: dailyBreakdown.length, breakdown: dailyBreakdown });
+
     const [records] = await db.query(
       'SELECT * FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY date',
       [userId, week_start, week_end]
@@ -233,7 +244,7 @@ exports.getMyWeek = async (req, res) => {
     // Calculate completed hours (productive time = task + ticket + meeting)
     const [taskTimeResult] = await db.query(
       `SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs 
-       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?`,
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0`,
       [userId, week_start, endDate]
     );
     const [ticketTimeResult] = await db.query(
@@ -251,27 +262,28 @@ exports.getMyWeek = async (req, res) => {
       [userId, userId, week_start, endDate]
     );
 
-    const taskHours = taskTimeResult[0].total / 3600;
-    const ticketHours = ticketTimeResult[0].total / 60;
-    const meetingHours = meetingTimeResult[0].total / 60;
+    const taskHours = (parseInt(taskTimeResult[0].total) || 0) / 3600;
+    const ticketHours = (parseInt(ticketTimeResult[0].total) || 0) / 60;
+    const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 60;
     const completed = taskHours + ticketHours + meetingHours;
 
-    const required = totalExpected;
-    const remaining = Math.max(0, required - completed);
-    const deficit = Math.max(0, required - completed);
+    const required = totalExpected * 60; // Convert hours to minutes for frontend
+    const completedMinutes = completed * 60;
+    const remaining = Math.max(0, required - completedMinutes);
+    const deficit = Math.max(0, required - completedMinutes);
 
     const daily_breakdown = records.map(r => ({
       date: r.date,
       clock_in: r.clock_in,
       clock_out: r.clock_out,
       clock_in_status: r.clock_in_status,
-      served_hours: (r.total_served_seconds || 0) / 3600
+      served_hours: (parseInt(r.total_served_seconds) || 0) / 3600
     }));
 
     return res.json({
       week_start, week_end,
       required: parseFloat(required.toFixed(2)),
-      completed: parseFloat(completed.toFixed(2)),
+      completed: parseFloat(completedMinutes.toFixed(2)),
       remaining: parseFloat(remaining.toFixed(2)),
       deficit: parseFloat(deficit.toFixed(2)),
       daily_breakdown,
@@ -379,14 +391,44 @@ exports.afsStart = async (req, res) => {
       }
     }
 
+    // ── Pause the user's active ticket timer ─────────────────────────────
+    let pausedTicket = null;
+    const [activeTicketTimer] = await db.query(
+      `SELECT tat.ticket_id, tat.started_at, t.title
+       FROM ticket_active_timers tat
+       JOIN tickets t ON t.id = tat.ticket_id
+       WHERE tat.user_id = ?`,
+      [userId]
+    );
+
+    if (activeTicketTimer.length > 0) {
+      const timer = activeTicketTimer[0];
+      pausedTicket = { ticket_id: timer.ticket_id, ticket_title: timer.title };
+    }
+
+    // ── Pause the user's active meeting timer ────────────────────────────
+    let pausedMeeting = null;
+    const [activeMeetingTimer] = await db.query(
+      `SELECT mat.meeting_id, mat.started_at, m.title
+       FROM meeting_active_timers mat
+       JOIN meetings m ON m.id = mat.meeting_id
+       WHERE mat.user_id = ?`,
+      [userId]
+    );
+
+    if (activeMeetingTimer.length > 0) {
+      const timer = activeMeetingTimer[0];
+      pausedMeeting = { meeting_id: timer.meeting_id, meeting_title: timer.title };
+    }
+
     const [result] = await db.query(
-      'INSERT INTO afs_logs (user_id, attendance_id, start_time, paused_task_id) VALUES (?, ?, NOW(), ?)',
-      [userId, attendanceId, pausedTask?.task_id || null]
+      'INSERT INTO afs_logs (user_id, attendance_id, start_time, paused_task_id, paused_ticket_id, paused_meeting_id) VALUES (?, ?, NOW(), ?, ?, ?)',
+      [userId, attendanceId, pausedTask?.task_id || null, pausedTicket?.ticket_id || null, pausedMeeting?.meeting_id || null]
     );
 
     const [afsLog] = await db.query('SELECT * FROM afs_logs WHERE id = ?', [result.insertId]);
 
-    return res.status(201).json({ afs_log: afsLog[0], paused_task: pausedTask });
+    return res.status(201).json({ afs_log: afsLog[0], paused_task: pausedTask, paused_ticket: pausedTicket, paused_meeting: pausedMeeting });
   } catch (err) {
     console.error('AFS start error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -459,7 +501,81 @@ exports.afsEnd = async (req, res) => {
       }
     }
 
-    return res.json({ afs_log: updatedAfs[0], resumed_task: resumedTask });
+    // ── Auto-resume the paused ticket timer (shift started_at forward by AFS duration) ──
+    let resumedTicket = null;
+    if (afsLog.paused_ticket_id) {
+      const [ticketCheck] = await db.query(
+        'SELECT id, title, status FROM tickets WHERE id = ? AND deleted = 0 AND status NOT IN ("resolved","closed")',
+        [afsLog.paused_ticket_id]
+      );
+
+      if (ticketCheck.length > 0) {
+        const [existingTimer] = await db.query(
+          'SELECT * FROM ticket_active_timers WHERE ticket_id = ? AND user_id = ?',
+          [afsLog.paused_ticket_id, userId]
+        );
+
+        if (existingTimer.length > 0) {
+          // Shift started_at forward by AFS duration so elapsed time skips the break
+          await db.query(
+            'UPDATE ticket_active_timers SET started_at = DATE_ADD(started_at, INTERVAL ? SECOND) WHERE ticket_id = ? AND user_id = ?',
+            [duration_seconds, afsLog.paused_ticket_id, userId]
+          );
+        } else {
+          // Timer was removed — restart it
+          const now = new Date();
+          await db.query(
+            'INSERT IGNORE INTO ticket_active_timers (ticket_id, user_id, started_at) VALUES (?, ?, ?)',
+            [afsLog.paused_ticket_id, userId, now]
+          );
+          await db.query(
+            'UPDATE tickets SET timer_started_at = ? WHERE id = ? AND timer_started_at IS NULL',
+            [now, afsLog.paused_ticket_id]
+          );
+        }
+
+        resumedTicket = { ticket_id: ticketCheck[0].id, ticket_title: ticketCheck[0].title };
+      }
+    }
+
+    // ── Auto-resume the paused meeting timer (shift started_at forward by AFS duration) ──
+    let resumedMeeting = null;
+    if (afsLog.paused_meeting_id) {
+      const [meetingCheck] = await db.query(
+        'SELECT id, title, status FROM meetings WHERE id = ? AND deleted = 0 AND status NOT IN ("completed","cancelled")',
+        [afsLog.paused_meeting_id]
+      );
+
+      if (meetingCheck.length > 0) {
+        const [existingTimer] = await db.query(
+          'SELECT * FROM meeting_active_timers WHERE meeting_id = ? AND user_id = ?',
+          [afsLog.paused_meeting_id, userId]
+        );
+
+        if (existingTimer.length > 0) {
+          // Shift started_at forward by AFS duration so elapsed time skips the break
+          await db.query(
+            'UPDATE meeting_active_timers SET started_at = DATE_ADD(started_at, INTERVAL ? SECOND) WHERE meeting_id = ? AND user_id = ?',
+            [duration_seconds, afsLog.paused_meeting_id, userId]
+          );
+        } else {
+          // Timer was removed — restart it
+          const now = new Date();
+          await db.query(
+            'INSERT IGNORE INTO meeting_active_timers (meeting_id, user_id, started_at) VALUES (?, ?, ?)',
+            [afsLog.paused_meeting_id, userId, now]
+          );
+          await db.query(
+            'UPDATE meetings SET timer_started_at = ? WHERE id = ? AND timer_started_at IS NULL',
+            [now, afsLog.paused_meeting_id]
+          );
+        }
+
+        resumedMeeting = { meeting_id: meetingCheck[0].id, meeting_title: meetingCheck[0].title };
+      }
+    }
+
+    return res.json({ afs_log: updatedAfs[0], resumed_task: resumedTask, resumed_ticket: resumedTicket, resumed_meeting: resumedMeeting });
   } catch (err) {
     console.error('AFS end error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -635,6 +751,247 @@ exports.updateSettings = async (req, res) => {
     return res.json(settings[0]);
   } catch (err) {
     console.error('Update settings error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/attendance/check-running-timers
+ * Check if user has any running timers before clock-out
+ */
+exports.checkRunningTimers = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Check active task timers
+    const [taskTimers] = await db.query(
+      `SELECT tat.id, tat.task_id, tat.started_at, t.title AS task_title
+       FROM task_active_timers tat
+       JOIN tasks t ON t.id = tat.task_id
+       WHERE tat.user_id = ?`,
+      [userId]
+    );
+
+    // Check active ticket timers
+    const [ticketTimers] = await db.query(
+      `SELECT tt.id, tt.ticket_id, tt.started_at, tk.title AS ticket_title
+       FROM ticket_active_timers tt
+       JOIN tickets tk ON tk.id = tt.ticket_id
+       WHERE tt.user_id = ?`,
+      [userId]
+    );
+
+    // Check active AFS
+    const [activeAfs] = await db.query(
+      `SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL AND DATE(start_time) = CURDATE()`,
+      [userId]
+    );
+
+    const hasRunningTimers = taskTimers.length > 0 || ticketTimers.length > 0;
+    const hasActiveAfs = activeAfs.length > 0;
+
+    return res.json({
+      has_running_timers: hasRunningTimers,
+      has_active_afs: hasActiveAfs,
+      task_timers: taskTimers,
+      ticket_timers: ticketTimers,
+      active_afs: activeAfs[0] || null
+    });
+  } catch (err) {
+    console.error('Check running timers error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/attendance/force-clock-out
+ * Stop all timers and clock out
+ */
+exports.forceClockOut = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { plans, additional } = req.body;
+    const now = new Date();
+
+    // 1. Stop all active task timers
+    const [taskTimers] = await db.query(
+      'SELECT id, task_id, started_at FROM task_active_timers WHERE user_id = ?',
+      [userId]
+    );
+
+    for (const timer of taskTimers) {
+      const duration = Math.max(1, Math.floor((now - new Date(timer.started_at)) / 1000));
+      await db.query(
+        `INSERT INTO task_time_logs (task_id, user_id, started_at, ended_at, duration, note)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [timer.task_id, userId, timer.started_at, now, duration, 'Auto-stopped on clock out']
+      );
+      await db.query('UPDATE tasks SET time_spent = time_spent + ?, timer_started_at = NULL WHERE id = ?', [duration, timer.task_id]);
+      await db.query('DELETE FROM task_active_timers WHERE id = ?', [timer.id]);
+    }
+
+    // 2. Stop active ticket timers
+    const [ticketTimers] = await db.query(
+      'SELECT id, ticket_id, started_at FROM ticket_active_timers WHERE user_id = ?',
+      [userId]
+    );
+
+    for (const timer of ticketTimers) {
+      const duration = Math.max(1, Math.floor((now - new Date(timer.started_at)) / 1000));
+      const minutes = Math.ceil(duration / 60);
+      await db.query(
+        `INSERT INTO ticket_time_logs (ticket_id, user_id, minutes, note, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [timer.ticket_id, userId, minutes, 'Auto-stopped on clock out', now]
+      );
+      await db.query('DELETE FROM ticket_active_timers WHERE id = ?', [timer.id]);
+    }
+
+    // 3. End active AFS
+    const [activeAfs] = await db.query(
+      'SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL AND DATE(start_time) = CURDATE()',
+      [userId]
+    );
+    for (const afs of activeAfs) {
+      const afsDuration = Math.floor((now - new Date(afs.start_time)) / 1000);
+      await db.query('UPDATE afs_logs SET end_time = ?, duration_seconds = ? WHERE id = ?', [now, afsDuration, afs.id]);
+    }
+
+    // 4. Now do the normal clock-out
+    const [records] = await db.query(
+      'SELECT * FROM attendance WHERE user_id = ? AND date = CURDATE() AND clock_out IS NULL',
+      [userId]
+    );
+    if (!records.length) {
+      return res.status(400).json({ message: 'No active clock-in found' });
+    }
+
+    const attendanceId = records[0].id;
+    const [servedResult] = await db.query(
+      'SELECT TIMESTAMPDIFF(SECOND, clock_in, NOW()) AS total_served FROM attendance WHERE id = ?',
+      [attendanceId]
+    );
+    const [afsResult] = await db.query(
+      'SELECT COALESCE(SUM(duration_seconds), 0) AS total_afs FROM afs_logs WHERE attendance_id = ?',
+      [attendanceId]
+    );
+
+    await db.query(
+      'UPDATE attendance SET clock_out = NOW(), total_served_seconds = ?, total_afs_seconds = ? WHERE id = ?',
+      [servedResult[0].total_served, afsResult[0].total_afs, attendanceId]
+    );
+
+    // Update plans if provided
+    if (plans && plans.length) {
+      for (const plan of plans) {
+        await db.query('UPDATE daily_plans SET status = ? WHERE id = ? AND user_id = ?', [plan.status, plan.id, userId]);
+      }
+    }
+    if (additional && additional.length) {
+      for (const item of additional) {
+        if (item.point_text && item.point_text.trim()) {
+          await db.query(
+            'INSERT INTO daily_plans (user_id, attendance_id, point_text, status, is_additional) VALUES (?, ?, ?, ?, 1)',
+            [userId, attendanceId, item.point_text.trim(), item.status || 'completed']
+          );
+        }
+      }
+    }
+
+    return res.json({
+      message: 'All timers stopped and clocked out successfully',
+      stopped_tasks: taskTimers.length,
+      stopped_tickets: ticketTimers.length
+    });
+  } catch (err) {
+    console.error('Force clock out error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/attendance/check-auto-clockout
+ * Check if yesterday had an auto clock-out (for next-day prompt)
+ */
+exports.checkAutoClockOut = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const [records] = await db.query(
+      `SELECT id, date, clock_in, clock_out, auto_clock_out, corrected_clock_out
+       FROM attendance
+       WHERE user_id = ? AND auto_clock_out = 1 AND corrected_clock_out IS NULL
+       AND date >= DATE_SUB(CURDATE(), INTERVAL 3 DAY)
+       ORDER BY date DESC LIMIT 1`,
+      [userId]
+    );
+
+    if (records.length === 0) {
+      return res.json({ needs_correction: false });
+    }
+
+    const record = records[0];
+    return res.json({
+      needs_correction: true,
+      attendance_id: record.id,
+      date: record.date,
+      clock_in: record.clock_in,
+      clock_out: record.clock_out
+    });
+  } catch (err) {
+    console.error('Check auto clock-out error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/attendance/correct-clockout
+ * User submits their actual clock-out time after auto clock-out
+ */
+exports.correctClockOut = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { attendance_id, actual_clock_out_time } = req.body;
+
+    if (!attendance_id || !actual_clock_out_time) {
+      return res.status(400).json({ message: 'attendance_id and actual_clock_out_time are required' });
+    }
+
+    // Verify the record belongs to this user and was auto-clocked-out
+    const [records] = await db.query(
+      'SELECT * FROM attendance WHERE id = ? AND user_id = ? AND auto_clock_out = 1',
+      [attendance_id, userId]
+    );
+
+    if (records.length === 0) {
+      return res.status(404).json({ message: 'Record not found or not eligible for correction' });
+    }
+
+    const record = records[0];
+
+    // Build the corrected clock-out datetime (same date as attendance, user-provided time)
+    const attendanceDate = new Date(record.date).toISOString().split('T')[0];
+    const correctedDateTime = new Date(`${attendanceDate}T${actual_clock_out_time}:00`);
+
+    // Validate: corrected time must be after clock-in and before midnight
+    const clockInTime = new Date(record.clock_in);
+    if (correctedDateTime <= clockInTime) {
+      return res.status(400).json({ message: 'Corrected time must be after clock-in time' });
+    }
+
+    // Recalculate served seconds
+    const newServedSeconds = Math.floor((correctedDateTime - clockInTime) / 1000);
+
+    await db.query(
+      `UPDATE attendance 
+       SET corrected_clock_out = ?, clock_out = ?, total_served_seconds = ?, correction_submitted_at = NOW()
+       WHERE id = ?`,
+      [correctedDateTime, correctedDateTime, newServedSeconds, attendance_id]
+    );
+
+    return res.json({ message: 'Clock-out time corrected successfully', new_served_seconds: newServedSeconds });
+  } catch (err) {
+    console.error('Correct clock-out error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

@@ -1,5 +1,5 @@
 /**
- * Payroll Auto-Generate Cron Job  (v3 — Probation + Paid Leave)
+ * Payroll Auto-Generate Cron Job  (v4 — Probation + Paid Leave + Mid-Month Join)
  * ─────────────────────────────────────────────────────────────────────────────
  * Runs on the 1st of every month at 00:05 AM.
  *
@@ -16,6 +16,10 @@
  * Probation check:
  *   employment_status = 'probation'  OR  probation_end_date > target month end
  *   → in probation
+ *
+ * Mid-month join handling:
+ *   If date_of_joining falls within the target month, working days and
+ *   attendance are counted only from the join date (pro-rata salary).
  */
 
 const db = require('../config/db');
@@ -32,15 +36,46 @@ function getWorkingDaysInMonth(year, month) {
   return workingDays;
 }
 
-async function getAttendanceSummary(employeeId, year, month) {
-  const monthStr  = String(month).padStart(2, '0');
-  const startDate = `${year}-${monthStr}-01`;
-  const endDate   = `${year}-${monthStr}-${new Date(year, month, 0).getDate()}`;
+/**
+ * Count working days (Mon–Sat) from a given start date to end of month.
+ * Used for mid-month joiners to calculate pro-rata working days.
+ */
+function getWorkingDaysFromDate(year, month, fromDateStr) {
+  const monthEnd   = new Date(year, month, 0).getDate();
+  const startDay   = new Date(fromDateStr).getDate();
+  let workingDays  = 0;
+  for (let d = startDay; d <= monthEnd; d++) {
+    const day = new Date(year, month - 1, d).getDay();
+    if (day !== 0) workingDays++; // exclude Sunday
+  }
+  return workingDays;
+}
+
+/**
+ * Returns the effective start date for payroll calculation.
+ * If employee joined mid-month, use join date. Otherwise use 1st of month.
+ */
+function getEffectiveStartDate(year, month, dateOfJoining) {
+  const monthStr   = String(month).padStart(2, '0');
+  const monthStart = `${year}-${monthStr}-01`;
+  if (!dateOfJoining) return monthStart;
+
+  const joinStr = dateOfJoining instanceof Date
+    ? dateOfJoining.toISOString().split('T')[0]
+    : String(dateOfJoining).split('T')[0];
+
+  // Only use join date if it falls within the target month
+  return joinStr > monthStart ? joinStr : monthStart;
+}
+
+async function getAttendanceSummary(employeeId, year, month, effectiveStartDate) {
+  const monthStr = String(month).padStart(2, '0');
+  const endDate  = `${year}-${monthStr}-${new Date(year, month, 0).getDate()}`;
   const [rows] = await db.query(
     `SELECT COUNT(*) AS days_present
      FROM attendance
      WHERE user_id = ? AND date >= ? AND date <= ? AND clock_out IS NOT NULL`,
-    [employeeId, startDate, endDate]
+    [employeeId, effectiveStartDate, endDate]
   );
   return { days_present: rows[0]?.days_present || 0 };
 }
@@ -136,10 +171,10 @@ async function updateLedgerUsage(employeeId, targetYear, targetMonth, usedDays, 
 async function generatePayrollIdCode(payYear, payMonth, employeeId) {
   const payYY = String(payYear).slice(-2);
   const payMM = String(payMonth).padStart(2, '0');
-  const [empRows] = await db.query('SELECT emp_code FROM users WHERE id = ?', [employeeId]);
+  const [empRows] = await db.query('SELECT emp_code, is_admin FROM users WHERE id = ?', [employeeId]);
   const empCode = (empRows.length > 0 && empRows[0].emp_code)
     ? empRows[0].emp_code
-    : `EMP${String(employeeId).padStart(3, '0')}`;
+    : (empRows[0]?.is_admin ? 'DOUBT' : `AFID${String(employeeId).padStart(3, '0')}`);
   const prefix = `PAY-${payYY}${payMM}-${empCode}`;
   const [lastRows] = await db.query(
     `SELECT payroll_id_code FROM payroll WHERE payroll_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
@@ -177,7 +212,7 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
   try {
     // ── Step 1: Get all active employees with salary structures ───────────────
     const [structures] = await db.query(
-      `SELECT ss.*, u.employment_status, u.probation_end_date
+      `SELECT ss.*, u.employment_status, u.probation_end_date, u.date_of_joining
        FROM salary_structures ss
        INNER JOIN (
          SELECT employee_id, MAX(effective_from) AS max_date
@@ -204,7 +239,7 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
     );
     const existingSet = new Set(existingPayroll.map(r => r.employee_id));
 
-    const workingDays  = getWorkingDaysInMonth(targetYear, targetMonth);
+    const fullMonthWorkingDays = getWorkingDaysInMonth(targetYear, targetMonth);
     const SYSTEM_USER  = 1;
 
     // ── Step 3: Credit paid leave for confirmed employees ─────────────────────
@@ -222,9 +257,20 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
       if (existingSet.has(empId)) { skippedCount++; continue; }
 
       try {
-        const { days_present } = await getAttendanceSummary(empId, targetYear, targetMonth);
+        // ── Mid-month join: calculate pro-rata working days ───────────────────
+        const effectiveStart = getEffectiveStartDate(targetYear, targetMonth, structure.date_of_joining);
+        const isMidMonthJoin = effectiveStart !== `${targetYear}-${String(targetMonth).padStart(2, '0')}-01`;
+        const workingDays    = isMidMonthJoin
+          ? getWorkingDaysFromDate(targetYear, targetMonth, effectiveStart)
+          : fullMonthWorkingDays;
+
+        const { days_present } = await getAttendanceSummary(empId, targetYear, targetMonth, effectiveStart);
         const absentDays       = Math.max(0, workingDays - days_present);
         const inProbation      = isInProbation(structure, targetYear, targetMonth);
+
+        if (isMidMonthJoin) {
+          console.log(`[PayrollCron] Employee ${empId} joined mid-month (${effectiveStart}). Pro-rata working days: ${workingDays}/${fullMonthWorkingDays}`);
+        }
 
         let paidLeaveUsed    = 0;
         let lopDays          = 0;

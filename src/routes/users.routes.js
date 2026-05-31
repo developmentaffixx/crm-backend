@@ -53,6 +53,33 @@ router.post('/me/leaves', usersController.applyLeave);
 // DELETE /api/users/me/leaves/:id — cancel leave
 router.delete('/me/leaves/:id', usersController.cancelLeave);
 
+// ─── Activity Timeline ────────────────────────────────────────────────────────
+router.get('/me/activity', usersController.myActivity);
+
+// ─── Sessions ─────────────────────────────────────────────────────────────────
+router.get('/me/sessions', usersController.mySessions);
+router.delete('/me/sessions/:id', usersController.revokeSession);
+
+// ─── Emergency Contacts ───────────────────────────────────────────────────────
+router.get('/me/emergency-contacts', usersController.getEmergencyContacts);
+router.post('/me/emergency-contacts', usersController.addEmergencyContact);
+router.put('/me/emergency-contacts/:id', usersController.updateEmergencyContact);
+router.delete('/me/emergency-contacts/:id', usersController.deleteEmergencyContact);
+
+// ─── Skills ───────────────────────────────────────────────────────────────────
+router.get('/me/skills', usersController.getSkills);
+router.post('/me/skills', usersController.addSkill);
+router.delete('/me/skills/:id', usersController.deleteSkill);
+
+// ─── Timesheet ────────────────────────────────────────────────────────────────
+router.get('/me/timesheet', usersController.myTimesheet);
+
+// ─── Tickets (for profile) ────────────────────────────────────────────────────
+router.get('/me/tickets', usersController.myTickets);
+
+// ─── Meetings (for profile) ──────────────────────────────────────────────────
+router.get('/me/meetings', usersController.myMeetings);
+
 // GET  /api/users/:id/employment — get employment/probation status (admin)
 router.get('/:id/employment', usersController.getEmployment);
 

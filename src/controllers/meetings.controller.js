@@ -287,3 +287,307 @@ exports.remove = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TIMER ENDPOINTS (Meeting timer — start/stop like tasks/tickets)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/meetings/:id/timer/start
+ */
+exports.startTimer = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM meetings WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Meeting not found' });
+
+    const meeting = rows[0];
+
+    // Only members or admin can start timer
+    if (!req.user.is_admin) {
+      const [memberCheck] = await db.query(
+        'SELECT 1 FROM meeting_members WHERE meeting_id = ? AND user_id = ?',
+        [meeting.id, req.user.id]
+      );
+      if (memberCheck.length === 0 && meeting.created_by !== req.user.id) {
+        return res.status(403).json({ message: 'Only meeting members can track time' });
+      }
+    }
+
+    if (meeting.status === 'completed' || meeting.status === 'cancelled') {
+      return res.status(400).json({ message: 'Cannot start timer on completed/cancelled meetings' });
+    }
+
+    // Must be clocked in
+    const [attendance] = await db.query(
+      `SELECT id, clock_in, clock_out FROM attendance
+       WHERE user_id = ? AND date = CURDATE()
+       ORDER BY id DESC LIMIT 1`,
+      [req.user.id]
+    );
+    if (attendance.length === 0 || !attendance[0].clock_in) {
+      return res.status(400).json({ message: 'You must clock in before starting a meeting timer' });
+    }
+    if (attendance[0].clock_out) {
+      return res.status(400).json({ message: 'You have already clocked out. Timer cannot be started after clock out.' });
+    }
+
+    // Block timer during AFS
+    const [activeAfs] = await db.query(
+      'SELECT id FROM afs_logs WHERE user_id = ? AND end_time IS NULL LIMIT 1',
+      [req.user.id]
+    );
+    if (activeAfs.length > 0) {
+      return res.status(400).json({ message: 'Cannot start timer while AFS is active. End your AFS break first.' });
+    }
+
+    // Check if user already has a timer running on this meeting
+    const [existingTimer] = await db.query(
+      'SELECT 1 FROM meeting_active_timers WHERE meeting_id = ? AND user_id = ?',
+      [meeting.id, req.user.id]
+    );
+    if (existingTimer.length > 0) {
+      return res.status(400).json({ message: 'Your timer is already running on this meeting' });
+    }
+
+    // ── One active timer per user across tasks, tickets, AND meetings ─────
+    const [runningTask] = await db.query(
+      `SELECT tat.task_id, t.title
+       FROM task_active_timers tat
+       JOIN tasks t ON t.id = tat.task_id
+       WHERE tat.user_id = ?
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (runningTask.length > 0) {
+      return res.status(400).json({
+        message: `You already have a timer running on task "${runningTask[0].title}". Stop it first.`,
+        conflicting_task_id: runningTask[0].task_id,
+      });
+    }
+
+    const [runningTicket] = await db.query(
+      `SELECT tat.ticket_id, t.title
+       FROM ticket_active_timers tat
+       JOIN tickets t ON t.id = tat.ticket_id
+       WHERE tat.user_id = ?
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (runningTicket.length > 0) {
+      return res.status(400).json({
+        message: `You already have a timer running on ticket "${runningTicket[0].title}". Stop it first.`,
+        conflicting_ticket_id: runningTicket[0].ticket_id,
+      });
+    }
+
+    const [runningMeeting] = await db.query(
+      `SELECT mat.meeting_id, m.title
+       FROM meeting_active_timers mat
+       JOIN meetings m ON m.id = mat.meeting_id
+       WHERE mat.user_id = ? AND mat.meeting_id != ?
+       LIMIT 1`,
+      [req.user.id, meeting.id]
+    );
+    if (runningMeeting.length > 0) {
+      return res.status(400).json({
+        message: `You already have a timer running on meeting "${runningMeeting[0].title}". Stop it first.`,
+        conflicting_meeting_id: runningMeeting[0].meeting_id,
+      });
+    }
+    // ──────────────────────────────────────────────────────────────────────
+
+    const now = new Date();
+
+    await db.query(
+      'INSERT INTO meeting_active_timers (meeting_id, user_id, started_at) VALUES (?, ?, ?)',
+      [meeting.id, req.user.id, now]
+    );
+
+    // Update legacy timer_started_at
+    if (!meeting.timer_started_at) {
+      await db.query('UPDATE meetings SET timer_started_at = ? WHERE id = ?', [now, meeting.id]);
+    }
+
+    // Auto-change status to in_progress if currently scheduled
+    if (meeting.status === 'scheduled') {
+      await db.query('UPDATE meetings SET status = ? WHERE id = ?', ['in_progress', meeting.id]);
+    }
+
+    return res.json({ timer_started_at: now, status: meeting.status === 'scheduled' ? 'in_progress' : meeting.status });
+  } catch (err) {
+    console.error('Meeting startTimer error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/meetings/:id/timer/stop
+ */
+exports.stopTimer = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM meetings WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Meeting not found' });
+
+    const meeting = rows[0];
+    const { note } = req.body;
+
+    // Check if user has an active timer on this meeting
+    const [activeTimer] = await db.query(
+      'SELECT * FROM meeting_active_timers WHERE meeting_id = ? AND user_id = ?',
+      [meeting.id, req.user.id]
+    );
+    if (activeTimer.length === 0) {
+      return res.status(400).json({ message: 'No active timer found for this meeting' });
+    }
+
+    const timer = activeTimer[0];
+    const now = new Date();
+    const startedAt = new Date(timer.started_at);
+    const durationSec = Math.max(1, Math.floor((now - startedAt) / 1000));
+
+    // Save time log
+    await db.query(
+      `INSERT INTO meeting_time_logs (meeting_id, user_id, started_at, ended_at, duration, note)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [meeting.id, req.user.id, timer.started_at, now, durationSec, note || null]
+    );
+
+    // Remove active timer
+    await db.query(
+      'DELETE FROM meeting_active_timers WHERE meeting_id = ? AND user_id = ?',
+      [meeting.id, req.user.id]
+    );
+
+    // Update total_time_seconds on meeting
+    await db.query(
+      'UPDATE meetings SET total_time_seconds = total_time_seconds + ? WHERE id = ?',
+      [durationSec, meeting.id]
+    );
+
+    // If no more active timers, clear legacy timer_started_at
+    const [remaining] = await db.query(
+      'SELECT 1 FROM meeting_active_timers WHERE meeting_id = ?',
+      [meeting.id]
+    );
+    if (remaining.length === 0) {
+      await db.query('UPDATE meetings SET timer_started_at = NULL WHERE id = ?', [meeting.id]);
+    }
+
+    // Fetch updated meeting
+    const [updated] = await db.query('SELECT * FROM meetings WHERE id = ?', [meeting.id]);
+
+    return res.json({
+      message: 'Timer stopped & saved',
+      total_time_seconds: updated[0].total_time_seconds,
+      duration: durationSec,
+      timer_started_at: null,
+    });
+  } catch (err) {
+    console.error('Meeting stopTimer error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/meetings/:id/timer/status
+ * Returns current user's timer + all active timers on this meeting
+ */
+exports.timerStatus = async (req, res) => {
+  try {
+    const meetingId = req.params.id;
+
+    // Current user's timer
+    const [myTimerRows] = await db.query(
+      'SELECT * FROM meeting_active_timers WHERE meeting_id = ? AND user_id = ?',
+      [meetingId, req.user.id]
+    );
+
+    // All active timers on this meeting
+    const [activeTimers] = await db.query(
+      `SELECT mat.user_id, mat.started_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name
+       FROM meeting_active_timers mat
+       JOIN users u ON u.id = mat.user_id
+       WHERE mat.meeting_id = ?`,
+      [meetingId]
+    );
+
+    // Get meeting total
+    const [meetingRows] = await db.query(
+      'SELECT total_time_seconds, timer_started_at FROM meetings WHERE id = ?',
+      [meetingId]
+    );
+
+    return res.json({
+      my_timer: myTimerRows.length > 0 ? myTimerRows[0] : null,
+      active_timers: activeTimers,
+      total_time_seconds: meetingRows[0]?.total_time_seconds || 0,
+      timer_started_at: meetingRows[0]?.timer_started_at || null,
+    });
+  } catch (err) {
+    console.error('Meeting timerStatus error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/meetings/:id/timer/logs
+ * Returns time logs for a meeting
+ */
+exports.timerLogs = async (req, res) => {
+  try {
+    const meetingId = req.params.id;
+
+    const [logs] = await db.query(
+      `SELECT mtl.*, CONCAT(u.first_name, ' ', u.last_name) AS user_name
+       FROM meeting_time_logs mtl
+       JOIN users u ON u.id = mtl.user_id
+       WHERE mtl.meeting_id = ?
+       ORDER BY mtl.started_at DESC`,
+      [meetingId]
+    );
+
+    return res.json({ logs });
+  } catch (err) {
+    console.error('Meeting timerLogs error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/meetings/my-active-timer
+ * Returns the current user's active meeting timer (if any) — for header indicator
+ */
+exports.getMyActiveTimer = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT mat.meeting_id, mat.started_at, m.title AS meeting_title
+       FROM meeting_active_timers mat
+       JOIN meetings m ON m.id = mat.meeting_id
+       WHERE mat.user_id = ?
+       LIMIT 1`,
+      [req.user.id]
+    );
+    if (rows.length === 0) {
+      return res.json({ active: false });
+    }
+
+    // Check if AFS is currently active (timer should show as paused)
+    const [activeAfs] = await db.query(
+      'SELECT id FROM afs_logs WHERE user_id = ? AND end_time IS NULL LIMIT 1',
+      [req.user.id]
+    );
+    const paused = activeAfs.length > 0;
+
+    return res.json({
+      active: true,
+      paused,
+      meeting_id: rows[0].meeting_id,
+      meeting_title: rows[0].meeting_title,
+      started_at: rows[0].started_at,
+    });
+  } catch (err) {
+    console.error('my-active-meeting-timer error:', err);
+    return res.json({ active: false });
+  }
+};

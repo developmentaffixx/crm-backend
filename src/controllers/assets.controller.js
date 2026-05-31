@@ -1,6 +1,5 @@
 const db = require('../config/db');
-const path = require('path');
-const fs = require('fs');
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
 
 // ─── Helper: Generate next asset tag ──────────────────────────────────────────
 async function generateAssetTag() {
@@ -12,20 +11,16 @@ async function generateAssetTag() {
     [`${prefix}-%`]
   );
   if (rows.length === 0) return `${prefix}-001`;
-  const last = rows[0].asset_tag; // e.g. AST-25-042
+  const last = rows[0].asset_tag;
   const parts = last.split('-');
   const num = parseInt(parts[parts.length - 1], 10) + 1;
   return `${prefix}-${String(num).padStart(3, '0')}`;
 }
 
-// ─── Helper: Save uploaded file ───────────────────────────────────────────────
-function saveFile(file, prefix) {
-  const filename = `${prefix}-${Date.now()}${path.extname(file.originalname)}`;
-  const uploadDir = path.join(__dirname, '../../uploads');
-  if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-  const filepath = path.join(uploadDir, filename);
-  fs.writeFileSync(filepath, file.buffer);
-  return `/uploads/${filename}`;
+// ─── Helper: Upload file to Cloudinary ───────────────────────────────────────
+async function saveFile(file, folder) {
+  const { url } = await uploadToCloudinary(file.buffer, `crm/assets/${folder}`, 'auto');
+  return url;
 }
 
 // ─── GET /api/assets ──────────────────────────────────────────────────────────
@@ -123,10 +118,10 @@ exports.create = async (req, res) => {
     let asset_photo = null;
     if (req.files) {
       if (req.files.invoice_photo && req.files.invoice_photo[0]) {
-        invoice_photo = saveFile(req.files.invoice_photo[0], 'asset-invoice');
+        invoice_photo = await saveFile(req.files.invoice_photo[0], 'invoices');
       }
       if (req.files.asset_photo && req.files.asset_photo[0]) {
-        asset_photo = saveFile(req.files.asset_photo[0], 'asset-photo');
+        asset_photo = await saveFile(req.files.asset_photo[0], 'photos');
       }
     }
 
@@ -200,15 +195,23 @@ exports.update = async (req, res) => {
       purchase_date, asset_value
     } = req.body;
 
-    // Handle file uploads
+    // Handle file uploads — delete old from Cloudinary, upload new
     let invoice_photo = existing.invoice_photo;
     let asset_photo = existing.asset_photo;
     if (req.files) {
       if (req.files.invoice_photo && req.files.invoice_photo[0]) {
-        invoice_photo = saveFile(req.files.invoice_photo[0], 'asset-invoice');
+        if (existing.invoice_photo) {
+          const oldId = extractPublicId(existing.invoice_photo);
+          if (oldId) await deleteFromCloudinary(oldId, 'raw');
+        }
+        invoice_photo = await saveFile(req.files.invoice_photo[0], 'invoices');
       }
       if (req.files.asset_photo && req.files.asset_photo[0]) {
-        asset_photo = saveFile(req.files.asset_photo[0], 'asset-photo');
+        if (existing.asset_photo) {
+          const oldId = extractPublicId(existing.asset_photo);
+          if (oldId) await deleteFromCloudinary(oldId, 'image');
+        }
+        asset_photo = await saveFile(req.files.asset_photo[0], 'photos');
       }
     }
 

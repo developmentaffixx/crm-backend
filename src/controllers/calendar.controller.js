@@ -2,7 +2,7 @@ const db = require('../config/db');
 
 /**
  * GET /api/calendar/events?start=YYYY-MM-DD&end=YYYY-MM-DD
- * Get events for a date range
+ * Get events for a date range (personal + shared/company-wide)
  */
 exports.getEvents = async (req, res) => {
   try {
@@ -12,12 +12,22 @@ exports.getEvents = async (req, res) => {
     }
 
     const [rows] = await db.query(
-      `SELECT id, title, description, start_time, end_time, all_day, color, category
-       FROM calendar_events
-       WHERE user_id = ? AND deleted = 0
-         AND start_time <= ? AND end_time >= ?
-       ORDER BY start_time ASC`,
-      [req.user.id, `${end} 23:59:59`, `${start} 00:00:00`]
+      `SELECT ce.id, ce.title, ce.description, ce.start_time, ce.end_time, ce.all_day,
+              ce.color, ce.category, ce.visibility, ce.user_id,
+              u.name AS created_by_name
+       FROM calendar_events ce
+       LEFT JOIN users u ON u.id = ce.user_id
+       WHERE ce.deleted = 0
+         AND ce.start_time <= ? AND ce.end_time >= ?
+         AND (
+           ce.user_id = ?
+           OR ce.visibility = 'company'
+           OR (ce.visibility = 'team' AND ce.user_id IN (
+             SELECT u2.id FROM users u2 WHERE u2.department = (SELECT department FROM users WHERE id = ?)
+           ))
+         )
+       ORDER BY ce.start_time ASC`,
+      [`${end} 23:59:59`, `${start} 00:00:00`, req.user.id, req.user.id]
     );
     return res.json(rows);
   } catch (err) {
@@ -32,15 +42,15 @@ exports.getEvents = async (req, res) => {
  */
 exports.createEvent = async (req, res) => {
   try {
-    const { title, description, start_time, end_time, all_day, color, category } = req.body;
+    const { title, description, start_time, end_time, all_day, color, category, visibility } = req.body;
     if (!title || !start_time || !end_time) {
       return res.status(400).json({ message: 'Title, start_time, and end_time are required' });
     }
 
     const [result] = await db.query(
-      `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, category, user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [title, description || null, start_time, end_time, all_day ? 1 : 0, color || 'blue', category || 'other', req.user.id]
+      `INSERT INTO calendar_events (title, description, start_time, end_time, all_day, color, category, visibility, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [title, description || null, start_time, end_time, all_day ? 1 : 0, color || 'blue', category || 'other', visibility || 'personal', req.user.id]
     );
 
     const [rows] = await db.query('SELECT * FROM calendar_events WHERE id = ?', [result.insertId]);
@@ -59,7 +69,7 @@ exports.createEvent = async (req, res) => {
 exports.updateEvent = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, description, start_time, end_time, all_day, color, category } = req.body;
+    const { title, description, start_time, end_time, all_day, color, category, visibility } = req.body;
 
     const [existing] = await db.query(
       'SELECT id FROM calendar_events WHERE id = ? AND user_id = ? AND deleted = 0',
@@ -69,8 +79,8 @@ exports.updateEvent = async (req, res) => {
 
     await db.query(
       `UPDATE calendar_events SET title = ?, description = ?, start_time = ?, end_time = ?,
-       all_day = ?, color = ?, category = ?, updated_at = NOW() WHERE id = ?`,
-      [title, description || null, start_time, end_time, all_day ? 1 : 0, color || 'blue', category || 'other', id]
+       all_day = ?, color = ?, category = ?, visibility = ?, updated_at = NOW() WHERE id = ?`,
+      [title, description || null, start_time, end_time, all_day ? 1 : 0, color || 'blue', category || 'other', visibility || 'personal', id]
     );
 
     const [rows] = await db.query('SELECT * FROM calendar_events WHERE id = ?', [id]);

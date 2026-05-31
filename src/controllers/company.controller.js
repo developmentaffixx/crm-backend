@@ -1,6 +1,5 @@
 const db = require('../config/db');
-const path = require('path');
-const fs   = require('fs');
+const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
 
 // ─── GET /api/settings/company ────────────────────────────────────────────────
 exports.getCompanySettings = async (req, res) => {
@@ -20,7 +19,6 @@ exports.updateCompanySettings = async (req, res) => {
     const [existing] = await db.query('SELECT * FROM company_settings WHERE id = 1');
     const current = existing[0] || {};
 
-    // All updatable fields
     const fields = [
       'company_name', 'tagline', 'email', 'phone', 'website',
       'address_line1', 'address_line2', 'city', 'state', 'zip_code', 'country',
@@ -40,7 +38,6 @@ exports.updateCompanySettings = async (req, res) => {
     const values = fields.map(f => updated[f]);
 
     await db.query(`UPDATE company_settings SET ${setClauses} WHERE id = 1`, values);
-
     return res.json({ message: 'Company settings saved' });
   } catch (err) {
     console.error('updateCompanySettings error:', err);
@@ -48,41 +45,42 @@ exports.updateCompanySettings = async (req, res) => {
   }
 };
 
-// ─── Generic image upload helper ──────────────────────────────────────────────
-async function uploadImage(req, res, fieldName, dbColumn) {
+// ─── Generic Cloudinary upload helper ────────────────────────────────────────
+async function uploadImage(req, res, folder, dbColumn, label) {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
-    const filename = `${fieldName}-${Date.now()}${path.extname(req.file.originalname)}`;
-    const uploadDir = path.join(__dirname, '../../uploads');
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+    // Delete old file from Cloudinary
+    const [rows] = await db.query(`SELECT ${dbColumn} FROM company_settings WHERE id = 1`);
+    const oldUrl = rows[0]?.[dbColumn];
+    if (oldUrl) {
+      const oldPublicId = extractPublicId(oldUrl);
+      if (oldPublicId) await deleteFromCloudinary(oldPublicId, 'image');
+    }
 
-    const filepath = path.join(uploadDir, filename);
-    fs.writeFileSync(filepath, req.file.buffer);
-
-    const url = `/uploads/${filename}`;
+    // Upload new file
+    const { url } = await uploadToCloudinary(req.file.buffer, `crm/${folder}`, 'image');
     await db.query(`UPDATE company_settings SET ${dbColumn} = ? WHERE id = 1`, [url]);
 
-    return res.json({ message: `${fieldName} uploaded`, url });
+    return res.json({ message: `${label} uploaded`, url });
   } catch (err) {
-    console.error(`upload ${fieldName} error:`, err);
+    console.error(`upload ${label} error:`, err);
     return res.status(500).json({ message: 'Server error' });
   }
 }
 
-// ─── Remove image helper ──────────────────────────────────────────────────────
+// ─── Generic Cloudinary remove helper ────────────────────────────────────────
 async function removeImage(req, res, dbColumn, label) {
   try {
     const [rows] = await db.query(`SELECT ${dbColumn} FROM company_settings WHERE id = 1`);
     const currentUrl = rows[0]?.[dbColumn];
 
-    // Delete file from disk if it exists
     if (currentUrl) {
-      const filepath = path.join(__dirname, '../../', currentUrl);
-      if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+      const publicId = extractPublicId(currentUrl);
+      if (publicId) await deleteFromCloudinary(publicId, 'image');
     }
 
-    await db.query(`UPDATE company_settings SET ${dbColumn} = '' WHERE id = 1`, []);
+    await db.query(`UPDATE company_settings SET ${dbColumn} = '' WHERE id = 1`);
     return res.json({ message: `${label} removed` });
   } catch (err) {
     console.error(`remove ${label} error:`, err);
@@ -91,13 +89,13 @@ async function removeImage(req, res, dbColumn, label) {
 }
 
 // ─── Upload endpoints ─────────────────────────────────────────────────────────
-exports.uploadLogo       = (req, res) => uploadImage(req, res, 'logo', 'logo_url');
-exports.uploadFavicon    = (req, res) => uploadImage(req, res, 'favicon', 'favicon_url');
-exports.uploadUpiQr      = (req, res) => uploadImage(req, res, 'upi-qr', 'upi_qr_url');
-exports.uploadLetterhead = (req, res) => uploadImage(req, res, 'letterhead', 'letterhead_url');
+exports.uploadLogo       = (req, res) => uploadImage(req, res, 'logos',       'logo_url',       'Logo');
+exports.uploadFavicon    = (req, res) => uploadImage(req, res, 'favicons',    'favicon_url',    'Favicon');
+exports.uploadUpiQr      = (req, res) => uploadImage(req, res, 'qr-codes',   'upi_qr_url',     'UPI QR');
+exports.uploadLetterhead = (req, res) => uploadImage(req, res, 'letterheads', 'letterhead_url', 'Letterhead');
 
 // ─── Remove endpoints ─────────────────────────────────────────────────────────
-exports.removeLogo       = (req, res) => removeImage(req, res, 'logo_url', 'Logo');
-exports.removeFavicon    = (req, res) => removeImage(req, res, 'favicon_url', 'Favicon');
-exports.removeUpiQr      = (req, res) => removeImage(req, res, 'upi_qr_url', 'UPI QR');
+exports.removeLogo       = (req, res) => removeImage(req, res, 'logo_url',       'Logo');
+exports.removeFavicon    = (req, res) => removeImage(req, res, 'favicon_url',    'Favicon');
+exports.removeUpiQr      = (req, res) => removeImage(req, res, 'upi_qr_url',     'UPI QR');
 exports.removeLetterhead = (req, res) => removeImage(req, res, 'letterhead_url', 'Letterhead');

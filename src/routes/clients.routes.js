@@ -33,6 +33,12 @@ router.get('/:id', param('id').isInt(), clientsController.getOne);
 // GET  /api/clients/:id/activity — get recent activity timeline
 router.get('/:id/activity', param('id').isInt(), clientsController.getActivity);
 
+// GET  /api/clients/:id/services — get services assigned to client
+router.get('/:id/services', param('id').isInt(), clientsController.getClientServices);
+
+// POST /api/clients/:id/services — assign a service+plan to client
+router.post('/:id/services', param('id').isInt(), clientsController.addClientService);
+
 // POST /api/clients/:id/onboarding-a  — save onboarding A
 router.post('/:id/onboarding-a', param('id').isInt(), clientsController.saveOnboardingA);
 
