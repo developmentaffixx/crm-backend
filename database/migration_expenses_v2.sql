@@ -8,4 +8,5 @@ USE crm_task_module;
 ALTER TABLE expenses
   ADD COLUMN IF NOT EXISTS expense_id_code VARCHAR(20)  DEFAULT NULL AFTER id,
   ADD COLUMN IF NOT EXISTS transaction_id  VARCHAR(255) DEFAULT NULL AFTER payment_mode,
-  ADD COLUMN IF NOT EXISTS other_category  VARCHAR(255) DEFAULT NULL AFTER category;
+  ADD COLUMN IF NOT EXISTS other_category  VARCHAR(255) DEFAULT NULL AFTER category,
+  ADD COLUMN IF NOT EXISTS bank_name       VARCHAR(100) DEFAULT NULL AFTER transaction_id;
