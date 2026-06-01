@@ -73,7 +73,7 @@ exports.create = async (req, res) => {
   try {
     const {
       title, expense_date, expense_type, client_id, project_id,
-      category, vendor_name, amount, payment_mode
+      category, other_category, vendor_name, amount, payment_mode, transaction_id
     } = req.body;
 
     if (!title || !vendor_name) {
@@ -104,8 +104,8 @@ exports.create = async (req, res) => {
     const expense_id_code = `${expPrefix}-${String(expSeq).padStart(3, '0')}`;
 
     const [result] = await db.query(
-      `INSERT INTO expenses (expense_id_code, title, expense_date, expense_type, client_id, project_id, category, vendor_name, amount, payment_mode, bill_copy, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO expenses (expense_id_code, title, expense_date, expense_type, client_id, project_id, category, other_category, vendor_name, amount, payment_mode, transaction_id, bill_copy, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         expense_id_code,
         title,
@@ -114,9 +114,11 @@ exports.create = async (req, res) => {
         client_id || null,
         project_id || null,
         category || 'Miscellaneous expense',
+        other_category || null,
         vendor_name,
         parseFloat(amount || 0),
         payment_mode || 'Cash',
+        transaction_id || null,
         bill_copy,
         req.user.id
       ]
@@ -148,7 +150,7 @@ exports.update = async (req, res) => {
     const existing = rows[0];
     const {
       title, expense_date, expense_type, client_id, project_id,
-      category, vendor_name, amount, payment_mode
+      category, other_category, vendor_name, amount, payment_mode, transaction_id
     } = req.body;
 
     // Handle file upload — delete old from Cloudinary, upload new
@@ -165,7 +167,7 @@ exports.update = async (req, res) => {
     await db.query(
       `UPDATE expenses SET
         title = ?, expense_date = ?, expense_type = ?, client_id = ?, project_id = ?,
-        category = ?, vendor_name = ?, amount = ?, payment_mode = ?, bill_copy = ?
+        category = ?, other_category = ?, vendor_name = ?, amount = ?, payment_mode = ?, transaction_id = ?, bill_copy = ?
        WHERE id = ?`,
       [
         title !== undefined ? title : existing.title,
@@ -174,9 +176,11 @@ exports.update = async (req, res) => {
         expense_type === 'client' ? (client_id || existing.client_id) : null,
         expense_type === 'client' ? (project_id || existing.project_id) : null,
         category || existing.category,
+        other_category !== undefined ? (other_category || null) : existing.other_category,
         vendor_name !== undefined ? vendor_name : existing.vendor_name,
         amount !== undefined ? parseFloat(amount) : existing.amount,
         payment_mode || existing.payment_mode,
+        transaction_id !== undefined ? (transaction_id || null) : existing.transaction_id,
         bill_copy,
         req.params.id
       ]
