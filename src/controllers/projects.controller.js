@@ -299,6 +299,14 @@ exports.update = async (req, res) => {
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
 
+    // Normalize empty strings to null for nullable fields
+    const nullableFields = ['description', 'client_id', 'service_id', 'start_date', 'end_date'];
+    nullableFields.forEach(f => {
+      if (updates[f] === '' || updates[f] === 0 || updates[f] === '0') {
+        updates[f] = null;
+      }
+    });
+
     // If switching to internal, clear client_id
     if (updates.project_type === 'internal') {
       updates.client_id = null;
