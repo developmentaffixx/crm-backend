@@ -73,7 +73,7 @@ exports.create = async (req, res) => {
   try {
     const {
       title, expense_date, expense_type, client_id, project_id,
-      category, other_category, vendor_name, amount, payment_mode, transaction_id, bank_name, remarks
+      category, other_category, vendor_name, amount, payment_mode, transaction_id, bank_name, remarks, quantity
     } = req.body;
 
     if (!title || !vendor_name) {
@@ -104,8 +104,8 @@ exports.create = async (req, res) => {
     const expense_id_code = `${expPrefix}-${String(expSeq).padStart(3, '0')}`;
 
     const [result] = await db.query(
-      `INSERT INTO expenses (expense_id_code, title, expense_date, expense_type, client_id, project_id, category, other_category, vendor_name, amount, payment_mode, transaction_id, bank_name, remarks, bill_copy, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO expenses (expense_id_code, title, expense_date, expense_type, client_id, project_id, category, other_category, vendor_name, amount, quantity, payment_mode, transaction_id, bank_name, remarks, bill_copy, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         expense_id_code,
         title,
@@ -117,6 +117,7 @@ exports.create = async (req, res) => {
         other_category || null,
         vendor_name,
         parseFloat(amount || 0),
+        quantity ? parseInt(quantity, 10) : null,
         payment_mode || 'Cash',
         transaction_id || null,
         payment_mode === 'Bank' || payment_mode === 'UPI' ? (bank_name || null) : null,
@@ -152,7 +153,7 @@ exports.update = async (req, res) => {
     const existing = rows[0];
     const {
       title, expense_date, expense_type, client_id, project_id,
-      category, other_category, vendor_name, amount, payment_mode, transaction_id, bank_name, remarks
+      category, other_category, vendor_name, amount, payment_mode, transaction_id, bank_name, remarks, quantity
     } = req.body;
 
     // Handle file upload — delete old from Cloudinary, upload new
@@ -169,7 +170,7 @@ exports.update = async (req, res) => {
     await db.query(
       `UPDATE expenses SET
         title = ?, expense_date = ?, expense_type = ?, client_id = ?, project_id = ?,
-        category = ?, other_category = ?, vendor_name = ?, amount = ?, payment_mode = ?, transaction_id = ?, bank_name = ?, remarks = ?, bill_copy = ?
+        category = ?, other_category = ?, vendor_name = ?, amount = ?, quantity = ?, payment_mode = ?, transaction_id = ?, bank_name = ?, remarks = ?, bill_copy = ?
        WHERE id = ?`,
       [
         title !== undefined ? title : existing.title,
@@ -181,6 +182,7 @@ exports.update = async (req, res) => {
         other_category !== undefined ? (other_category || null) : existing.other_category,
         vendor_name !== undefined ? vendor_name : existing.vendor_name,
         amount !== undefined ? parseFloat(amount) : existing.amount,
+        quantity !== undefined ? (quantity ? parseInt(quantity, 10) : null) : existing.quantity,
         payment_mode || existing.payment_mode,
         transaction_id !== undefined ? (transaction_id || null) : existing.transaction_id,
         (payment_mode || existing.payment_mode) === 'Bank' || (payment_mode || existing.payment_mode) === 'UPI'
