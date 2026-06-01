@@ -313,7 +313,7 @@ exports.createUser = async (req, res) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const {
-    first_name, last_name, email, password, role_id = null, is_admin = 0,
+    first_name, last_name, email, password, role_id = null,
     phone = '', department = '', designation = '', date_of_joining = null, reporting_to = null,
   } = req.body;
 
@@ -323,18 +323,27 @@ exports.createUser = async (req, res) => {
       return res.status(409).json({ message: 'Email already registered' });
     }
 
+    // Auto-set is_admin based on whether the assigned role is the system Admin role
+    let resolvedIsAdmin = 0;
+    if (role_id) {
+      const [roleRows] = await db.query('SELECT is_system, name FROM roles WHERE id = ?', [role_id]);
+      if (roleRows.length > 0 && roleRows[0].is_system === 1 && roleRows[0].name === 'Admin') {
+        resolvedIsAdmin = 1;
+      }
+    }
+
     const hash = await bcrypt.hash(password, 10);
     const [result] = await db.query(
       `INSERT INTO users (first_name, last_name, email, phone, department, designation, date_of_joining, reporting_to, password_hash, is_admin, role_id, is_active, deleted)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)`,
-      [first_name, last_name, email, phone, department, designation, date_of_joining || null, reporting_to || null, hash, is_admin ? 1 : 0, role_id || null]
+      [first_name, last_name, email, phone, department, designation, date_of_joining || null, reporting_to || null, hash, resolvedIsAdmin, role_id || null]
     );
 
     const newUserId = result.insertId;
 
     // Auto-generate emp_code: DOUBT for admin, AFID#### for employees
     let emp_code;
-    if (is_admin) {
+    if (resolvedIsAdmin) {
       emp_code = 'DOUBT';
     } else {
       // Find next available AFID number
@@ -394,7 +403,7 @@ exports.updateUser = async (req, res) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const userId = parseInt(req.params.id, 10);
-  const { first_name, last_name, email, role_id, is_active, is_admin, reason,
+  const { first_name, last_name, email, role_id, is_active, reason,
           phone, department, designation, date_of_joining, reporting_to } = req.body;
 
   try {
@@ -414,7 +423,18 @@ exports.updateUser = async (req, res) => {
     const newEmail         = email          !== undefined ? email          : user.email;
     const newRoleId        = role_id        !== undefined ? (role_id || null) : user.role_id;
     const newIsActive      = is_active      !== undefined ? (is_active ? 1 : 0) : user.is_active;
-    const newIsAdmin       = is_admin       !== undefined ? (is_admin  ? 1 : 0) : user.is_admin;
+
+    // Auto-sync is_admin: set to 1 only when assigned the system Admin role, else 0
+    let newIsAdmin = user.is_admin;
+    if (role_id !== undefined) {
+      if (newRoleId) {
+        const [roleRows] = await db.query('SELECT is_system, name FROM roles WHERE id = ?', [newRoleId]);
+        newIsAdmin = (roleRows.length > 0 && roleRows[0].is_system === 1 && roleRows[0].name === 'Admin') ? 1 : 0;
+      } else {
+        // Role removed — revoke admin
+        newIsAdmin = 0;
+      }
+    }
     const newPhone         = phone          !== undefined ? phone          : (user.phone || '');
     const newDepartment    = department     !== undefined ? department     : (user.department || '');
     const newDesignation   = designation    !== undefined ? designation    : (user.designation || '');
