@@ -166,11 +166,17 @@ exports.getToday = async (req, res) => {
       [userId]
     );
 
+    // Completed task timer segments today
     const [taskTimerResult] = await db.query(
       'SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs WHERE user_id = ? AND DATE(started_at) = CURDATE() AND ended_at IS NOT NULL AND duration > 0',
       [userId]
     );
-    const totalTaskSecondsToday = taskTimerResult[0].total;
+    // Currently running task timer (ended_at IS NULL) — count elapsed time live
+    const [activeTaskTimerResult] = await db.query(
+      'SELECT COALESCE(TIMESTAMPDIFF(SECOND, started_at, NOW()), 0) AS elapsed FROM task_time_logs WHERE user_id = ? AND DATE(started_at) = CURDATE() AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1',
+      [userId]
+    );
+    const totalTaskSecondsToday = parseInt(taskTimerResult[0].total) + parseInt(activeTaskTimerResult[0]?.elapsed || 0);
 
     // Get today's ticket time
     const [ticketTimerResult] = await db.query(
