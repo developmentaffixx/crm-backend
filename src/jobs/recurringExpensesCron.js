@@ -18,8 +18,7 @@ async function generateExpenseIdCode(expenseDate) {
   const emm = String(expDate.getMonth() + 1).padStart(2, '0');
   const expPrefix = `EXP-${eyy}${emm}`;
   const [lastExp] = await db.query(
-    `SELECT expense_id_code FROM expenses WHERE expense_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
-    [`${expPrefix}-%`]
+    `SELECT expense_id_code FROM expenses WHERE expense_id_code LIKE 'EXP-%' ORDER BY id DESC LIMIT 1`
   );
   let expSeq = 1;
   if (lastExp.length > 0 && lastExp[0].expense_id_code) {
