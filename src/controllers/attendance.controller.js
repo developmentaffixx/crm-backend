@@ -184,23 +184,30 @@ exports.getToday = async (req, res) => {
       [userId]
     );
 
-    // Get today's meeting time (completed meetings)
+    // Get today's meeting time — completed timer sessions (from meeting_time_logs)
     const [meetingTimerResult] = await db.query(
-      `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
-       FROM meetings m
-       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
-       WHERE (m.created_by = ? OR mm.user_id = ?) 
-       AND m.status = 'completed' AND m.deleted = 0
-       AND m.meeting_date = CURDATE()`,
-      [userId, userId]
+      `SELECT COALESCE(SUM(duration), 0) AS total 
+       FROM meeting_time_logs 
+       WHERE user_id = ? AND DATE(started_at) = CURDATE() AND ended_at IS NOT NULL AND duration > 0`,
+      [userId]
     );
+
+    // Currently running meeting timer — lives in meeting_active_timers (no log entry until stopped)
+    const [activeMeetingTimerResult] = await db.query(
+      `SELECT COALESCE(TIMESTAMPDIFF(SECOND, started_at, NOW()), 0) AS elapsed 
+       FROM meeting_active_timers 
+       WHERE user_id = ? AND DATE(started_at) = CURDATE() 
+       ORDER BY started_at DESC LIMIT 1`,
+      [userId]
+    );
+    const totalMeetingSecondsToday = parseInt(meetingTimerResult[0].total) + parseInt(activeMeetingTimerResult[0]?.elapsed || 0);
 
     console.log('DEBUG CLOCK WIDGET:', {
       userId,
       taskSeconds: totalTaskSecondsToday,
       ticketMinutes: ticketTimerResult[0].total,
-      meetingMinutes: meetingTimerResult[0].total,
-      totalProductive: totalTaskSecondsToday + (ticketTimerResult[0].total * 60) + (meetingTimerResult[0].total * 60)
+      meetingSeconds: totalMeetingSecondsToday,
+      totalProductive: totalTaskSecondsToday + (ticketTimerResult[0].total * 60) + totalMeetingSecondsToday
     });
 
     // Get today's schedule info (full/half/holiday)
@@ -213,7 +220,7 @@ exports.getToday = async (req, res) => {
       active_afs: activeAfs[0] || null,
       total_task_seconds: parseInt(totalTaskSecondsToday) || 0,
       total_ticket_seconds: (parseInt(ticketTimerResult[0].total) || 0) * 60,
-      total_meeting_seconds: (parseInt(meetingTimerResult[0].total) || 0) * 60,
+      total_meeting_seconds: totalMeetingSecondsToday,
       today_schedule: todaySchedule
     });
   } catch (err) {
