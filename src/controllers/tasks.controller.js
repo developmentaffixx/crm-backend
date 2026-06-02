@@ -608,9 +608,12 @@ exports.getActivity = async (req, res) => {
     // Also fetch extension request history for this task
     const [extHistory] = await db.query(
       `SELECT er.id, er.task_id, er.requested_by AS user_id, er.status, er.requested_deadline, er.reason, er.created_at,
-              CONCAT(u.first_name, ' ', u.last_name) AS user_name
+              er.actioned_by,
+              CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name,
+              CONCAT(a.first_name, ' ', a.last_name) AS actioned_by_name
        FROM task_deadline_extension_requests er
        JOIN users u ON u.id = er.requested_by
+       LEFT JOIN users a ON a.id = er.actioned_by
        WHERE er.task_id = ? AND er.deleted = 0
        ORDER BY er.created_at DESC`,
       [req.params.id]
@@ -622,7 +625,7 @@ exports.getActivity = async (req, res) => {
       return {
         id: `ext-${ext.id}`,
         task_id: ext.task_id,
-        user_id: ext.user_id,
+        user_id: ext.status === 'pending' ? ext.user_id : (ext.actioned_by || ext.user_id),
         action: ext.status === 'approved' ? 'extension_approved'
               : ext.status === 'rejected' ? 'extension_rejected'
               : 'extension_requested',
@@ -635,7 +638,9 @@ exports.getActivity = async (req, res) => {
           ? `Extension request rejected${ext.reason ? ' — Reason: ' + ext.reason : ''}`
           : `Requested new deadline: ${deadline}${ext.reason ? ' — Reason: ' + ext.reason : ''}`,
         created_at: ext.created_at,
-        user_name: ext.user_name,
+        user_name: ext.status === 'pending'
+          ? ext.requested_by_name
+          : (ext.actioned_by_name || ext.requested_by_name),
       };
     });
 

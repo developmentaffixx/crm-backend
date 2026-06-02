@@ -94,8 +94,8 @@ exports.approveExtension = async (req, res) => {
 
     // Update request status and task deadline
     await db.query(
-      "UPDATE task_deadline_extension_requests SET status = 'approved' WHERE id = ?",
-      [ext.id]
+      "UPDATE task_deadline_extension_requests SET status = 'approved', actioned_by = ? WHERE id = ?",
+      [req.user.id, ext.id]
     );
     await db.query(
       'UPDATE tasks SET deadline = ? WHERE id = ?',
@@ -132,8 +132,8 @@ exports.rejectExtension = async (req, res) => {
     }
 
     await db.query(
-      "UPDATE task_deadline_extension_requests SET status = 'rejected' WHERE id = ?",
-      [ext.id]
+      "UPDATE task_deadline_extension_requests SET status = 'rejected', actioned_by = ? WHERE id = ?",
+      [req.user.id, ext.id]
     );
 
     // Log to task activity
