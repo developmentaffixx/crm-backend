@@ -211,7 +211,8 @@ exports.create = async (req, res) => {
   const {
     name, business_name, service_required, budget_min, budget_max, no_budget_idea,
     purpose_of_services, phone, email, address, country, state, city, zip_code,
-    temperature, source, status, current_marketing_status, assigned_to, social_links
+    temperature, source, status, current_marketing_status, assigned_to, social_links,
+    resource, initial_followup
   } = req.body;
 
   try {
@@ -221,8 +222,8 @@ exports.create = async (req, res) => {
     const [result] = await db.query(
       `INSERT INTO leads (lead_id, name, business_name, service_required, budget_min, budget_max, no_budget_idea,
         purpose_of_services, phone, email, address, country, state, city, zip_code,
-        temperature, source, status, current_marketing_status, assigned_to, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        temperature, source, resource, status, current_marketing_status, assigned_to, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         lead_id,
         name, business_name || null, service_required || null,
@@ -231,7 +232,7 @@ exports.create = async (req, res) => {
         no_budget_idea ? 1 : 0,
         purpose_of_services || null, phone || null, email || null,
         address || null, country || null, state || null, city || null, zip_code || null,
-        temperature || 'cold', source || null, status || 'New',
+        temperature || 'cold', source || null, resource || null, status || 'New',
         current_marketing_status || null, assigned_to || null, req.user.id
       ]
     );
@@ -249,6 +250,14 @@ exports.create = async (req, res) => {
           [linkValues]
         );
       }
+    }
+
+    // Insert initial follow-up if provided
+    if (initial_followup && initial_followup.trim()) {
+      await db.query(
+        'INSERT INTO lead_follow_ups (lead_id, type, note, created_by) VALUES (?, ?, ?, ?)',
+        [leadId, 'Initial Follow-up', initial_followup.trim(), req.user.id]
+      );
     }
 
     // Record initial status in history
@@ -282,7 +291,7 @@ exports.update = async (req, res) => {
     const allowed = [
       'name', 'business_name', 'service_required', 'budget_min', 'budget_max', 'no_budget_idea',
       'purpose_of_services', 'phone', 'email', 'address', 'country', 'state', 'city', 'zip_code',
-      'temperature', 'source', 'status', 'current_marketing_status', 'assigned_to'
+      'temperature', 'source', 'resource', 'status', 'current_marketing_status', 'assigned_to'
     ];
 
     const updates = {};
@@ -362,7 +371,13 @@ exports.updateStatus = async (req, res) => {
       [req.params.id, lead.status, status, req.user.id]
     );
 
-    await db.query('UPDATE leads SET status = ? WHERE id = ?', [status, req.params.id]);
+    // If status is being set to 'Won', generate client_code (same as convert endpoint)
+    if (status === 'Won' && !lead.client_code) {
+      const client_code = await generateClientCode();
+      await db.query('UPDATE leads SET status = ?, client_code = ? WHERE id = ?', [status, client_code, req.params.id]);
+    } else {
+      await db.query('UPDATE leads SET status = ? WHERE id = ?', [status, req.params.id]);
+    }
 
     const [updated] = await db.query('SELECT * FROM leads WHERE id = ?', [req.params.id]);
     res.emitSocket('leads:updated', updated[0]);

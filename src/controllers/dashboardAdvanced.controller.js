@@ -297,7 +297,7 @@ exports.getAdminLeadFunnel = async (req, res) => {
       { stage: 'Contacted', count: statusMap['Contacted'] || 0 },
       { stage: 'Proposal', count: statusMap['Proposal'] || 0 },
       { stage: 'Negotiation', count: statusMap['Negotiation'] || 0 },
-      { stage: 'Won', count: (statusMap['Won'] || 0) + (statusMap['Converted'] || 0) },
+      { stage: 'Converted', count: (statusMap['Won'] || 0) + (statusMap['Converted'] || 0) },
       { stage: 'Lost', count: statusMap['Lost'] || 0 },
     ];
 
