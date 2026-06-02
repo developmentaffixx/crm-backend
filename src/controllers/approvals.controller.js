@@ -56,7 +56,7 @@ exports.createExtension = async (req, res) => {
 
     // Log to task activity
     await logActivity(task_id, req.user.id, 'extension_requested', {
-      note: `Requested new deadline: ${requested_deadline}${reason ? ' — Reason: ' + reason : ''}`
+      note: `Requested new deadline: ${new Date(requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${reason ? ' — Reason: ' + reason : ''}`
     });
 
     const [rows] = await db.query(
@@ -104,10 +104,7 @@ exports.approveExtension = async (req, res) => {
 
     // Log to task activity
     await logActivity(ext.task_id, req.user.id, 'extension_approved', {
-      field_name: 'deadline',
-      old_value: null,
-      new_value: ext.requested_deadline,
-      note: `Extension approved — deadline extended to ${ext.requested_deadline}`
+      note: `Deadline extended to ${new Date(ext.requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
     });
 
     res.emitSocket('approvals:updated', { id: req.params.id, type: 'extension', status: 'approved', new_deadline: ext.requested_deadline });

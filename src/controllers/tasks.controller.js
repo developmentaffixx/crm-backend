@@ -617,24 +617,27 @@ exports.getActivity = async (req, res) => {
     );
 
     // Merge extension history into activity log format
-    const extLogs = extHistory.map(ext => ({
-      id: `ext-${ext.id}`,
-      task_id: ext.task_id,
-      user_id: ext.user_id,
-      action: ext.status === 'approved' ? 'extension_approved'
-            : ext.status === 'rejected' ? 'extension_rejected'
-            : 'extension_requested',
-      field_name: ext.status === 'approved' ? 'deadline' : null,
-      old_value: null,
-      new_value: ext.status === 'approved' ? ext.requested_deadline : null,
-      note: ext.status === 'approved'
-        ? `Extension approved — deadline extended to ${ext.requested_deadline}`
-        : ext.status === 'rejected'
-        ? `Extension request rejected`
-        : `Requested new deadline: ${ext.requested_deadline}${ext.reason ? ' — Reason: ' + ext.reason : ''}`,
-      created_at: ext.created_at,
-      user_name: ext.user_name,
-    }));
+    const extLogs = extHistory.map(ext => {
+      const deadline = new Date(ext.requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      return {
+        id: `ext-${ext.id}`,
+        task_id: ext.task_id,
+        user_id: ext.user_id,
+        action: ext.status === 'approved' ? 'extension_approved'
+              : ext.status === 'rejected' ? 'extension_rejected'
+              : 'extension_requested',
+        field_name: null,
+        old_value: null,
+        new_value: null,
+        note: ext.status === 'approved'
+          ? `Deadline extended to ${deadline}`
+          : ext.status === 'rejected'
+          ? `Extension request rejected${ext.reason ? ' — Reason: ' + ext.reason : ''}`
+          : `Requested new deadline: ${deadline}${ext.reason ? ' — Reason: ' + ext.reason : ''}`,
+        created_at: ext.created_at,
+        user_name: ext.user_name,
+      };
+    });
 
     // Combine and sort by created_at descending, remove duplicate extension entries from activity log
     const activityActions = ['extension_requested', 'extension_approved', 'extension_rejected'];
