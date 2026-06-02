@@ -50,7 +50,7 @@ async function syncAssignees(taskId, primaryUserId, collaboratorIds = []) {
 exports.list = async (req, res) => {
   try {
     const {
-      status, is_active, priority, search,
+      status, is_active, priority, search, exclude_done,
       page = 1, limit = 25,
       sort_by = 'created_at', sort_order = 'DESC'
     } = req.query;
@@ -80,6 +80,7 @@ exports.list = async (req, res) => {
       where += ' AND t.is_active = ?';
       params.push(is_active);
     }
+    if (exclude_done === '1') { where += ' AND t.is_active != 3'; }
     if (priority)  { where += ' AND t.priority = ?';  params.push(priority); }
 
     // Search by title or description
