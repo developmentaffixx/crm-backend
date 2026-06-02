@@ -1,6 +1,19 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
 
+// Helper: Log to task_activity_log
+async function logActivity(taskId, userId, action, { field_name, old_value, new_value, note } = {}) {
+  try {
+    await db.query(
+      `INSERT INTO task_activity_log (task_id, user_id, action, field_name, old_value, new_value, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [taskId, userId, action, field_name || null, old_value || null, new_value || null, note || null]
+    );
+  } catch (err) {
+    console.error('Activity log error:', err);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EXTENSION REQUESTS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -40,6 +53,11 @@ exports.createExtension = async (req, res) => {
       'INSERT INTO task_deadline_extension_requests (task_id, requested_by, requested_deadline, reason) VALUES (?, ?, ?, ?)',
       [task_id, req.user.id, requested_deadline, reason]
     );
+
+    // Log to task activity
+    await logActivity(task_id, req.user.id, 'extension_requested', {
+      note: `Requested new deadline: ${requested_deadline}${reason ? ' — Reason: ' + reason : ''}`
+    });
 
     const [rows] = await db.query(
       `SELECT er.*, t.title AS task_title,
@@ -84,6 +102,14 @@ exports.approveExtension = async (req, res) => {
       [ext.requested_deadline, ext.task_id]
     );
 
+    // Log to task activity
+    await logActivity(ext.task_id, req.user.id, 'extension_approved', {
+      field_name: 'deadline',
+      old_value: null,
+      new_value: ext.requested_deadline,
+      note: `Extension approved — deadline extended to ${ext.requested_deadline}`
+    });
+
     res.emitSocket('approvals:updated', { id: req.params.id, type: 'extension', status: 'approved', new_deadline: ext.requested_deadline });
     return res.json({ message: 'Extension approved', new_deadline: ext.requested_deadline });
   } catch (err) {
@@ -112,6 +138,11 @@ exports.rejectExtension = async (req, res) => {
       "UPDATE task_deadline_extension_requests SET status = 'rejected' WHERE id = ?",
       [ext.id]
     );
+
+    // Log to task activity
+    await logActivity(ext.task_id, req.user.id, 'extension_rejected', {
+      note: `Extension request rejected`
+    });
 
     res.emitSocket('approvals:updated', { id: req.params.id, type: 'extension', status: 'rejected' });
     return res.json({ message: 'Extension rejected' });

@@ -605,7 +605,43 @@ exports.getActivity = async (req, res) => {
       [req.params.id]
     );
 
-    return res.json({ activity: logs });
+    // Also fetch extension request history for this task
+    const [extHistory] = await db.query(
+      `SELECT er.id, er.task_id, er.requested_by AS user_id, er.status, er.requested_deadline, er.reason, er.created_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name
+       FROM task_deadline_extension_requests er
+       JOIN users u ON u.id = er.requested_by
+       WHERE er.task_id = ? AND er.deleted = 0
+       ORDER BY er.created_at DESC`,
+      [req.params.id]
+    );
+
+    // Merge extension history into activity log format
+    const extLogs = extHistory.map(ext => ({
+      id: `ext-${ext.id}`,
+      task_id: ext.task_id,
+      user_id: ext.user_id,
+      action: ext.status === 'approved' ? 'extension_approved'
+            : ext.status === 'rejected' ? 'extension_rejected'
+            : 'extension_requested',
+      field_name: ext.status === 'approved' ? 'deadline' : null,
+      old_value: null,
+      new_value: ext.status === 'approved' ? ext.requested_deadline : null,
+      note: ext.status === 'approved'
+        ? `Extension approved — deadline extended to ${ext.requested_deadline}`
+        : ext.status === 'rejected'
+        ? `Extension request rejected`
+        : `Requested new deadline: ${ext.requested_deadline}${ext.reason ? ' — Reason: ' + ext.reason : ''}`,
+      created_at: ext.created_at,
+      user_name: ext.user_name,
+    }));
+
+    // Combine and sort by created_at descending, remove duplicate extension entries from activity log
+    const activityActions = ['extension_requested', 'extension_approved', 'extension_rejected'];
+    const filteredLogs = logs.filter(l => !activityActions.includes(l.action));
+    const combined = [...filteredLogs, ...extLogs].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    return res.json({ activity: combined });
   } catch (err) {
     console.error('Task activity error:', err);
     return res.status(500).json({ message: 'Server error' });
