@@ -458,11 +458,23 @@ exports.stopTimer = async (req, res) => {
       [meeting.id, req.user.id]
     );
 
-    // Update total_time_seconds on meeting
+    // Update total_time_seconds on meeting + append note to MOM
     await db.query(
       'UPDATE meetings SET total_time_seconds = total_time_seconds + ? WHERE id = ?',
       [durationSec, meeting.id]
     );
+
+    // Append stop note to the meeting's MOM field
+    if (note && note.trim()) {
+      const existingMom = meeting.mom || '';
+      const newMom = existingMom
+        ? `${existingMom}\n\n${note.trim()}`
+        : note.trim();
+      await db.query(
+        'UPDATE meetings SET mom = ? WHERE id = ?',
+        [newMom, meeting.id]
+      );
+    }
 
     // If no more active timers, clear legacy timer_started_at
     const [remaining] = await db.query(
