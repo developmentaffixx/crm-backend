@@ -866,7 +866,7 @@ exports.createStructure = async (req, res) => {
         parseFloat(post_probation_salary || 0),
         parseFloat(per_day_salary || 0),
         parseFloat(per_hour_salary || 0),
-        parseInt(working_days_per_month) || 26,
+        parseInt(working_days_per_month) || 30,
         parseInt(working_hours_per_day) || 8,
         req.user.id,
       ]
@@ -931,7 +931,7 @@ exports.updateStructure = async (req, res) => {
         post_probation_salary!== undefined ? parseFloat(post_probation_salary): (ex.post_probation_salary || 0),
         per_day_salary       !== undefined ? parseFloat(per_day_salary)       : (ex.per_day_salary || 0),
         per_hour_salary      !== undefined ? parseFloat(per_hour_salary)      : (ex.per_hour_salary || 0),
-        working_days_per_month !== undefined ? parseInt(working_days_per_month) : (ex.working_days_per_month || 26),
+        working_days_per_month !== undefined ? parseInt(working_days_per_month) : (ex.working_days_per_month || 30),
         working_hours_per_day  !== undefined ? parseInt(working_hours_per_day)  : (ex.working_hours_per_day || 8),
         req.params.id,
       ]

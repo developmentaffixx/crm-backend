@@ -1,58 +1,56 @@
 /**
- * Payroll Auto-Generate Cron Job  (v4 — Probation + Paid Leave + Mid-Month Join)
+ * Payroll Auto-Generate Cron Job  (v5 — Fixed 30 Days + 1 Paid Leave Lapse)
  * ─────────────────────────────────────────────────────────────────────────────
  * Runs on the 1st of every month at 00:05 AM.
  *
- * Step 1 — Credit paid leave:
- *   For every CONFIRMED employee → add 1 paid leave to paid_leave_ledger.
- *   Probation employees → skip (no paid leave).
+ * Policy:
+ *   - Fixed 30 working days per month (regardless of actual calendar days)
+ *   - 1 paid leave per month for confirmed employees (lapse — does NOT carry forward)
+ *   - Probation employees get NO paid leave (all absent = LOP)
  *
- * Step 2 — Generate payroll:
- *   For every employee with a salary structure:
- *   a) Check if in probation → all absent days = LOP
- *   b) If confirmed → absent days first consume paid leave balance,
- *      remaining absent days = LOP
- *
- * Probation check:
- *   employment_status = 'probation'  OR  probation_end_date > target month end
- *   → in probation
+ * Formula:
+ *   Per Day Salary = Monthly Salary / 30
+ *   If leaves taken ≤ 1 → LOP = 0 (covered by paid leave)
+ *   If leaves taken > 1 → LOP = leaves taken - 1
+ *   Deduction = LOP × Per Day Salary
  *
  * Mid-month join handling:
- *   If date_of_joining falls within the target month, working days and
- *   attendance are counted only from the join date (pro-rata salary).
+ *   If date_of_joining falls within the target month, working days are
+ *   calculated as: 30 - days_before_joining (pro-rata out of 30).
  */
 
 const db = require('../config/db');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getWorkingDaysInMonth(year, month) {
-  const daysInMonth = new Date(year, month, 0).getDate();
-  let workingDays = 0;
-  for (let d = 1; d <= daysInMonth; d++) {
-    const day = new Date(year, month - 1, d).getDay();
-    if (day !== 0) workingDays++; // exclude Sunday
-  }
-  return workingDays;
-}
+const FIXED_DAYS_PER_MONTH = 30;
 
 /**
- * Count working days (Mon–Sat) from a given start date to end of month.
- * Used for mid-month joiners to calculate pro-rata working days.
+ * For mid-month joiners: calculate pro-rata working days out of 30.
+ * E.g., joined on 16th → worked 15 days → working_days = 30 - 15 = 15
+ * We treat every month as 30 days regardless of actual calendar days.
  */
-function getWorkingDaysFromDate(year, month, fromDateStr) {
-  const monthEnd   = new Date(year, month, 0).getDate();
-  const startDay   = new Date(fromDateStr).getDate();
-  let workingDays  = 0;
-  for (let d = startDay; d <= monthEnd; d++) {
-    const day = new Date(year, month - 1, d).getDay();
-    if (day !== 0) workingDays++; // exclude Sunday
-  }
-  return workingDays;
+function getProRataWorkingDays(year, month, dateOfJoining) {
+  if (!dateOfJoining) return FIXED_DAYS_PER_MONTH;
+
+  const monthStr   = String(month).padStart(2, '0');
+  const monthStart = `${year}-${monthStr}-01`;
+
+  const joinStr = dateOfJoining instanceof Date
+    ? dateOfJoining.toISOString().split('T')[0]
+    : String(dateOfJoining).split('T')[0];
+
+  // Only apply pro-rata if join date falls within the target month
+  if (joinStr <= monthStart) return FIXED_DAYS_PER_MONTH;
+
+  const joinDay = new Date(joinStr).getDate();
+  // Days not worked = joinDay - 1 (e.g., joined 16th → missed 15 days)
+  const proRataDays = FIXED_DAYS_PER_MONTH - (joinDay - 1);
+  return Math.max(0, proRataDays);
 }
 
 /**
- * Returns the effective start date for payroll calculation.
+ * Returns the effective start date for attendance query.
  * If employee joined mid-month, use join date. Otherwise use 1st of month.
  */
 function getEffectiveStartDate(year, month, dateOfJoining) {
@@ -101,24 +99,17 @@ function isInProbation(employee, targetYear, targetMonth) {
 
 /**
  * Get the current paid leave balance for an employee.
- * Looks at the closing_balance of the most recent ledger entry.
+ * With LAPSE policy: balance is always 0 or 1 (never accumulates).
+ * Returns 0 since we credit fresh 1 each month and it doesn't carry forward.
  */
 async function getPaidLeaveBalance(employeeId, beforeYear, beforeMonth) {
-  // Get the latest ledger entry before the target month
-  const [rows] = await db.query(
-    `SELECT closing_balance FROM paid_leave_ledger
-     WHERE employee_id = ?
-       AND (ledger_year < ? OR (ledger_year = ? AND ledger_month < ?))
-     ORDER BY ledger_year DESC, ledger_month DESC
-     LIMIT 1`,
-    [employeeId, beforeYear, beforeYear, beforeMonth]
-  );
-  return rows.length > 0 ? parseFloat(rows[0].closing_balance) : 0;
+  // Lapse policy: always starts fresh at 0. The 1 leave is credited same month.
+  return 0;
 }
 
 /**
  * Credit 1 paid leave to a confirmed employee for the target month.
- * Creates a ledger entry: opening = previous closing, credited = 1.
+ * Lapse policy: opening = 0 (never carries forward), credited = 1, closing = 1.
  */
 async function creditPaidLeave(employeeId, targetYear, targetMonth) {
   // Check if already credited this month
@@ -128,9 +119,10 @@ async function creditPaidLeave(employeeId, targetYear, targetMonth) {
   );
   if (existing.length > 0) return; // already credited
 
-  const openingBalance = await getPaidLeaveBalance(employeeId, targetYear, targetMonth);
+  // Lapse policy: opening is always 0 (previous month's unused leave is lost)
+  const openingBalance = 0;
   const credited       = 1;
-  const closingBalance = openingBalance + credited;
+  const closingBalance = openingBalance + credited; // always 1
 
   await db.query(
     `INSERT INTO paid_leave_ledger
@@ -239,10 +231,10 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
     );
     const existingSet = new Set(existingPayroll.map(r => r.employee_id));
 
-    const fullMonthWorkingDays = getWorkingDaysInMonth(targetYear, targetMonth);
     const SYSTEM_USER  = 1;
 
     // ── Step 3: Credit paid leave for confirmed employees ─────────────────────
+    // Lapse policy: 1 fresh leave per month, doesn't carry forward
     for (const structure of structures) {
       const inProbation = isInProbation(structure, targetYear, targetMonth);
       if (!inProbation) {
@@ -257,19 +249,19 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
       if (existingSet.has(empId)) { skippedCount++; continue; }
 
       try {
-        // ── Mid-month join: calculate pro-rata working days ───────────────────
+        // ── Fixed 30 days policy (pro-rata for mid-month joiners) ─────────────
+        const workingDays = getProRataWorkingDays(targetYear, targetMonth, structure.date_of_joining);
+        const isMidMonthJoin = workingDays < FIXED_DAYS_PER_MONTH;
+
+        // Effective start date for attendance query
         const effectiveStart = getEffectiveStartDate(targetYear, targetMonth, structure.date_of_joining);
-        const isMidMonthJoin = effectiveStart !== `${targetYear}-${String(targetMonth).padStart(2, '0')}-01`;
-        const workingDays    = isMidMonthJoin
-          ? getWorkingDaysFromDate(targetYear, targetMonth, effectiveStart)
-          : fullMonthWorkingDays;
 
         const { days_present } = await getAttendanceSummary(empId, targetYear, targetMonth, effectiveStart);
         const absentDays       = Math.max(0, workingDays - days_present);
         const inProbation      = isInProbation(structure, targetYear, targetMonth);
 
         if (isMidMonthJoin) {
-          console.log(`[PayrollCron] Employee ${empId} joined mid-month (${effectiveStart}). Pro-rata working days: ${workingDays}/${fullMonthWorkingDays}`);
+          console.log(`[PayrollCron] Employee ${empId} joined mid-month. Pro-rata working days: ${workingDays}/${FIXED_DAYS_PER_MONTH}`);
         }
 
         let paidLeaveUsed    = 0;
@@ -277,36 +269,35 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
         let paidLeaveBalance = 0;
 
         if (inProbation) {
-          // ── Probation: ALL absent days = LOP ─────────────────────────────
+          // ── Probation: ALL absent days = LOP (no paid leave) ─────────────
           lopDays          = absentDays;
           paidLeaveUsed    = 0;
           paidLeaveBalance = 0;
         } else {
-          // ── Confirmed: use paid leave first, then LOP ─────────────────────
-          paidLeaveBalance = await getPaidLeaveBalance(empId, targetYear, targetMonth) + 1;
-          // +1 because we just credited 1 this month in Step 3
+          // ── Confirmed: 1 paid leave per month (lapse policy) ──────────────
+          // Employee gets exactly 1 free leave. If absent > 1, rest = LOP.
+          const availableLeave = 1; // always 1, never accumulates
 
-          if (absentDays <= paidLeaveBalance) {
+          if (absentDays <= availableLeave) {
             paidLeaveUsed    = absentDays;
             lopDays          = 0;
           } else {
-            paidLeaveUsed    = paidLeaveBalance;
-            lopDays          = absentDays - paidLeaveBalance;
+            paidLeaveUsed    = availableLeave;
+            lopDays          = absentDays - availableLeave;
           }
+
+          paidLeaveBalance = availableLeave - paidLeaveUsed; // 0 or 1
 
           // Update ledger with actual usage
           await updateLedgerUsage(empId, targetYear, targetMonth, paidLeaveUsed, lopDays);
-          // Recalculate balance after usage
-          paidLeaveBalance = Math.max(0, paidLeaveBalance - paidLeaveUsed);
         }
 
-        // ── Salary calculation ────────────────────────────────────────────────
+        // ── Salary calculation (Fixed 30 days) ────────────────────────────────
         const basicRaw    = parseFloat(structure.basic_salary);
-        const wDaysConfig = parseInt(structure.working_days_per_month) || 26;
         const wHoursConfig = parseInt(structure.working_hours_per_day) || 8;
-        const perDaySal   = workingDays > 0 ? basicRaw / workingDays : 0;
-        const perDayDisplay  = parseFloat((basicRaw / wDaysConfig).toFixed(2));
-        const perHourDisplay = parseFloat((basicRaw / wDaysConfig / wHoursConfig).toFixed(2));
+        const perDaySal   = basicRaw / FIXED_DAYS_PER_MONTH; // Always divide by 30
+        const perDayDisplay  = parseFloat(perDaySal.toFixed(2));
+        const perHourDisplay = parseFloat((perDaySal / wHoursConfig).toFixed(2));
         const lopDeduction = parseFloat((lopDays * perDaySal).toFixed(2));
 
         const basicActual = parseFloat((basicRaw - lopDeduction).toFixed(2));
@@ -350,7 +341,7 @@ async function autoGeneratePayroll(targetMonth, targetYear) {
         );
 
         createdCount++;
-        console.log(`[PayrollCron] Employee ${empId} | Probation: ${inProbation} | Absent: ${absentDays} | PL Used: ${paidLeaveUsed} | LOP: ${lopDays} | Net: ₹${netSalary}`);
+        console.log(`[PayrollCron] Employee ${empId} | Probation: ${inProbation} | Working Days: ${workingDays}/30 | Absent: ${absentDays} | PL Used: ${paidLeaveUsed} | LOP: ${lopDays} | Net: ₹${netSalary}`);
       } catch (empErr) {
         console.error(`[PayrollCron] Error for employee ${empId}:`, empErr.message);
         skippedCount++;
