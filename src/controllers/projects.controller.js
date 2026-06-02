@@ -425,7 +425,7 @@ exports.addActivity = async (req, res) => {
 exports.getClients = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT id, name, business_name FROM leads WHERE deleted = 0 AND business_name IS NOT NULL AND business_name != '' ORDER BY business_name ASC`
+      `SELECT id, name, business_name FROM leads WHERE deleted = 0 AND status = 'Won' AND business_name IS NOT NULL AND business_name != '' ORDER BY business_name ASC`
     );
     return res.json(rows);
   } catch (err) {

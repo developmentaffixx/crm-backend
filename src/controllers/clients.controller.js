@@ -8,7 +8,7 @@ const fs = require('fs');
  */
 exports.list = async (req, res) => {
   try {
-    const { search } = req.query;
+    const { search, sortBy, sortOrder } = req.query;
     let where = "l.deleted = 0 AND l.status = 'Won'";
     const params = [];
 
@@ -24,6 +24,12 @@ exports.list = async (req, res) => {
       params.push(req.user.id, req.user.id);
     }
 
+    // Allowed sort columns
+    const allowedSortColumns = { client_code: 'l.client_code', name: 'l.name', business_name: 'l.business_name' };
+    const order = allowedSortColumns[sortBy]
+      ? `${allowedSortColumns[sortBy]} ${sortOrder === 'asc' ? 'ASC' : 'DESC'}`
+      : 'l.updated_at DESC';
+
     const [rows] = await db.query(
       `SELECT l.*,
               CONCAT(u_assigned.first_name, ' ', u_assigned.last_name) AS assigned_to_name,
@@ -32,7 +38,7 @@ exports.list = async (req, res) => {
        LEFT JOIN users u_assigned ON u_assigned.id = l.assigned_to
        LEFT JOIN users u_created  ON u_created.id  = l.created_by
        WHERE ${where}
-       ORDER BY l.updated_at DESC`,
+       ORDER BY ${order}`,
       params
     );
 
