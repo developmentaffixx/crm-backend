@@ -56,8 +56,8 @@ exports.generateSummary = async (req, res) => {
       stats,
     });
   } catch (err) {
-    console.error('Lead summary error:', err);
-    return res.status(500).json({ message: 'Failed to generate summary' });
+    console.error('Lead summary error:', err.message || err);
+    return res.status(500).json({ message: err.message || 'Failed to generate summary' });
   }
 };
 
