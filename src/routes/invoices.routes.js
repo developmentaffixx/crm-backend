@@ -43,4 +43,9 @@ router.get('/:id/payments', param('id').isInt(), invoicesController.getPayments)
 // POST /api/invoices/:id/upload-qr — upload QR code image
 router.post('/:id/upload-qr', param('id').isInt(), upload.single('qr'), invoicesController.uploadQR);
 
+// ── Email ─────────────────────────────────────────────────────────────────────
+
+// POST /api/invoices/:id/send-email — send invoice to client via email
+router.post('/:id/send-email', param('id').isInt(), invoicesController.sendEmail);
+
 module.exports = router;

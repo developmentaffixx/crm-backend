@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { uploadToCloudinary } = require('../config/cloudinary');
+const { sendRawEmail } = require('../services/email.service');
 
 // ─── Helper: Generate invoice number ──────────────────────────────────────────
 // Format: INV-YYMM-CLIENTCODE-### (e.g. INV-2504-AFXCL001-001)
@@ -392,5 +393,183 @@ exports.uploadQR = async (req, res) => {
   } catch (err) {
     console.error('Upload QR error:', err);
     return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── POST /api/invoices/:id/send-email ────────────────────────────────────────
+exports.sendEmail = async (req, res) => {
+  try {
+    // Get invoice with client details
+    const [rows] = await db.query(
+      `SELECT i.*,
+              l.name AS lead_name,
+              l.business_name AS lead_business,
+              l.email AS lead_email,
+              l.phone AS lead_phone,
+              l.address AS lead_address,
+              l.city AS lead_city,
+              l.state AS lead_state,
+              l.zip_code AS lead_zip,
+              l.country AS lead_country
+       FROM invoices i
+       LEFT JOIN leads l ON l.id = i.lead_id
+       WHERE i.id = ? AND i.deleted = 0`,
+      [req.params.id]
+    );
+
+    if (rows.length === 0) return res.status(404).json({ message: 'Invoice not found' });
+
+    const invoice = rows[0];
+    if (!invoice.lead_email) {
+      return res.status(400).json({ message: 'Client does not have an email address' });
+    }
+
+    // Get invoice items
+    const [items] = await db.query(
+      `SELECT ii.*, s.name AS service_name
+       FROM invoice_items ii
+       LEFT JOIN services s ON s.id = ii.service_id
+       WHERE ii.invoice_id = ?`,
+      [invoice.id]
+    );
+
+    // Get company settings
+    const [compRows] = await db.query('SELECT * FROM company_settings WHERE id = 1');
+    const comp = compRows[0] || {};
+
+    const companyAddr = [comp.address_line1, comp.address_line2, comp.city, comp.state, comp.zip_code].filter(Boolean).join(', ');
+    const clientAddr = [invoice.lead_address, invoice.lead_city, invoice.lead_state, invoice.lead_zip, invoice.lead_country].filter(Boolean).join(', ');
+
+    const billDate = invoice.bill_date ? new Date(invoice.bill_date).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
+    const dueDate = invoice.due_date ? new Date(invoice.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
+
+    // Build items HTML
+    const itemsHtml = items.map((item, idx) => `
+      <tr style="background:${idx % 2 === 0 ? '#fff' : '#f9f9f9'};">
+        <td style="border:1px solid #ddd;padding:8px;text-align:center;">${idx + 1}</td>
+        <td style="border:1px solid #ddd;padding:8px;">${item.service_name || item.description || '—'}</td>
+        <td style="border:1px solid #ddd;padding:8px;text-align:center;">${item.hsn_code || '—'}</td>
+        <td style="border:1px solid #ddd;padding:8px;text-align:center;">${Number(item.quantity)}</td>
+        <td style="border:1px solid #ddd;padding:8px;text-align:right;">₹${Number(item.rate).toLocaleString('en-IN')}</td>
+        <td style="border:1px solid #ddd;padding:8px;text-align:right;font-weight:600;">₹${Number(item.amount).toLocaleString('en-IN')}</td>
+      </tr>
+    `).join('');
+
+    const discountRow = parseFloat(invoice.discount) > 0 ? `
+      <tr>
+        <td colspan="4" style="border:none;"></td>
+        <td style="border:1px solid #ddd;padding:8px;text-align:right;font-weight:600;">Discount</td>
+        <td style="border:1px solid #ddd;padding:8px;text-align:right;">- ₹${Number(invoice.discount).toLocaleString('en-IN')}</td>
+      </tr>` : '';
+
+    const termsLines = invoice.note
+      ? invoice.note.split('\n').map(l => `<p style="margin:2px 0;font-size:11px;color:#555;">${l}</p>`).join('')
+      : '';
+
+    // Build email HTML
+    const emailHtml = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family:'Segoe UI',Arial,sans-serif;margin:0;padding:20px;background:#f5f5f5;">
+<div style="max-width:700px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.1);">
+  
+  <!-- Header -->
+  <div style="background:#1a1a2e;color:#fff;padding:24px;text-align:center;">
+    <h1 style="margin:0;font-size:20px;letter-spacing:1px;">${comp.company_name || 'Invoice'}</h1>
+    ${companyAddr ? `<p style="margin:6px 0 0;font-size:12px;opacity:0.8;">${companyAddr}</p>` : ''}
+  </div>
+
+  <!-- Body -->
+  <div style="padding:24px;">
+    <p style="font-size:14px;color:#333;margin:0 0 8px;">Dear <strong>${invoice.lead_name || 'Client'}</strong>,</p>
+    <p style="font-size:13px;color:#555;margin:0 0 20px;">Please find your invoice details below.</p>
+
+    <!-- Invoice Meta -->
+    <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
+      <tr>
+        <td style="padding:6px 0;font-size:12px;color:#888;width:120px;">Invoice No.</td>
+        <td style="padding:6px 0;font-size:13px;font-weight:700;">${invoice.invoice_number}</td>
+        <td style="padding:6px 0;font-size:12px;color:#888;width:100px;">Bill Date</td>
+        <td style="padding:6px 0;font-size:13px;">${billDate}</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 0;font-size:12px;color:#888;">Status</td>
+        <td style="padding:6px 0;font-size:13px;font-weight:600;color:${invoice.status === 'Paid' ? '#16a34a' : invoice.status === 'Overdue' ? '#dc2626' : '#2563eb'};">${invoice.status}</td>
+        <td style="padding:6px 0;font-size:12px;color:#888;">Due Date</td>
+        <td style="padding:6px 0;font-size:13px;font-weight:600;color:${invoice.status === 'Overdue' ? '#dc2626' : '#333'};">${dueDate}</td>
+      </tr>
+    </table>
+
+    <!-- Items Table -->
+    <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+      <thead>
+        <tr style="background:#f2f2f2;">
+          <th style="border:1px solid #ddd;padding:8px;font-size:11px;text-align:center;width:30px;">Sr.</th>
+          <th style="border:1px solid #ddd;padding:8px;font-size:11px;text-align:left;">Service / Item</th>
+          <th style="border:1px solid #ddd;padding:8px;font-size:11px;text-align:center;width:70px;">HSN</th>
+          <th style="border:1px solid #ddd;padding:8px;font-size:11px;text-align:center;width:40px;">Qty</th>
+          <th style="border:1px solid #ddd;padding:8px;font-size:11px;text-align:right;width:80px;">Rate</th>
+          <th style="border:1px solid #ddd;padding:8px;font-size:11px;text-align:right;width:90px;">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${itemsHtml}
+        ${discountRow}
+        <tr style="background:#f2f2f2;">
+          <td colspan="4" style="border:none;"></td>
+          <td style="border:1px solid #333;padding:10px 8px;text-align:right;font-weight:700;font-size:13px;">Total</td>
+          <td style="border:1px solid #333;padding:10px 8px;text-align:right;font-weight:700;font-size:13px;">₹${Number(invoice.total_amount).toLocaleString('en-IN')}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    ${parseFloat(invoice.balance_amount) > 0 ? `
+    <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
+      <p style="margin:0;font-size:13px;color:#dc2626;font-weight:600;">Balance Due: ₹${Number(invoice.balance_amount).toLocaleString('en-IN')}</p>
+    </div>` : `
+    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
+      <p style="margin:0;font-size:13px;color:#16a34a;font-weight:600;">Fully Paid — Thank you!</p>
+    </div>`}
+
+    <!-- Bank Details -->
+    ${(invoice.bank_name || invoice.account_number) ? `
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
+      <p style="margin:0 0 4px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">Bank Details</p>
+      <p style="margin:0;font-size:12px;color:#333;">
+        ${invoice.bank_name ? `Bank: <strong>${invoice.bank_name}</strong> &nbsp;|&nbsp; ` : ''}
+        ${invoice.account_number ? `A/c: <strong>${invoice.account_number}</strong> &nbsp;|&nbsp; ` : ''}
+        ${invoice.ifsc_code ? `IFSC: <strong>${invoice.ifsc_code}</strong> &nbsp;|&nbsp; ` : ''}
+        ${invoice.branch ? `Branch: ${invoice.branch}` : ''}
+      </p>
+    </div>` : ''}
+
+    <!-- Terms -->
+    ${termsLines ? `
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;">
+      <p style="margin:0 0 6px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;">Terms & Conditions</p>
+      ${termsLines}
+    </div>` : ''}
+  </div>
+
+  <!-- Footer -->
+  <div style="background:#f8fafc;padding:16px 24px;text-align:center;border-top:1px solid #eee;">
+    <p style="margin:0;font-size:11px;color:#94a3b8;">Entity belongs to Scale Forge Private Limited</p>
+  </div>
+</div>
+</body>
+</html>`;
+
+    // Send the email
+    await sendRawEmail({
+      to: invoice.lead_email,
+      subject: `Invoice ${invoice.invoice_number} from ${comp.company_name || 'CRM'}`,
+      html: emailHtml,
+    });
+
+    return res.json({ message: 'Invoice emailed successfully' });
+  } catch (err) {
+    console.error('Send invoice email error:', err);
+    return res.status(500).json({ message: err.message || 'Failed to send email' });
   }
 };
