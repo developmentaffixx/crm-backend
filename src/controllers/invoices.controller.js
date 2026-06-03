@@ -4,10 +4,11 @@ const { sendRawEmail } = require('../services/email.service');
 
 // ─── Helper: Generate invoice number ──────────────────────────────────────────
 // Format: INV-YYMM-CLIENTCODE-### (e.g. INV-2504-AFXCL001-001)
-// ### is a global sequential number that resets every financial year (April–March)
-async function generateInvoiceNumber(leadId) {
-  const now = new Date();
-  const yymm = `${String(now.getFullYear()).slice(-2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
+// YYMM is derived from bill_date. ### is a global sequential number that resets every FY (April–March)
+async function generateInvoiceNumber(leadId, billDate) {
+  // Use bill_date for YYMM; fallback to current date
+  const dateForYYMM = billDate ? new Date(billDate) : new Date();
+  const yymm = `${String(dateForYYMM.getFullYear()).slice(-2)}${String(dateForYYMM.getMonth() + 1).padStart(2, '0')}`;
 
   // Get client code from leads table
   let clientCode = 'CLIENT';
@@ -18,9 +19,9 @@ async function generateInvoiceNumber(leadId) {
     }
   }
 
-  // Determine current financial year start (April 1)
-  // If current month is Jan-Mar, FY started previous year's April
-  const fyStartYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+  // Determine FY based on the bill_date (not today)
+  // FY runs April 1 – March 31. If month is Jan-Mar, FY started previous year's April.
+  const fyStartYear = dateForYYMM.getMonth() >= 3 ? dateForYYMM.getFullYear() : dateForYYMM.getFullYear() - 1;
   const fyStart = `${fyStartYear}-04-01`;
   const fyEnd = `${fyStartYear + 1}-03-31`;
 
@@ -28,7 +29,7 @@ async function generateInvoiceNumber(leadId) {
   const [count] = await db.query(
     `SELECT COUNT(*) AS cnt
      FROM invoices
-     WHERE created_at >= ? AND created_at < DATE_ADD(?, INTERVAL 1 DAY)
+     WHERE bill_date >= ? AND bill_date <= ?
        AND deleted = 0`,
     [fyStart, fyEnd]
   );
@@ -38,10 +39,10 @@ async function generateInvoiceNumber(leadId) {
 }
 
 // ─── GET /api/invoices/preview-number — preview next invoice number ───────────
-// Pass ?lead_id=<id> to get the correct client-specific preview
+// Pass ?lead_id=<id>&bill_date=<YYYY-MM-DD> for correct preview
 exports.previewNumber = async (req, res) => {
   try {
-    const number = await generateInvoiceNumber(req.query.lead_id || null);
+    const number = await generateInvoiceNumber(req.query.lead_id || null, req.query.bill_date || null);
     return res.json({ invoice_number: number });
   } catch (err) {
     console.error('Invoice previewNumber error:', err);
@@ -161,7 +162,7 @@ exports.create = async (req, res) => {
   } = req.body;
 
   try {
-    const invoice_number = await generateInvoiceNumber(lead_id || null);
+    const invoice_number = await generateInvoiceNumber(lead_id || null, bill_date || null);
 
     // Calculate totals
     let subtotal = 0;
