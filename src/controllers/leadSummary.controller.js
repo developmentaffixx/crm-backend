@@ -1,7 +1,7 @@
 const db = require('../config/db');
 
-const AIML_API_KEY = process.env.AIML_API_KEY;
-const AIML_BASE_URL = 'https://api.aimlapi.com/v1/chat/completions';
+const AIML_API_KEY = process.env.OPENROUTER_API_KEY;
+const AIML_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 /**
  * POST /api/leads/:id/summary
@@ -50,7 +50,7 @@ exports.generateSummary = async (req, res) => {
         'Authorization': `Bearer ${AIML_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'google/gemini-2.0-flash-exp:free',
         messages: [
           { role: 'system', content: 'You are a CRM sales assistant. Always respond in valid JSON format only, no markdown.' },
           { role: 'user', content: prompt }
