@@ -29,8 +29,8 @@ exports.dropdown = async (req, res) => {
 };
 
 // ─── Helper: Generate Lead ID (LD-YYMMDD-###) — Race-condition safe ──────────
-async function generateLeadId(connection) {
-  const now = new Date();
+async function generateLeadId(connection, customDate) {
+  const now = customDate ? new Date(customDate) : new Date();
   const yy = String(now.getFullYear()).slice(-2);
   const mm = String(now.getMonth() + 1).padStart(2, '0');
   const dd = String(now.getDate()).padStart(2, '0');
@@ -212,18 +212,18 @@ exports.create = async (req, res) => {
     name, business_name, service_required, budget_min, budget_max, no_budget_idea,
     purpose_of_services, phone, email, address, country, state, city, zip_code,
     temperature, source, status, current_marketing_status, assigned_to, social_links,
-    resource, initial_followup
+    resource, initial_followup, created_at
   } = req.body;
 
   try {
-    // Generate lead_id (race-condition safe)
-    const lead_id = await generateLeadId();
+    // Generate lead_id (race-condition safe) — uses custom date if provided
+    const lead_id = await generateLeadId(null, created_at || null);
 
     const [result] = await db.query(
       `INSERT INTO leads (lead_id, name, business_name, service_required, budget_min, budget_max, no_budget_idea,
         purpose_of_services, phone, email, address, country, state, city, zip_code,
-        temperature, source, resource, status, current_marketing_status, assigned_to, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        temperature, source, resource, status, current_marketing_status, assigned_to, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         lead_id,
         name, business_name || null, service_required || null,
@@ -233,7 +233,8 @@ exports.create = async (req, res) => {
         purpose_of_services || null, phone || null, email || null,
         address || null, country || null, state || null, city || null, zip_code || null,
         temperature || 'cold', source || null, resource || null, status || 'New',
-        current_marketing_status || null, assigned_to || null, req.user.id
+        current_marketing_status || null, assigned_to || null, req.user.id,
+        created_at ? new Date(created_at) : new Date()
       ]
     );
 
