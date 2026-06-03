@@ -298,6 +298,18 @@ exports.update = async (req, res) => {
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
 
+    // Handle created_at change — regenerate lead_id based on new date
+    if (req.body.created_at) {
+      const newDate = new Date(req.body.created_at);
+      const existingDate = new Date(lead.created_at);
+      // Only regenerate lead_id if the date actually changed
+      if (newDate.toISOString().split('T')[0] !== existingDate.toISOString().split('T')[0]) {
+        const newLeadId = await generateLeadId(null, req.body.created_at);
+        updates.lead_id = newLeadId;
+        updates.created_at = newDate;
+      }
+    }
+
     // Handle no_budget_idea logic
     if (updates.no_budget_idea) {
       updates.budget_min = null;
