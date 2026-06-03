@@ -434,11 +434,11 @@ exports.addFollowUp = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM leads WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Lead not found' });
 
-    const { note, follow_up_date, type } = req.body;
+    const { note, follow_up_date, type, created_at } = req.body;
 
     const [result] = await db.query(
-      'INSERT INTO lead_follow_ups (lead_id, type, note, follow_up_date, created_by) VALUES (?, ?, ?, ?, ?)',
-      [req.params.id, type || 'Phone Call', note, follow_up_date || null, req.user.id]
+      'INSERT INTO lead_follow_ups (lead_id, type, note, follow_up_date, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.params.id, type || 'Phone Call', note, follow_up_date || null, req.user.id, created_at ? new Date(created_at) : new Date()]
     );
 
     const [followUp] = await db.query(
@@ -452,6 +452,54 @@ exports.addFollowUp = async (req, res) => {
     return res.status(201).json(followUp[0]);
   } catch (err) {
     console.error('Follow-up create error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/leads/:id/follow-ups/:followUpId — Update a follow-up
+ */
+exports.updateFollowUp = async (req, res) => {
+  try {
+    const { id, followUpId } = req.params;
+
+    const [rows] = await db.query('SELECT * FROM lead_follow_ups WHERE id = ? AND lead_id = ?', [followUpId, id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Follow-up not found' });
+
+    const followUp = rows[0];
+
+    // Only the creator or admin can edit
+    if (!req.user.is_admin && followUp.created_by !== req.user.id) {
+      return res.status(403).json({ message: 'Only the creator or admin can edit this follow-up' });
+    }
+
+    const { type, note, follow_up_date, created_at } = req.body;
+
+    const updates = {};
+    if (type !== undefined) updates.type = type;
+    if (note !== undefined) updates.note = note;
+    if (follow_up_date !== undefined) updates.follow_up_date = follow_up_date || null;
+    if (created_at !== undefined) updates.created_at = created_at ? new Date(created_at) : followUp.created_at;
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: 'No valid fields to update' });
+    }
+
+    const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+    const values = [...Object.values(updates), followUpId];
+    await db.query(`UPDATE lead_follow_ups SET ${setClauses} WHERE id = ?`, values);
+
+    const [updated] = await db.query(
+      `SELECT f.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+       FROM lead_follow_ups f
+       LEFT JOIN users u ON u.id = f.created_by
+       WHERE f.id = ?`,
+      [followUpId]
+    );
+
+    return res.json(updated[0]);
+  } catch (err) {
+    console.error('Follow-up update error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

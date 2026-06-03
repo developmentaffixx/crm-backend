@@ -57,4 +57,11 @@ router.post(
   leadsController.addFollowUp
 );
 
+// PUT  /api/leads/:id/follow-ups/:followUpId — update follow-up
+router.put(
+  '/:id/follow-ups/:followUpId',
+  [param('id').isInt(), param('followUpId').isInt()],
+  leadsController.updateFollowUp
+);
+
 module.exports = router;
