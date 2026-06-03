@@ -1,7 +1,7 @@
 const db = require('../config/db');
 
 const AIML_API_KEY = process.env.AIML_API_KEY;
-const AIML_BASE_URL = 'https://api.aimlapi.com/chat/completions';
+const AIML_BASE_URL = 'https://api.aimlapi.com/v1/chat/completions';
 
 /**
  * POST /api/leads/:id/summary
