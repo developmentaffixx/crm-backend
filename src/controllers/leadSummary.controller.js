@@ -1,7 +1,7 @@
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const db = require('../config/db');
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const AIML_API_KEY = process.env.AIML_API_KEY;
+const AIML_BASE_URL = 'https://api.aimlapi.com/chat/completions';
 
 /**
  * POST /api/leads/:id/summary
@@ -39,14 +39,38 @@ exports.generateSummary = async (req, res) => {
     // Build stats
     const stats = buildStats(followUps);
 
-    // Build prompt for Gemini
+    // Build prompt
     const prompt = buildPrompt(lead, followUps, stats);
 
-    // Call Gemini AI
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' });
-    const result = await model.generateContent(prompt);
-    const response = result.response;
-    const text = response.text();
+    // Call AI/ML API (OpenAI-compatible)
+    const response = await fetch(AIML_BASE_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${AIML_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'You are a CRM sales assistant. Always respond in valid JSON format only, no markdown.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.7,
+        max_tokens: 500,
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      console.error('AI/ML API error:', response.status, errBody);
+      if (response.status === 429) {
+        return res.status(429).json({ message: 'AI rate limit reached. Please try again in a minute.' });
+      }
+      return res.status(500).json({ message: 'AI service error: ' + response.status });
+    }
+
+    const data = await response.json();
+    const text = data.choices?.[0]?.message?.content || '';
 
     // Parse AI response
     const parsed = parseAIResponse(text);
@@ -97,7 +121,7 @@ function buildPrompt(lead, followUps, stats) {
     `${i + 1}. [${fu.created_at ? new Date(fu.created_at).toLocaleDateString() : 'Unknown'}] (${fu.type}) by ${fu.created_by_name}: "${fu.note}"`
   ).join('\n');
 
-  return `You are a CRM sales assistant. Analyze the following lead's follow-up history and provide:
+  return `Analyze the following lead's follow-up history and provide:
 1. A brief summary (2-3 sentences) of the overall interaction history
 2. A suggested next action (what specifically to do next)
 3. The recommended follow-up type (Phone Call, Email, WhatsApp, Meeting, or Other)
@@ -117,7 +141,7 @@ Lead Information:
 Follow-up History (oldest first):
 ${followUpText}
 
-Respond in this exact JSON format (no markdown, no code blocks):
+Respond in this exact JSON format:
 {"summary": "...", "nextAction": "...", "nextActionType": "Phone Call|Email|WhatsApp|Meeting|Other", "suggestedDate": "YYYY-MM-DD"}`;
 }
 
