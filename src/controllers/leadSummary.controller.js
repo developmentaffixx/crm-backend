@@ -43,7 +43,7 @@ exports.generateSummary = async (req, res) => {
     const prompt = buildPrompt(lead, followUps, stats);
 
     // Call Gemini AI
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' });
     const result = await model.generateContent(prompt);
     const response = result.response;
     const text = response.text();
@@ -57,6 +57,9 @@ exports.generateSummary = async (req, res) => {
     });
   } catch (err) {
     console.error('Lead summary error:', err.message || err);
+    if (err.message && err.message.includes('429')) {
+      return res.status(429).json({ message: 'AI rate limit reached. Please try again in a minute.' });
+    }
     return res.status(500).json({ message: err.message || 'Failed to generate summary' });
   }
 };
