@@ -3,6 +3,7 @@ const router  = express.Router();
 const { body, param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const leadsController = require('../controllers/leads.controller');
+const leadSummaryController = require('../controllers/leadSummary.controller');
 
 // All lead routes require authentication
 router.use(authenticate);
@@ -63,5 +64,8 @@ router.put(
   [param('id').isInt(), param('followUpId').isInt()],
   leadsController.updateFollowUp
 );
+
+// POST /api/leads/:id/summary — generate AI summary + next action
+router.post('/:id/summary', param('id').isInt(), leadSummaryController.generateSummary);
 
 module.exports = router;
