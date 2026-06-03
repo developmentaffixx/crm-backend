@@ -4,7 +4,7 @@ const { sendRawEmail } = require('../services/email.service');
 
 // ─── Helper: Generate invoice number ──────────────────────────────────────────
 // Format: INV-YYMM-CLIENTCODE-### (e.g. INV-2504-AFXCL001-001)
-// Sequence resets to 001 every month per client
+// ### is a global sequential number that resets every financial year (April–March)
 async function generateInvoiceNumber(leadId) {
   const now = new Date();
   const yymm = `${String(now.getFullYear()).slice(-2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -18,14 +18,19 @@ async function generateInvoiceNumber(leadId) {
     }
   }
 
-  // Count invoices for this client in the current month (resets monthly per client)
+  // Determine current financial year start (April 1)
+  // If current month is Jan-Mar, FY started previous year's April
+  const fyStartYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+  const fyStart = `${fyStartYear}-04-01`;
+  const fyEnd = `${fyStartYear + 1}-03-31`;
+
+  // Count ALL invoices in the current financial year (global counter, not per-client)
   const [count] = await db.query(
     `SELECT COUNT(*) AS cnt
      FROM invoices
-     WHERE lead_id = ?
-       AND DATE_FORMAT(created_at, '%y%m') = ?
+     WHERE created_at >= ? AND created_at < DATE_ADD(?, INTERVAL 1 DAY)
        AND deleted = 0`,
-    [leadId || null, yymm]
+    [fyStart, fyEnd]
   );
   const seq = String((count[0]?.cnt || 0) + 1).padStart(3, '0');
 
@@ -152,7 +157,7 @@ exports.create = async (req, res) => {
   const {
     lead_id, bill_date, due_date, from_address, status,
     discount, bank_name, account_number, ifsc_code, branch,
-    note, items
+    upi_id, note, items
   } = req.body;
 
   try {
@@ -170,8 +175,8 @@ exports.create = async (req, res) => {
     const [result] = await db.query(
       `INSERT INTO invoices (invoice_number, lead_id, status, bill_date, due_date, from_address,
         subtotal, discount, total_amount, paid_amount, balance_amount,
-        bank_name, account_number, ifsc_code, branch, note, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+        bank_name, account_number, ifsc_code, branch, upi_id, note, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         invoice_number, lead_id || null, status || 'New',
         bill_date || new Date().toISOString().split('T')[0],
@@ -179,7 +184,7 @@ exports.create = async (req, res) => {
         from_address || null,
         subtotal, disc, total_amount, balance_amount,
         bank_name || null, account_number || null, ifsc_code || null, branch || null,
-        note || null, req.user.id
+        upi_id || null, note || null, req.user.id
       ]
     );
 
@@ -222,7 +227,7 @@ exports.update = async (req, res) => {
     const {
       lead_id, bill_date, due_date, from_address, status,
       discount, bank_name, account_number, ifsc_code, branch,
-      note, items
+      upi_id, note, items
     } = req.body;
 
     // Recalculate totals if items provided
@@ -239,7 +244,7 @@ exports.update = async (req, res) => {
       `UPDATE invoices SET
         lead_id = ?, bill_date = ?, due_date = ?, from_address = ?, status = ?,
         subtotal = ?, discount = ?, total_amount = ?, balance_amount = ?,
-        bank_name = ?, account_number = ?, ifsc_code = ?, branch = ?, note = ?
+        bank_name = ?, account_number = ?, ifsc_code = ?, branch = ?, upi_id = ?, note = ?
        WHERE id = ?`,
       [
         lead_id !== undefined ? lead_id : rows[0].lead_id,
@@ -252,6 +257,7 @@ exports.update = async (req, res) => {
         account_number !== undefined ? account_number : rows[0].account_number,
         ifsc_code !== undefined ? ifsc_code : rows[0].ifsc_code,
         branch !== undefined ? branch : rows[0].branch,
+        upi_id !== undefined ? upi_id : rows[0].upi_id,
         note !== undefined ? note : rows[0].note,
         req.params.id
       ]
