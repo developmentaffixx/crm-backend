@@ -302,11 +302,28 @@ exports.update = async (req, res) => {
     if (req.body.created_at) {
       const newDate = new Date(req.body.created_at);
       const existingDate = new Date(lead.created_at);
-      // Only regenerate lead_id if the date actually changed
+      // Only regenerate lead_id if the date actually changed (different month or day)
       if (newDate.toISOString().split('T')[0] !== existingDate.toISOString().split('T')[0]) {
         const newLeadId = await generateLeadId(null, req.body.created_at);
         updates.lead_id = newLeadId;
         updates.created_at = newDate;
+
+        // Recalculate the old month's sequence counter
+        const oldYy = String(existingDate.getFullYear()).slice(-2);
+        const oldMm = String(existingDate.getMonth() + 1).padStart(2, '0');
+        const oldYmKey = `${oldYy}${oldMm}`;
+
+        // Count how many leads still exist in the old month (excluding current lead)
+        const [countRows] = await db.query(
+          `SELECT COUNT(*) AS cnt FROM leads WHERE deleted = 0 AND id != ? AND lead_id LIKE ?`,
+          [req.params.id, `LD-${oldYmKey}%`]
+        );
+        const oldMonthCount = countRows[0].cnt;
+        // Update the sequence counter for old month
+        await db.query(
+          'UPDATE lead_id_sequence SET last_seq = ? WHERE ym_key = ?',
+          [oldMonthCount, oldYmKey]
+        );
       }
     }
 
