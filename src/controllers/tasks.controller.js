@@ -260,15 +260,21 @@ exports.create = async (req, res) => {
     const assignee  = assigned_to || req.user.id;
     const isActive  = req.user.is_admin ? 1 : 0;
 
-    // Generate task_id_code: TSK-YYMMDD-###
+    // Generate task_id_code: TSK-YYMMDD-### (sequence resets per Financial Year: April–March)
     const now = new Date();
     const yy = String(now.getFullYear()).slice(-2);
     const mm = String(now.getMonth() + 1).padStart(2, '0');
     const dd = String(now.getDate()).padStart(2, '0');
     const datePrefix = `TSK-${yy}${mm}${dd}`;
+
+    // Determine FY start: if month >= April, FY started this year's April 1; else last year's April 1
+    const fyStartYear = (now.getMonth() + 1) >= 4 ? now.getFullYear() : now.getFullYear() - 1;
+    const fyStart = `${fyStartYear}-04-01`;
+
+    // Get the max sequence number used in the current FY
     const [lastTask] = await db.query(
-      `SELECT task_id_code FROM tasks WHERE task_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
-      [`${datePrefix}-%`]
+      `SELECT task_id_code FROM tasks WHERE created_at >= ? ORDER BY id DESC LIMIT 1`,
+      [fyStart]
     );
     let taskSeq = 1;
     if (lastTask.length > 0 && lastTask[0].task_id_code) {
