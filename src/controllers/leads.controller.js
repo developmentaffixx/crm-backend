@@ -470,6 +470,12 @@ exports.addFollowUp = async (req, res) => {
 
     const { note, follow_up_date, type, created_at } = req.body;
 
+    // Clear follow_up_date on all previous entries — the pending follow-up has been actioned
+    await db.query(
+      'UPDATE lead_follow_ups SET follow_up_date = NULL WHERE lead_id = ? AND follow_up_date IS NOT NULL',
+      [req.params.id]
+    );
+
     const [result] = await db.query(
       'INSERT INTO lead_follow_ups (lead_id, type, note, follow_up_date, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
       [req.params.id, type || 'Phone Call', note, follow_up_date || null, req.user.id, created_at ? new Date(created_at) : new Date()]
