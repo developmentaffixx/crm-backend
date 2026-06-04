@@ -468,11 +468,11 @@ exports.addFollowUp = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM leads WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Lead not found' });
 
-    const { note, follow_up_date, type, created_at } = req.body;
+    const { note, follow_up_date, type, outcome, created_at } = req.body;
 
     const [result] = await db.query(
-      'INSERT INTO lead_follow_ups (lead_id, type, note, follow_up_date, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [req.params.id, type || 'Phone Call', note, follow_up_date || null, req.user.id, created_at ? new Date(created_at) : new Date()]
+      'INSERT INTO lead_follow_ups (lead_id, type, outcome, note, follow_up_date, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [req.params.id, type || 'Phone Call', outcome || null, note, follow_up_date || null, req.user.id, created_at ? new Date(created_at) : new Date()]
     );
 
     const [followUp] = await db.query(
@@ -507,10 +507,11 @@ exports.updateFollowUp = async (req, res) => {
       return res.status(403).json({ message: 'Only the creator or admin can edit this follow-up' });
     }
 
-    const { type, note, follow_up_date, created_at } = req.body;
+    const { type, note, outcome, follow_up_date, created_at } = req.body;
 
     const updates = {};
     if (type !== undefined) updates.type = type;
+    if (outcome !== undefined) updates.outcome = outcome || null;
     if (note !== undefined) updates.note = note;
     if (follow_up_date !== undefined) updates.follow_up_date = follow_up_date || null;
     if (created_at !== undefined) updates.created_at = created_at ? new Date(created_at) : followUp.created_at;
