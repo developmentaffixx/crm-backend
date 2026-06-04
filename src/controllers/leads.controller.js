@@ -28,13 +28,22 @@ exports.dropdown = async (req, res) => {
   }
 };
 
+// ─── Helper: Get Financial Year key (Apr–Mar), e.g. "2627" for FY 2026-27 ────
+function getFinancialYearKey(date) {
+  const month = date.getMonth() + 1; // 1–12
+  const year = date.getFullYear();
+  const fyStart = month >= 4 ? year : year - 1;
+  const fyEnd = fyStart + 1;
+  return `${String(fyStart).slice(-2)}${String(fyEnd).slice(-2)}`; // e.g. "2627"
+}
+
 // ─── Helper: Generate Lead ID (LD-YYMMDD-###) — Race-condition safe ──────────
 async function generateLeadId(connection, customDate) {
   const now = customDate ? new Date(customDate) : new Date();
   const yy = String(now.getFullYear()).slice(-2);
   const mm = String(now.getMonth() + 1).padStart(2, '0');
   const dd = String(now.getDate()).padStart(2, '0');
-  const yearMonth = `${yy}${mm}`;
+  const fyKey = getFinancialYearKey(now); // e.g. "2627" for FY Apr 2026–Mar 2027
   const prefix = `LD-${yy}${mm}${dd}`;
 
   // Atomic increment using INSERT ... ON DUPLICATE KEY UPDATE
@@ -42,12 +51,12 @@ async function generateLeadId(connection, customDate) {
   await conn.query(
     `INSERT INTO lead_id_sequence (ym_key, last_seq) VALUES (?, 1)
      ON DUPLICATE KEY UPDATE last_seq = last_seq + 1`,
-    [yearMonth]
+    [fyKey]
   );
 
   const [rows] = await conn.query(
     'SELECT last_seq FROM lead_id_sequence WHERE ym_key = ?',
-    [yearMonth]
+    [fyKey]
   );
   const seq = String(rows[0].last_seq).padStart(3, '0');
   return `${prefix}-${seq}`;
@@ -308,21 +317,29 @@ exports.update = async (req, res) => {
         updates.lead_id = newLeadId;
         updates.created_at = newDate;
 
-        // Recalculate the old month's sequence counter
-        const oldYy = String(existingDate.getFullYear()).slice(-2);
-        const oldMm = String(existingDate.getMonth() + 1).padStart(2, '0');
-        const oldYmKey = `${oldYy}${oldMm}`;
+        // Recalculate the old financial year's sequence counter
+        const oldFyKey = getFinancialYearKey(existingDate);
+        const oldFyStartYy = String(parseInt('20' + oldFyKey.slice(0, 2))).slice(-2);
 
-        // Count how many leads still exist in the old month (excluding current lead)
+        // Count how many leads still exist in the old FY (excluding current lead)
+        // FY Apr YYYY – Mar YYYY+1: lead_id starts with LD-YY where YY is fyStart or fyEnd year
         const [countRows] = await db.query(
-          `SELECT COUNT(*) AS cnt FROM leads WHERE deleted = 0 AND id != ? AND lead_id LIKE ?`,
-          [req.params.id, `LD-${oldYmKey}%`]
+          `SELECT COUNT(*) AS cnt FROM leads
+           WHERE deleted = 0 AND id != ?
+           AND (
+             lead_id LIKE ? OR lead_id LIKE ?
+           )`,
+          [
+            req.params.id,
+            `LD-${oldFyStartYy}%`,                          // e.g. LD-26...
+            `LD-${String(parseInt(oldFyStartYy) + 1).padStart(2,'0')}0[1-3]%`  // e.g. LD-27 Jan–Mar
+          ]
         );
-        const oldMonthCount = countRows[0].cnt;
-        // Update the sequence counter for old month
+        const oldFyCount = countRows[0].cnt;
+        // Update the sequence counter for old financial year
         await db.query(
           'UPDATE lead_id_sequence SET last_seq = ? WHERE ym_key = ?',
-          [oldMonthCount, oldYmKey]
+          [oldFyCount, oldFyKey]
         );
       }
     }
