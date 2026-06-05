@@ -389,6 +389,91 @@ exports.getHistory = async (req, res) => {
     const lastDay = new Date(parseInt(year), parseInt(mon), 0).getDate();
     const endDate = `${year}-${mon}-${String(lastDay).padStart(2, '0')}`;
 
+    // If admin requests all employees
+    if (isAdmin && user_id === 'all') {
+      const [users] = await db.query(
+        'SELECT id, first_name, last_name, department FROM users WHERE is_active = 1 AND deleted = 0 ORDER BY first_name'
+      );
+
+      const [allRecords] = await db.query(
+        `SELECT * FROM attendance WHERE date BETWEEN ? AND ? ORDER BY date DESC`,
+        [startDate, endDate]
+      );
+
+      const [allPlans] = await db.query(
+        `SELECT * FROM daily_plans WHERE date BETWEEN ? AND ? ORDER BY sort_order`,
+        [startDate, endDate]
+      );
+
+      // Productive time queries for all users
+      const [taskTimeLogs] = await db.query(
+        `SELECT user_id, DATE(started_at) AS log_date, COALESCE(SUM(duration), 0) AS total_seconds
+         FROM task_time_logs WHERE DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0
+         GROUP BY user_id, DATE(started_at)`,
+        [startDate, endDate]
+      );
+      const [ticketTimeLogs] = await db.query(
+        `SELECT user_id, DATE(created_at) AS log_date, COALESCE(SUM(minutes), 0) AS total_minutes
+         FROM ticket_time_logs WHERE DATE(created_at) BETWEEN ? AND ?
+         GROUP BY user_id, DATE(created_at)`,
+        [startDate, endDate]
+      );
+      const [meetingTimeLogs] = await db.query(
+        `SELECT COALESCE(mm.user_id, m.created_by) AS user_id, m.meeting_date AS log_date, COALESCE(SUM(TIMESTAMPDIFF(SECOND, m.start_time, m.end_time)), 0) AS total_seconds
+         FROM meetings m
+         LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+         WHERE m.status = 'completed' AND m.deleted = 0 AND m.meeting_date BETWEEN ? AND ?
+         GROUP BY COALESCE(mm.user_id, m.created_by), m.meeting_date`,
+        [startDate, endDate]
+      );
+
+      // Build productive lookup: { 'userId_date': seconds }
+      const productiveLookup = {};
+      for (const row of taskTimeLogs) {
+        const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
+        const key = `${row.user_id}_${d}`;
+        productiveLookup[key] = (productiveLookup[key] || 0) + (parseInt(row.total_seconds) || 0);
+      }
+      for (const row of ticketTimeLogs) {
+        const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
+        const key = `${row.user_id}_${d}`;
+        productiveLookup[key] = (productiveLookup[key] || 0) + ((parseInt(row.total_minutes) || 0) * 60);
+      }
+      for (const row of meetingTimeLogs) {
+        const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
+        const key = `${row.user_id}_${d}`;
+        productiveLookup[key] = (productiveLookup[key] || 0) + (parseInt(row.total_seconds) || 0);
+      }
+
+      // Group plans by attendance_id
+      const plansByAttendance = {};
+      for (const plan of allPlans) {
+        if (!plansByAttendance[plan.attendance_id]) plansByAttendance[plan.attendance_id] = [];
+        plansByAttendance[plan.attendance_id].push(plan);
+      }
+
+      // Group records by user
+      const userMap = {};
+      for (const u of users) {
+        userMap[u.id] = { id: u.id, name: `${u.first_name} ${u.last_name}`, department: u.department, records: [] };
+      }
+      for (const record of allRecords) {
+        if (!userMap[record.user_id]) continue;
+        const dateStr = record.date instanceof Date ? record.date.toISOString().split('T')[0] : String(record.date).split('T')[0];
+        const key = `${record.user_id}_${dateStr}`;
+        userMap[record.user_id].records.push({
+          ...record,
+          plans: plansByAttendance[record.id] || [],
+          productive_seconds: productiveLookup[key] || 0
+        });
+      }
+
+      // Only include users who have records
+      const allEmployees = Object.values(userMap).filter(u => u.records.length > 0);
+
+      return res.json({ mode: 'all', employees: allEmployees });
+    }
+
     // Fetch attendance records
     const [records] = await db.query(
       `SELECT * FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY date DESC`,
