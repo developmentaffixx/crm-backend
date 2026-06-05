@@ -284,6 +284,7 @@ exports.getMyWeek = async (req, res) => {
     const completedMinutes = completed * 60;
     const remaining = Math.max(0, required - completedMinutes);
     const deficit = Math.max(0, required - completedMinutes);
+    const surplus = completedMinutes > required ? completedMinutes - required : 0;
 
     const daily_breakdown = records.map(r => ({
       date: r.date,
@@ -299,6 +300,7 @@ exports.getMyWeek = async (req, res) => {
       completed: parseFloat(completedMinutes.toFixed(2)),
       remaining: parseFloat(remaining.toFixed(2)),
       deficit: parseFloat(deficit.toFixed(2)),
+      surplus: parseFloat(surplus.toFixed(2)),
       daily_breakdown,
       schedule_breakdown: dailyBreakdown
     });
@@ -687,6 +689,7 @@ exports.adminWeekReport = async (req, res) => {
       const completed = taskHours + ticketHours + meetingHours;
 
       const deficit = Math.max(0, totalExpected - completed);
+      const surplus = completed > totalExpected ? completed - totalExpected : 0;
 
       report.push({
         user_id: user.id,
@@ -695,6 +698,7 @@ exports.adminWeekReport = async (req, res) => {
         required: parseFloat(totalExpected.toFixed(2)),
         completed: parseFloat(completed.toFixed(2)),
         deficit: parseFloat(deficit.toFixed(2)),
+        surplus: parseFloat(surplus.toFixed(2)),
         task_hours: parseFloat(taskHours.toFixed(2)),
         ticket_hours: parseFloat(ticketHours.toFixed(2)),
         meeting_hours: parseFloat(meetingHours.toFixed(2))
@@ -1005,6 +1009,198 @@ exports.correctClockOut = async (req, res) => {
     return res.json({ message: 'Clock-out time corrected successfully', new_served_seconds: newServedSeconds });
   } catch (err) {
     console.error('Correct clock-out error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/attendance/my-month-balance
+ * Get current user's monthly running balance (deficit/surplus within the month)
+ * Resets every month — no carry-forward
+ */
+exports.getMyMonthBalance = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+    const today = now.toISOString().split('T')[0];
+
+    // Get expected hours for the month up to today
+    const { totalExpected, dailyBreakdown } = await getExpectedHoursForRange(monthStart, today, userId);
+
+    // Calculate productive hours (tasks + tickets + meetings) for the month
+    const [taskTimeResult] = await db.query(
+      `SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs 
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0`,
+      [userId, monthStart, today]
+    );
+    const [ticketTimeResult] = await db.query(
+      `SELECT COALESCE(SUM(minutes), 0) AS total FROM ticket_time_logs 
+       WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ?`,
+      [userId, monthStart, today]
+    );
+    const [meetingTimeResult] = await db.query(
+      `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE (m.created_by = ? OR mm.user_id = ?) 
+       AND m.status = 'completed' AND m.deleted = 0
+       AND m.meeting_date BETWEEN ? AND ?`,
+      [userId, userId, monthStart, today]
+    );
+
+    const taskHours = (parseInt(taskTimeResult[0].total) || 0) / 3600;
+    const ticketHours = (parseInt(ticketTimeResult[0].total) || 0) / 60;
+    const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 60;
+    const completedHours = taskHours + ticketHours + meetingHours;
+
+    // Balance = completed - required (positive = surplus, negative = deficit)
+    const balanceHours = completedHours - totalExpected;
+    const deficit = balanceHours < 0 ? Math.abs(balanceHours) : 0;
+    const surplus = balanceHours > 0 ? balanceHours : 0;
+
+    // Calculate total required for full month (for progress context)
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
+    const { totalExpected: fullMonthExpected } = await getExpectedHoursForRange(monthStart, monthEnd, userId);
+
+    // Daily balance breakdown (for chart/detail view)
+    const [dailyTasks] = await db.query(
+      `SELECT DATE(started_at) AS date, COALESCE(SUM(duration), 0) AS total 
+       FROM task_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0
+       GROUP BY DATE(started_at)`,
+      [userId, monthStart, today]
+    );
+    const [dailyTickets] = await db.query(
+      `SELECT DATE(created_at) AS date, COALESCE(SUM(minutes), 0) AS total 
+       FROM ticket_time_logs WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ?
+       GROUP BY DATE(created_at)`,
+      [userId, monthStart, today]
+    );
+    const [dailyMeetings] = await db.query(
+      `SELECT m.meeting_date AS date, COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE (m.created_by = ? OR mm.user_id = ?)
+       AND m.status = 'completed' AND m.deleted = 0
+       AND m.meeting_date BETWEEN ? AND ?
+       GROUP BY m.meeting_date`,
+      [userId, userId, monthStart, today]
+    );
+
+    // Build daily map
+    const taskMap = {};
+    dailyTasks.forEach(r => { taskMap[new Date(r.date).toISOString().split('T')[0]] = (parseInt(r.total) || 0) / 3600; });
+    const ticketMap = {};
+    dailyTickets.forEach(r => { ticketMap[new Date(r.date).toISOString().split('T')[0]] = (parseInt(r.total) || 0) / 60; });
+    const meetingMap = {};
+    dailyMeetings.forEach(r => { meetingMap[new Date(r.date).toISOString().split('T')[0]] = (parseInt(r.total) || 0) / 60; });
+
+    let runningBalance = 0;
+    const daily_balance = dailyBreakdown.map(day => {
+      const dayCompleted = (taskMap[day.date] || 0) + (ticketMap[day.date] || 0) + (meetingMap[day.date] || 0);
+      const dayDiff = dayCompleted - day.expected_hours;
+      runningBalance += dayDiff;
+      return {
+        date: day.date,
+        expected: parseFloat(day.expected_hours.toFixed(2)),
+        completed: parseFloat(dayCompleted.toFixed(2)),
+        daily_diff: parseFloat(dayDiff.toFixed(2)),
+        running_balance: parseFloat(runningBalance.toFixed(2)),
+        type: day.type
+      };
+    });
+
+    // Get month name for display
+    const monthName = now.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+
+    return res.json({
+      month: monthName,
+      month_start: monthStart,
+      required_hours_so_far: parseFloat(totalExpected.toFixed(2)),
+      completed_hours: parseFloat(completedHours.toFixed(2)),
+      balance_hours: parseFloat(balanceHours.toFixed(2)),
+      deficit: parseFloat(deficit.toFixed(2)),
+      surplus: parseFloat(surplus.toFixed(2)),
+      full_month_required: parseFloat(fullMonthExpected.toFixed(2)),
+      task_hours: parseFloat(taskHours.toFixed(2)),
+      ticket_hours: parseFloat(ticketHours.toFixed(2)),
+      meeting_hours: parseFloat(meetingHours.toFixed(2)),
+      daily_balance,
+      status: surplus > 0 ? 'surplus' : deficit > 0 ? 'deficit' : 'on_track'
+    });
+  } catch (err) {
+    console.error('Get my month balance error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/attendance/admin/month-balance-report
+ * Admin: Get all employees' monthly balance for the current month
+ */
+exports.adminMonthBalanceReport = async (req, res) => {
+  try {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+    const today = now.toISOString().split('T')[0];
+
+    const [users] = await db.query(
+      'SELECT id, first_name, last_name, department, designation FROM users WHERE is_active = 1 AND deleted = 0'
+    );
+
+    const report = [];
+
+    for (const user of users) {
+      const { totalExpected } = await getExpectedHoursForRange(monthStart, today, user.id);
+
+      const [taskTimeResult] = await db.query(
+        `SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs 
+         WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0`,
+        [user.id, monthStart, today]
+      );
+      const [ticketTimeResult] = await db.query(
+        `SELECT COALESCE(SUM(minutes), 0) AS total FROM ticket_time_logs 
+         WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ?`,
+        [user.id, monthStart, today]
+      );
+      const [meetingTimeResult] = await db.query(
+        `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
+         FROM meetings m
+         LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+         WHERE (m.created_by = ? OR mm.user_id = ?) 
+         AND m.status = 'completed' AND m.deleted = 0
+         AND m.meeting_date BETWEEN ? AND ?`,
+        [user.id, user.id, monthStart, today]
+      );
+
+      const taskHours = (parseInt(taskTimeResult[0].total) || 0) / 3600;
+      const ticketHours = (parseInt(ticketTimeResult[0].total) || 0) / 60;
+      const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 60;
+      const completedHours = taskHours + ticketHours + meetingHours;
+
+      const balanceHours = completedHours - totalExpected;
+
+      report.push({
+        user_id: user.id,
+        name: user.first_name + ' ' + user.last_name,
+        department: user.department,
+        designation: user.designation,
+        required: parseFloat(totalExpected.toFixed(2)),
+        completed: parseFloat(completedHours.toFixed(2)),
+        balance: parseFloat(balanceHours.toFixed(2)),
+        status: balanceHours > 0 ? 'surplus' : balanceHours < -0.5 ? 'deficit' : 'on_track'
+      });
+    }
+
+    // Sort: deficit first (most negative), then on_track, then surplus
+    report.sort((a, b) => a.balance - b.balance);
+
+    const monthName = now.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+
+    return res.json({ month: monthName, month_start: monthStart, report });
+  } catch (err) {
+    console.error('Admin month balance report error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

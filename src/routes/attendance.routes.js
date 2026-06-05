@@ -16,6 +16,7 @@ router.get('/check-auto-clockout', ctrl.checkAutoClockOut);
 router.post('/correct-clockout', ctrl.correctClockOut);
 router.get('/my-week', ctrl.getMyWeek);
 router.get('/my-month', ctrl.getMyMonth);
+router.get('/my-month-balance', ctrl.getMyMonthBalance);
 router.post('/afs/start', ctrl.afsStart);
 router.post('/afs/end', ctrl.afsEnd);
 
@@ -26,6 +27,7 @@ router.put('/settings', requireAdmin, ctrl.updateSettings);
 // ── Admin routes ──────────────────────────────────────────────────────────────
 router.get('/admin/today', requireAdmin, ctrl.adminGetToday);
 router.get('/admin/week-report', requireAdmin, ctrl.adminWeekReport);
+router.get('/admin/month-balance-report', requireAdmin, ctrl.adminMonthBalanceReport);
 router.get('/admin/plans/:userId/:date', requireAdmin, ctrl.adminGetPlans);
 
 module.exports = router;

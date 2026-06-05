@@ -365,6 +365,7 @@ exports.logWeeklyDeficit = async (req, res) => {
       // Use 8h per working day as default
       const requiredHours = Math.max(workDays[0].days, 5) * 8;
       const deficit = Math.max(0, requiredHours - completedHours);
+      const surplus = completedHours > requiredHours ? completedHours - requiredHours : 0;
 
       if (deficit > 0.5) { // Only log if deficit > 30 min
         const deadlineDate = new Date(lastWeekEnd);
@@ -376,6 +377,13 @@ exports.logWeeklyDeficit = async (req, res) => {
           [user.id, lastWeekStart, requiredHours.toFixed(2), completedHours.toFixed(2), deficit.toFixed(2), deficit.toFixed(2), deadlineDate.toISOString().split('T')[0]]
         );
         logged++;
+      } else if (surplus > 0.5) {
+        // Log surplus (credit) — can offset future deficits
+        await db.query(
+          `INSERT INTO weekly_deficit_log (user_id, week_start, required_hours, completed_hours, deficit_hours, remaining_deficit, status, auto_compensated)
+           VALUES (?, ?, ?, ?, ?, 0, 'on_track', 1)`,
+          [user.id, lastWeekStart, requiredHours.toFixed(2), completedHours.toFixed(2), (0 - surplus).toFixed(2)]
+        );
       }
     }
 
