@@ -361,6 +361,68 @@ exports.getMyMonth = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/attendance/history?user_id=X&month=YYYY-MM
+ * Returns attendance records with daily plans for a given month.
+ * Employees can only view their own data. Admins can view any employee.
+ */
+exports.getHistory = async (req, res) => {
+  try {
+    const requestingUserId = req.user.id;
+    const isAdmin = req.user.is_admin;
+    let { user_id, month } = req.query;
+
+    // Non-admins can only see their own records
+    if (!isAdmin || !user_id) {
+      user_id = requestingUserId;
+    }
+
+    // Parse month (YYYY-MM)
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      const now = new Date();
+      month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    const [year, mon] = month.split('-');
+    const startDate = `${year}-${mon}-01`;
+    // Last day of month
+    const lastDay = new Date(parseInt(year), parseInt(mon), 0).getDate();
+    const endDate = `${year}-${mon}-${String(lastDay).padStart(2, '0')}`;
+
+    // Fetch attendance records
+    const [records] = await db.query(
+      `SELECT * FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY date DESC`,
+      [user_id, startDate, endDate]
+    );
+
+    // Fetch all plans for this user and month in one query
+    const [allPlans] = await db.query(
+      `SELECT * FROM daily_plans WHERE user_id = ? AND date BETWEEN ? AND ? ORDER BY sort_order`,
+      [user_id, startDate, endDate]
+    );
+
+    // Group plans by attendance_id
+    const plansByAttendance = {};
+    for (const plan of allPlans) {
+      if (!plansByAttendance[plan.attendance_id]) {
+        plansByAttendance[plan.attendance_id] = [];
+      }
+      plansByAttendance[plan.attendance_id].push(plan);
+    }
+
+    // Attach plans to each record
+    const enrichedRecords = records.map(record => ({
+      ...record,
+      plans: plansByAttendance[record.id] || []
+    }));
+
+    return res.json({ records: enrichedRecords });
+  } catch (err) {
+    console.error('Get attendance history error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 exports.afsStart = async (req, res) => {
   try {
     const userId = req.user.id;
