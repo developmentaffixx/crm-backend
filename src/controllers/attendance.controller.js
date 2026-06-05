@@ -401,6 +401,51 @@ exports.getHistory = async (req, res) => {
       [user_id, startDate, endDate]
     );
 
+    // Fetch productive time per day (tasks)
+    const [taskTimeLogs] = await db.query(
+      `SELECT DATE(started_at) AS log_date, COALESCE(SUM(duration), 0) AS total_seconds
+       FROM task_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0
+       GROUP BY DATE(started_at)`,
+      [user_id, startDate, endDate]
+    );
+
+    // Fetch productive time per day (tickets — stored in minutes)
+    const [ticketTimeLogs] = await db.query(
+      `SELECT DATE(created_at) AS log_date, COALESCE(SUM(minutes), 0) AS total_minutes
+       FROM ticket_time_logs WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ?
+       GROUP BY DATE(created_at)`,
+      [user_id, startDate, endDate]
+    );
+
+    // Fetch productive time per day (meetings — calculate from start/end)
+    const [meetingTimeLogs] = await db.query(
+      `SELECT m.meeting_date AS log_date, COALESCE(SUM(TIMESTAMPDIFF(SECOND, m.start_time, m.end_time)), 0) AS total_seconds
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE (m.created_by = ? OR mm.user_id = ?)
+       AND m.status = 'completed' AND m.deleted = 0
+       AND m.meeting_date BETWEEN ? AND ?
+       GROUP BY m.meeting_date`,
+      [user_id, user_id, startDate, endDate]
+    );
+
+    // Build lookup maps for productive time by date
+    const taskByDate = {};
+    for (const row of taskTimeLogs) {
+      const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
+      taskByDate[d] = parseInt(row.total_seconds) || 0;
+    }
+    const ticketByDate = {};
+    for (const row of ticketTimeLogs) {
+      const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
+      ticketByDate[d] = (parseInt(row.total_minutes) || 0) * 60; // convert to seconds
+    }
+    const meetingByDate = {};
+    for (const row of meetingTimeLogs) {
+      const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
+      meetingByDate[d] = parseInt(row.total_seconds) || 0;
+    }
+
     // Group plans by attendance_id
     const plansByAttendance = {};
     for (const plan of allPlans) {
@@ -410,11 +455,16 @@ exports.getHistory = async (req, res) => {
       plansByAttendance[plan.attendance_id].push(plan);
     }
 
-    // Attach plans to each record
-    const enrichedRecords = records.map(record => ({
-      ...record,
-      plans: plansByAttendance[record.id] || []
-    }));
+    // Attach plans and productive time to each record
+    const enrichedRecords = records.map(record => {
+      const dateStr = record.date instanceof Date ? record.date.toISOString().split('T')[0] : String(record.date).split('T')[0];
+      const productiveSeconds = (taskByDate[dateStr] || 0) + (ticketByDate[dateStr] || 0) + (meetingByDate[dateStr] || 0);
+      return {
+        ...record,
+        plans: plansByAttendance[record.id] || [],
+        productive_seconds: productiveSeconds
+      };
+    });
 
     return res.json({ records: enrichedRecords });
   } catch (err) {
