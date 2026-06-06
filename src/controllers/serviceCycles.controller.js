@@ -12,50 +12,44 @@ const CYCLE_SECTIONS = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: Generate cycles for a project based on start_date
+// Helper: Generate ONE next cycle for a project
 // ─────────────────────────────────────────────────────────────────────────────
-async function generateCyclesForProject(projectId, startDate, numberOfCycles, userId) {
+async function generateNextCycleForProject(projectId, startDate, userId) {
   const start = new Date(startDate);
-  const createdCycles = [];
 
   // Get existing max cycle number
   const [existing] = await db.query(
     'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_id = ?',
     [projectId]
   );
-  let nextCycleNum = (existing[0].max_num || 0) + 1;
+  const nextCycleNum = (existing[0].max_num || 0) + 1;
 
-  for (let i = 0; i < numberOfCycles; i++) {
-    const cycleStart = new Date(start);
-    cycleStart.setMonth(cycleStart.getMonth() + (nextCycleNum - 1 + i));
+  // Calculate start date for this cycle
+  const cycleStart = new Date(start);
+  cycleStart.setMonth(cycleStart.getMonth() + (nextCycleNum - 1));
 
-    const cycleEnd = new Date(cycleStart);
-    cycleEnd.setMonth(cycleEnd.getMonth() + 1);
-    cycleEnd.setDate(cycleEnd.getDate() - 1);
+  const cycleEnd = new Date(cycleStart);
+  cycleEnd.setMonth(cycleEnd.getMonth() + 1);
+  cycleEnd.setDate(cycleEnd.getDate() - 1);
 
-    const cycleNum = nextCycleNum + i;
-    const title = `Cycle ${String(cycleNum).padStart(2, '0')}`;
-    const status = i === 0 && nextCycleNum === 1 ? 'active' : 'upcoming';
+  const title = `Cycle ${String(nextCycleNum).padStart(2, '0')}`;
 
-    const [result] = await db.query(
-      `INSERT INTO service_cycles (project_id, cycle_number, title, start_date, end_date, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [projectId, cycleNum, title, formatDate(cycleStart), formatDate(cycleEnd), status, userId]
-    );
+  const [result] = await db.query(
+    `INSERT INTO service_cycles (project_id, cycle_number, title, start_date, end_date, status, created_by)
+     VALUES (?, ?, ?, ?, ?, 'active', ?)`,
+    [projectId, nextCycleNum, title, formatDate(cycleStart), formatDate(cycleEnd), userId]
+  );
 
-    const cycleId = result.insertId;
+  const cycleId = result.insertId;
 
-    // Create standard sections for this cycle
-    const sectionValues = CYCLE_SECTIONS.map(s => [cycleId, s.section_key, s.title, s.sort_order]);
-    await db.query(
-      `INSERT INTO cycle_sections (cycle_id, section_key, title, sort_order) VALUES ?`,
-      [sectionValues]
-    );
+  // Create standard sections for this cycle
+  const sectionValues = CYCLE_SECTIONS.map(s => [cycleId, s.section_key, s.title, s.sort_order]);
+  await db.query(
+    `INSERT INTO cycle_sections (cycle_id, section_key, title, sort_order) VALUES ?`,
+    [sectionValues]
+  );
 
-    createdCycles.push({ id: cycleId, cycle_number: cycleNum, title, start_date: formatDate(cycleStart), end_date: formatDate(cycleEnd), status });
-  }
-
-  return createdCycles;
+  return { id: cycleId, cycle_number: nextCycleNum, title, start_date: formatDate(cycleStart), end_date: formatDate(cycleEnd), status: 'active' };
 }
 
 function formatDate(date) {
@@ -90,13 +84,11 @@ exports.listCycles = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/projects/:projectId/cycles/generate — generate cycles
-// Body: { number_of_cycles: 3 } (optional, defaults to 3)
+// POST /api/projects/:projectId/cycles/generate — generate first cycle
 // ─────────────────────────────────────────────────────────────────────────────
 exports.generateCycles = async (req, res) => {
   try {
     const projectId = req.params.projectId;
-    const { number_of_cycles = 3 } = req.body;
 
     // Get project start_date
     const [project] = await db.query(
@@ -112,18 +104,22 @@ exports.generateCycles = async (req, res) => {
       return res.status(400).json({ message: 'Project must have a start date to generate cycles' });
     }
 
-    const cycles = await generateCyclesForProject(
-      projectId,
-      project[0].start_date,
-      Math.min(number_of_cycles, 12), // Cap at 12 cycles max at once
-      req.user.id
+    // Check if any cycle already exists
+    const [existing] = await db.query(
+      'SELECT id FROM service_cycles WHERE project_id = ? LIMIT 1',
+      [projectId]
     );
+    if (existing.length > 0) {
+      return res.status(409).json({ message: 'Cycle already exists. Complete current cycle to generate next.' });
+    }
 
-    return res.status(201).json({ message: `${cycles.length} cycle(s) generated`, cycles });
+    const cycle = await generateNextCycleForProject(projectId, project[0].start_date, req.user.id);
+
+    return res.status(201).json({ message: 'Cycle 01 generated', cycle });
   } catch (err) {
     console.error('Generate cycles error:', err);
     if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'Some cycles already exist. Cannot generate duplicates.' });
+      return res.status(409).json({ message: 'Cycle already exists.' });
     }
     return res.status(500).json({ message: 'Server error' });
   }
@@ -190,16 +186,30 @@ exports.updateCycle = async (req, res) => {
     const { status, notes } = req.body;
 
     const [existing] = await db.query(
-      'SELECT id FROM service_cycles WHERE id = ? AND project_id = ?',
+      'SELECT * FROM service_cycles WHERE id = ? AND project_id = ?',
       [cycleId, projectId]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: 'Cycle not found' });
     }
 
+    const currentCycle = existing[0];
     const updates = {};
-    if (status !== undefined) updates.status = status;
     if (notes !== undefined) updates.notes = notes;
+
+    if (status !== undefined) {
+      updates.status = status;
+
+      // Pause: record when paused
+      if (status === 'paused' && currentCycle.status === 'active') {
+        updates.paused_at = new Date();
+      }
+
+      // Resume: record when resumed, set back to active
+      if (status === 'active' && currentCycle.status === 'paused') {
+        updates.resumed_at = new Date();
+      }
+    }
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ message: 'No valid fields to update' });
@@ -211,14 +221,20 @@ exports.updateCycle = async (req, res) => {
       [...Object.values(updates), cycleId]
     );
 
-    // If marking as completed, auto-activate next cycle
+    // If marking as completed, auto-generate next cycle
     if (status === 'completed') {
-      const [cycle] = await db.query('SELECT cycle_number FROM service_cycles WHERE id = ?', [cycleId]);
-      const nextNum = cycle[0].cycle_number + 1;
-      await db.query(
-        `UPDATE service_cycles SET status = 'active' WHERE project_id = ? AND cycle_number = ? AND status = 'upcoming'`,
-        [projectId, nextNum]
-      );
+      // Get project start_date for date calculation
+      const [proj] = await db.query('SELECT start_date FROM projects WHERE id = ?', [projectId]);
+      if (proj.length > 0 && proj[0].start_date) {
+        try {
+          await generateNextCycleForProject(projectId, proj[0].start_date, req.user.id);
+        } catch (genErr) {
+          // If next cycle already exists (edge case), just ignore
+          if (genErr.code !== 'ER_DUP_ENTRY') {
+            console.error('Auto-generate next cycle error:', genErr);
+          }
+        }
+      }
     }
 
     const [updated] = await db.query('SELECT * FROM service_cycles WHERE id = ?', [cycleId]);
@@ -322,7 +338,7 @@ exports.removeCycleTask = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/projects/:projectId/cycles/generate-next — auto-generate next cycle
-// Called when current cycle is completed
+// Called when current cycle is completed (also triggered automatically)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.generateNextCycle = async (req, res) => {
   try {
@@ -340,8 +356,20 @@ exports.generateNextCycle = async (req, res) => {
       return res.status(400).json({ message: 'Project must have a start date' });
     }
 
-    const cycles = await generateCyclesForProject(projectId, project[0].start_date, 1, req.user.id);
-    return res.status(201).json({ message: 'Next cycle generated', cycle: cycles[0] });
+    // Check if there's an active or paused cycle (can't generate next if current isn't completed)
+    const [activeCycles] = await db.query(
+      `SELECT id, status FROM service_cycles WHERE project_id = ? AND status IN ('active', 'paused') LIMIT 1`,
+      [projectId]
+    );
+    if (activeCycles.length > 0) {
+      const msg = activeCycles[0].status === 'paused'
+        ? 'Current cycle is paused. Resume and complete it before generating the next one.'
+        : 'Complete the current active cycle before generating the next one.';
+      return res.status(400).json({ message: msg });
+    }
+
+    const cycle = await generateNextCycleForProject(projectId, project[0].start_date, req.user.id);
+    return res.status(201).json({ message: 'Next cycle generated', cycle });
   } catch (err) {
     console.error('Generate next cycle error:', err);
     return res.status(500).json({ message: 'Server error' });

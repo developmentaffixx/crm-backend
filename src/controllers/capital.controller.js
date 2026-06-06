@@ -150,13 +150,17 @@ exports.totals = async (req, res) => {
     const [incomeRows] = await db.query(
       `SELECT COALESCE(SUM(paid_amount), 0) AS total_income FROM invoices WHERE deleted = 0 AND paid_amount > 0`
     );
+    const [withdrawalRows] = await db.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total_withdrawals FROM withdrawals WHERE deleted = 0`
+    );
 
     const total_capital = parseFloat(capitalRows[0].total_capital);
     const total_expenses = parseFloat(expenseRows[0].total_expenses);
     const total_income = parseFloat(incomeRows[0].total_income);
-    const net_balance = (total_capital + total_income) - total_expenses;
+    const total_withdrawals = parseFloat(withdrawalRows[0].total_withdrawals);
+    const net_balance = (total_capital + total_income) - (total_expenses + total_withdrawals);
 
-    return res.json({ total_capital, total_income, total_expenses, net_balance });
+    return res.json({ total_capital, total_income, total_expenses, total_withdrawals, net_balance });
   } catch (err) {
     console.error('Capital totals error:', err);
     return res.status(500).json({ message: 'Server error' });
