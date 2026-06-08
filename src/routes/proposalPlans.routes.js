@@ -18,6 +18,7 @@ router.delete('/plans/:planId', ctrl.deletePlan);
 
 // Features (rows)
 router.post('/services/:serviceId/features', ctrl.addFeature);
+router.put('/features/:featureId', ctrl.updateFeature);
 router.delete('/features/:featureId', ctrl.deleteFeature);
 
 // Values (matrix)

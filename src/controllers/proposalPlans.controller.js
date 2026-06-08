@@ -188,6 +188,22 @@ exports.deleteFeature = async (req, res) => {
 };
 
 /**
+ * PUT /api/proposal-plans/features/:featureId
+ * Update feature name
+ */
+exports.updateFeature = async (req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ message: 'Name is required' });
+  try {
+    await db.query('UPDATE proposal_service_features SET name = ? WHERE id = ?', [name.trim(), req.params.featureId]);
+    return res.json({ message: 'Updated' });
+  } catch (err) {
+    console.error('Update feature error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * PUT /api/proposal-plans/services/:serviceId/values
  * Bulk save all values for a service (feature × plan matrix)
  * Body: { values: [{ feature_id, plan_id, value }] }
