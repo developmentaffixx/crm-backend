@@ -1,30 +1,50 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Proposals (Web-based client proposal pages)
+-- Drop old table if exists and recreate with new structure
 -- ─────────────────────────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS proposals (
-  id               INT AUTO_INCREMENT PRIMARY KEY,
-  proposal_token   VARCHAR(64)  NOT NULL UNIQUE,          -- public shareable token
-  lead_id          INT          DEFAULT NULL,              -- optional link to a lead
+DROP TABLE IF EXISTS proposals;
 
-  -- Cover / Branding
+CREATE TABLE proposals (
+  id               INT AUTO_INCREMENT PRIMARY KEY,
+  proposal_token   VARCHAR(64)  NOT NULL UNIQUE,
+  lead_id          INT          DEFAULT NULL,
+
+  -- Cover / Basics
   title            VARCHAR(255) NOT NULL,
   tagline          VARCHAR(500) DEFAULT NULL,
   client_name      VARCHAR(255) NOT NULL,
   client_company   VARCHAR(255) DEFAULT NULL,
-  logo_url         VARCHAR(500) DEFAULT NULL,              -- your company logo
-  cover_image_url  VARCHAR(500) DEFAULT NULL,              -- hero background image
-  brand_color      VARCHAR(10)  DEFAULT '#000000',         -- hex accent color
+  brand_color      VARCHAR(10)  DEFAULT '#3b2314',
 
-  -- Content sections (ordered array stored as JSON)
-  -- Each section: { id, type, title, content, order }
-  sections         JSON         DEFAULT NULL,
+  -- Section: Problem / Research
+  pain_points      JSON         DEFAULT NULL,
+  gaps             JSON         DEFAULT NULL,
+  opportunities    JSON         DEFAULT NULL,
+
+  -- Section: 90-Day Goals  { "1": [...], "2": [...], "3": [...] }
+  goals            JSON         DEFAULT NULL,
+
+  -- Section: Services + Plans comparison table (array of service objects)
+  services_plans   JSON         DEFAULT NULL,
+
+  -- Section: Ad Investment
+  ad_investment    JSON         DEFAULT NULL,
+
+  -- Section: Investment Summary
+  investment_summary JSON       DEFAULT NULL,
+
+  -- Section: Why Choose Us (array of { title, description })
+  why_us           JSON         DEFAULT NULL,
+
+  -- Section: Custom sections (array of { title, type, content, items })
+  custom_sections  JSON         DEFAULT NULL,
 
   -- Validity
   validity_days    INT          DEFAULT 7,
   expires_at       DATETIME     DEFAULT NULL,
 
-  -- Status flow: draft → sent → viewed → accepted / rejected
+  -- Status: draft → sent → viewed → accepted / rejected
   status           ENUM('draft','sent','viewed','accepted','rejected') DEFAULT 'draft',
 
   -- View tracking
@@ -33,7 +53,7 @@ CREATE TABLE IF NOT EXISTS proposals (
   last_viewed_at   DATETIME     DEFAULT NULL,
 
   -- Client response
-  client_note      TEXT         DEFAULT NULL,              -- message when accepting/rejecting
+  client_note      TEXT         DEFAULT NULL,
   responded_at     DATETIME     DEFAULT NULL,
 
   -- Footer / contact info
