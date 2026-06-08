@@ -7,6 +7,7 @@ async function getDailyTargetsFromDB() {
   if (rows.length === 0) {
     // Fallback defaults
     return {
+      target_mode: 'range',
       leads_sourced: { min: 40, max: 60 },
       total_outreach: { min: 40, max: 60 },
       follow_ups_done: { min: 20, max: 40 },
@@ -16,6 +17,7 @@ async function getDailyTargetsFromDB() {
   }
   const s = rows[0];
   return {
+    target_mode: s.target_mode || 'range',
     leads_sourced: { min: s.leads_sourced_min, max: s.leads_sourced_max },
     total_outreach: { min: s.total_outreach_min, max: s.total_outreach_max },
     follow_ups_done: { min: s.follow_ups_min, max: s.follow_ups_max },
