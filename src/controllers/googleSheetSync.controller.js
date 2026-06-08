@@ -36,11 +36,31 @@ async function generateLeadId(connection, customDate) {
 
 // ─── Helper: Get authenticated Google Sheets client ──────────────────────────
 function getSheetsClient() {
-  // Handle private key — could have literal \n or actual newlines
+  // Option 1: Use a key file path (most reliable)
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    const auth = new google.auth.GoogleAuth({
+      keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    });
+    return google.sheets({ version: 'v4', auth });
+  }
+
+  // Option 2: Use individual env variables
   let privateKey = process.env.GOOGLE_PRIVATE_KEY || '';
-  // Replace literal \n with actual newlines (common in env panels)
+  
+  // Try base64 decode first (safest way to pass private keys via env)
+  if (privateKey && !privateKey.includes('-----BEGIN')) {
+    try {
+      privateKey = Buffer.from(privateKey, 'base64').toString('utf8');
+    } catch (e) {
+      // Not base64, try as-is
+    }
+  }
+  
+  // Replace literal \n with actual newlines
   privateKey = privateKey.replace(/\\n/g, '\n');
-  // Some panels add extra quotes — strip them
+  
+  // Strip wrapping quotes if any
   if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
     privateKey = privateKey.slice(1, -1).replace(/\\n/g, '\n');
   }
