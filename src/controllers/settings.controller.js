@@ -772,6 +772,7 @@ exports.getDailyTargets = async (req, res) => {
  */
 exports.updateDailyTargets = async (req, res) => {
   const {
+    target_mode,
     leads_sourced_min, leads_sourced_max,
     total_outreach_min, total_outreach_max,
     follow_ups_min, follow_ups_max,
@@ -784,6 +785,7 @@ exports.updateDailyTargets = async (req, res) => {
     const current = existing[0] || {};
 
     const newSettings = {
+      target_mode:         target_mode && ['single', 'range'].includes(target_mode) ? target_mode : (current.target_mode || 'range'),
       leads_sourced_min:   leads_sourced_min   !== undefined ? parseInt(leads_sourced_min, 10)   : current.leads_sourced_min,
       leads_sourced_max:   leads_sourced_max   !== undefined ? parseInt(leads_sourced_max, 10)   : current.leads_sourced_max,
       total_outreach_min:  total_outreach_min  !== undefined ? parseInt(total_outreach_min, 10)  : current.total_outreach_min,
@@ -798,13 +800,15 @@ exports.updateDailyTargets = async (req, res) => {
 
     await db.query(
       `UPDATE daily_targets_settings
-       SET leads_sourced_min   = ?, leads_sourced_max   = ?,
+       SET target_mode         = ?,
+           leads_sourced_min   = ?, leads_sourced_max   = ?,
            total_outreach_min  = ?, total_outreach_max  = ?,
            follow_ups_min      = ?, follow_ups_max      = ?,
            calls_min           = ?, calls_max           = ?,
            meetings_booked_min = ?, meetings_booked_max = ?
        WHERE id = 1`,
       [
+        newSettings.target_mode,
         newSettings.leads_sourced_min, newSettings.leads_sourced_max,
         newSettings.total_outreach_min, newSettings.total_outreach_max,
         newSettings.follow_ups_min, newSettings.follow_ups_max,

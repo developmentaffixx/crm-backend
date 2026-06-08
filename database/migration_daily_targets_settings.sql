@@ -3,6 +3,7 @@ USE crm_task_module;
 -- ─── Daily Targets Settings (single-row config) ──────────────────────────────
 CREATE TABLE IF NOT EXISTS daily_targets_settings (
   id                    INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  target_mode           ENUM('single','range') NOT NULL DEFAULT 'range',
   leads_sourced_min     INT NOT NULL DEFAULT 40,
   leads_sourced_max     INT NOT NULL DEFAULT 60,
   total_outreach_min    INT NOT NULL DEFAULT 40,
@@ -18,3 +19,7 @@ CREATE TABLE IF NOT EXISTS daily_targets_settings (
 
 -- Seed default row
 INSERT IGNORE INTO daily_targets_settings (id) VALUES (1);
+
+-- Add target_mode column if table already exists
+ALTER TABLE daily_targets_settings
+  ADD COLUMN IF NOT EXISTS target_mode ENUM('single','range') NOT NULL DEFAULT 'range' AFTER id;
