@@ -36,7 +36,18 @@ async function generateLeadId(connection, customDate) {
 
 // ─── Helper: Get authenticated Google Sheets client ──────────────────────────
 function getSheetsClient() {
-  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  // Build credentials from individual env variables
+  const credentials = {
+    type: 'service_account',
+    project_id: process.env.GOOGLE_PROJECT_ID,
+    private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
+    private_key: (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+    token_uri: 'https://oauth2.googleapis.com/token',
+  };
+
   const auth = new google.auth.GoogleAuth({
     credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
@@ -84,8 +95,8 @@ exports.syncFromGoogleSheet = async (req, res) => {
     return res.status(400).json({ message: 'Spreadsheet ID is required' });
   }
 
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    return res.status(500).json({ message: 'Google service account not configured on server' });
+  if (!process.env.GOOGLE_CLIENT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY) {
+    return res.status(500).json({ message: 'Google service account not configured on server. Add GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY.' });
   }
 
   try {
