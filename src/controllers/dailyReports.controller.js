@@ -13,6 +13,8 @@ async function getDailyTargetsFromDB() {
       follow_ups_done: { min: 20, max: 40 },
       calls_done: { min: 5, max: 10 },
       meetings_booked: { min: 3, max: 5 },
+      conversion_target: { min: 2, max: 5 },
+      conversion_value: { min: 50000, max: 100000 },
     };
   }
   const s = rows[0];
@@ -23,6 +25,8 @@ async function getDailyTargetsFromDB() {
     follow_ups_done: { min: s.follow_ups_min, max: s.follow_ups_max },
     calls_done: { min: s.calls_min, max: s.calls_max },
     meetings_booked: { min: s.meetings_booked_min, max: s.meetings_booked_max },
+    conversion_target: { min: s.conversion_target_min, max: s.conversion_target_max },
+    conversion_value: { min: s.conversion_value_min, max: s.conversion_value_max },
   };
 }
 

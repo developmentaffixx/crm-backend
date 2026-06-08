@@ -778,6 +778,8 @@ exports.updateDailyTargets = async (req, res) => {
     follow_ups_min, follow_ups_max,
     calls_min, calls_max,
     meetings_booked_min, meetings_booked_max,
+    conversion_target_min, conversion_target_max,
+    conversion_value_min, conversion_value_max,
   } = req.body;
 
   try {
@@ -785,27 +787,33 @@ exports.updateDailyTargets = async (req, res) => {
     const current = existing[0] || {};
 
     const newSettings = {
-      target_mode:         target_mode && ['single', 'range'].includes(target_mode) ? target_mode : (current.target_mode || 'range'),
-      leads_sourced_min:   leads_sourced_min   !== undefined ? parseInt(leads_sourced_min, 10)   : current.leads_sourced_min,
-      leads_sourced_max:   leads_sourced_max   !== undefined ? parseInt(leads_sourced_max, 10)   : current.leads_sourced_max,
-      total_outreach_min:  total_outreach_min  !== undefined ? parseInt(total_outreach_min, 10)  : current.total_outreach_min,
-      total_outreach_max:  total_outreach_max  !== undefined ? parseInt(total_outreach_max, 10)  : current.total_outreach_max,
-      follow_ups_min:      follow_ups_min      !== undefined ? parseInt(follow_ups_min, 10)      : current.follow_ups_min,
-      follow_ups_max:      follow_ups_max      !== undefined ? parseInt(follow_ups_max, 10)      : current.follow_ups_max,
-      calls_min:           calls_min           !== undefined ? parseInt(calls_min, 10)           : current.calls_min,
-      calls_max:           calls_max           !== undefined ? parseInt(calls_max, 10)           : current.calls_max,
-      meetings_booked_min: meetings_booked_min !== undefined ? parseInt(meetings_booked_min, 10) : current.meetings_booked_min,
-      meetings_booked_max: meetings_booked_max !== undefined ? parseInt(meetings_booked_max, 10) : current.meetings_booked_max,
+      target_mode:           target_mode && ['single', 'range'].includes(target_mode) ? target_mode : (current.target_mode || 'range'),
+      leads_sourced_min:     leads_sourced_min     !== undefined ? parseInt(leads_sourced_min, 10)     : current.leads_sourced_min,
+      leads_sourced_max:     leads_sourced_max     !== undefined ? parseInt(leads_sourced_max, 10)     : current.leads_sourced_max,
+      total_outreach_min:    total_outreach_min    !== undefined ? parseInt(total_outreach_min, 10)    : current.total_outreach_min,
+      total_outreach_max:    total_outreach_max    !== undefined ? parseInt(total_outreach_max, 10)    : current.total_outreach_max,
+      follow_ups_min:        follow_ups_min        !== undefined ? parseInt(follow_ups_min, 10)        : current.follow_ups_min,
+      follow_ups_max:        follow_ups_max        !== undefined ? parseInt(follow_ups_max, 10)        : current.follow_ups_max,
+      calls_min:             calls_min             !== undefined ? parseInt(calls_min, 10)             : current.calls_min,
+      calls_max:             calls_max             !== undefined ? parseInt(calls_max, 10)             : current.calls_max,
+      meetings_booked_min:   meetings_booked_min   !== undefined ? parseInt(meetings_booked_min, 10)   : current.meetings_booked_min,
+      meetings_booked_max:   meetings_booked_max   !== undefined ? parseInt(meetings_booked_max, 10)   : current.meetings_booked_max,
+      conversion_target_min: conversion_target_min !== undefined ? parseInt(conversion_target_min, 10) : current.conversion_target_min,
+      conversion_target_max: conversion_target_max !== undefined ? parseInt(conversion_target_max, 10) : current.conversion_target_max,
+      conversion_value_min:  conversion_value_min  !== undefined ? parseInt(conversion_value_min, 10)  : current.conversion_value_min,
+      conversion_value_max:  conversion_value_max  !== undefined ? parseInt(conversion_value_max, 10)  : current.conversion_value_max,
     };
 
     await db.query(
       `UPDATE daily_targets_settings
-       SET target_mode         = ?,
-           leads_sourced_min   = ?, leads_sourced_max   = ?,
-           total_outreach_min  = ?, total_outreach_max  = ?,
-           follow_ups_min      = ?, follow_ups_max      = ?,
-           calls_min           = ?, calls_max           = ?,
-           meetings_booked_min = ?, meetings_booked_max = ?
+       SET target_mode           = ?,
+           leads_sourced_min     = ?, leads_sourced_max     = ?,
+           total_outreach_min    = ?, total_outreach_max    = ?,
+           follow_ups_min        = ?, follow_ups_max        = ?,
+           calls_min             = ?, calls_max             = ?,
+           meetings_booked_min   = ?, meetings_booked_max   = ?,
+           conversion_target_min = ?, conversion_target_max = ?,
+           conversion_value_min  = ?, conversion_value_max  = ?
        WHERE id = 1`,
       [
         newSettings.target_mode,
@@ -814,6 +822,8 @@ exports.updateDailyTargets = async (req, res) => {
         newSettings.follow_ups_min, newSettings.follow_ups_max,
         newSettings.calls_min, newSettings.calls_max,
         newSettings.meetings_booked_min, newSettings.meetings_booked_max,
+        newSettings.conversion_target_min, newSettings.conversion_target_max,
+        newSettings.conversion_value_min, newSettings.conversion_value_max,
       ]
     );
 

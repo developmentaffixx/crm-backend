@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS daily_targets_settings (
   calls_max             INT NOT NULL DEFAULT 10,
   meetings_booked_min   INT NOT NULL DEFAULT 3,
   meetings_booked_max   INT NOT NULL DEFAULT 5,
+  conversion_target_min INT NOT NULL DEFAULT 2,
+  conversion_target_max INT NOT NULL DEFAULT 5,
+  conversion_value_min  INT NOT NULL DEFAULT 50000,
+  conversion_value_max  INT NOT NULL DEFAULT 100000,
   updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -23,3 +27,10 @@ INSERT IGNORE INTO daily_targets_settings (id) VALUES (1);
 -- Add target_mode column if table already exists
 ALTER TABLE daily_targets_settings
   ADD COLUMN IF NOT EXISTS target_mode ENUM('single','range') NOT NULL DEFAULT 'range' AFTER id;
+
+-- Add conversion columns if table already exists
+ALTER TABLE daily_targets_settings
+  ADD COLUMN IF NOT EXISTS conversion_target_min INT NOT NULL DEFAULT 2 AFTER meetings_booked_max,
+  ADD COLUMN IF NOT EXISTS conversion_target_max INT NOT NULL DEFAULT 5 AFTER conversion_target_min,
+  ADD COLUMN IF NOT EXISTS conversion_value_min INT NOT NULL DEFAULT 50000 AFTER conversion_target_max,
+  ADD COLUMN IF NOT EXISTS conversion_value_max INT NOT NULL DEFAULT 100000 AFTER conversion_value_min;
