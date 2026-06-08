@@ -4,6 +4,7 @@ const { body, param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const leadsController = require('../controllers/leads.controller');
 const leadSummaryController = require('../controllers/leadSummary.controller');
+const googleSheetSyncController = require('../controllers/googleSheetSync.controller');
 
 // All lead routes require authentication
 router.use(authenticate);
@@ -23,6 +24,9 @@ router.post(
   [body('name').notEmpty().withMessage('Name is required')],
   leadsController.create
 );
+
+// POST /api/leads/sync-google-sheet — import leads from Google Sheet (must be before /:id)
+router.post('/sync-google-sheet', googleSheetSyncController.syncFromGoogleSheet);
 
 // GET  /api/leads/:id      — get single lead detail
 router.get('/:id', param('id').isInt(), leadsController.getOne);
