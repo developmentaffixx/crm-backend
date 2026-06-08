@@ -49,6 +49,7 @@ const monthlyEvaluationsRoutes = require('./src/routes/monthlyEvaluations.routes
 const notificationsRoutes = require('./src/routes/notifications.routes');
 const recurringExpensesRoutes = require('./src/routes/recurringExpenses.routes');
 const proposalsRoutes          = require('./src/routes/proposals.routes');
+const proposalPlansRoutes      = require('./src/routes/proposalPlans.routes');
 const serviceCyclesRoutes      = require('./src/routes/serviceCycles.routes');
 const withdrawalsRoutes        = require('./src/routes/withdrawals.routes');
 
@@ -130,6 +131,7 @@ app.use('/api/monthly-evaluations',   monthlyEvaluationsRoutes);
 app.use('/api/notifications',         notificationsRoutes);
 app.use('/api/recurring-expenses',    recurringExpensesRoutes);
 app.use('/api/proposals',             proposalsRoutes);
+app.use('/api/proposal-plans',        proposalPlansRoutes);
 app.use('/api/projects',              serviceCyclesRoutes);
 app.use('/api/withdrawals',           withdrawalsRoutes);
 
