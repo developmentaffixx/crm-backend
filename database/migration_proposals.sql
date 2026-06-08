@@ -9,6 +9,7 @@ CREATE TABLE proposals (
   id               INT AUTO_INCREMENT PRIMARY KEY,
   proposal_token   VARCHAR(64)  NOT NULL UNIQUE,
   lead_id          INT          DEFAULT NULL,
+  client_id        INT          DEFAULT NULL,
 
   -- Cover / Basics
   title            VARCHAR(255) NOT NULL,

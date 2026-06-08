@@ -99,7 +99,7 @@ exports.create = async (req, res) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const {
-    lead_id, title, tagline, client_name, client_company, brand_color,
+    lead_id, client_id, title, tagline, client_name, client_company, brand_color,
     pain_points, gaps, opportunities, goals, services_plans,
     ad_investment, investment_summary, why_us, custom_sections,
     validity_days, prepared_by_name, prepared_by_email, prepared_by_phone, prepared_by_website
@@ -111,15 +111,15 @@ exports.create = async (req, res) => {
 
     const [result] = await db.query(
       `INSERT INTO proposals
-        (proposal_token, lead_id, title, tagline, client_name, client_company, brand_color,
+        (proposal_token, lead_id, client_id, title, tagline, client_name, client_company, brand_color,
          pain_points, gaps, opportunities, goals, services_plans,
          ad_investment, investment_summary, why_us, custom_sections,
          validity_days, expires_at,
          prepared_by_name, prepared_by_email, prepared_by_phone, prepared_by_website,
          status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
       [
-        token, lead_id || null, title, tagline || null, client_name, client_company || null,
+        token, lead_id || null, client_id || null, title, tagline || null, client_name, client_company || null,
         brand_color || '#3b2314',
         pain_points ? JSON.stringify(pain_points) : null,
         gaps ? JSON.stringify(gaps) : null,
@@ -180,7 +180,7 @@ exports.update = async (req, res) => {
       return res.status(403).json({ message: 'Only the creator or admin can edit' });
     }
 
-    const directFields = ['lead_id', 'title', 'tagline', 'client_name', 'client_company', 'brand_color', 'validity_days', 'status', 'prepared_by_name', 'prepared_by_email', 'prepared_by_phone', 'prepared_by_website'];
+    const directFields = ['lead_id', 'client_id', 'title', 'tagline', 'client_name', 'client_company', 'brand_color', 'validity_days', 'status', 'prepared_by_name', 'prepared_by_email', 'prepared_by_phone', 'prepared_by_website'];
     const jsonFields = ['pain_points', 'gaps', 'opportunities', 'goals', 'services_plans', 'ad_investment', 'investment_summary', 'why_us', 'custom_sections'];
 
     const updates = {};
