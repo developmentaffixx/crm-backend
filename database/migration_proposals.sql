@@ -18,6 +18,9 @@ CREATE TABLE proposals (
   client_company   VARCHAR(255) DEFAULT NULL,
   brand_color      VARCHAR(10)  DEFAULT '#3b2314',
 
+  -- Section: Project Overview
+  project_overview TEXT         DEFAULT NULL,
+
   -- Section: Problem / Research
   pain_points      JSON         DEFAULT NULL,
   gaps             JSON         DEFAULT NULL,
