@@ -36,12 +36,20 @@ async function generateLeadId(connection, customDate) {
 
 // ─── Helper: Get authenticated Google Sheets client ──────────────────────────
 function getSheetsClient() {
-  // Build credentials from individual env variables
+  // Handle private key — could have literal \n or actual newlines
+  let privateKey = process.env.GOOGLE_PRIVATE_KEY || '';
+  // Replace literal \n with actual newlines (common in env panels)
+  privateKey = privateKey.replace(/\\n/g, '\n');
+  // Some panels add extra quotes — strip them
+  if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+    privateKey = privateKey.slice(1, -1).replace(/\\n/g, '\n');
+  }
+
   const credentials = {
     type: 'service_account',
     project_id: process.env.GOOGLE_PROJECT_ID,
     private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
-    private_key: (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+    private_key: privateKey,
     client_email: process.env.GOOGLE_CLIENT_EMAIL,
     client_id: process.env.GOOGLE_CLIENT_ID,
     auth_uri: 'https://accounts.google.com/o/oauth2/auth',
