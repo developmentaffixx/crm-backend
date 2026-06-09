@@ -1125,8 +1125,7 @@ exports.forceClockOut = async (req, res) => {
 
 /**
  * GET /api/attendance/check-auto-clockout
- * Check if recent days had an auto clock-out (for next-day correction prompt)
- * Returns attendance info + auto-stopped timer logs + daily plans
+ * Check if yesterday had an auto clock-out (for next-day prompt)
  */
 exports.checkAutoClockOut = async (req, res) => {
   try {
@@ -1146,48 +1145,12 @@ exports.checkAutoClockOut = async (req, res) => {
     }
 
     const record = records[0];
-    const attendanceDate = new Date(record.date).toISOString().split('T')[0];
-
-    // Fetch auto-stopped task time logs for that date
-    const [taskLogs] = await db.query(
-      `SELECT tl.id, tl.task_id, tl.started_at, tl.ended_at, tl.duration, tl.note,
-              t.title AS task_title
-       FROM task_time_logs tl
-       JOIN tasks t ON t.id = tl.task_id
-       WHERE tl.user_id = ? AND DATE(tl.ended_at) = ?
-       AND tl.note LIKE '%Auto-stopped by system%'`,
-      [userId, attendanceDate]
-    );
-
-    // Fetch auto-stopped ticket time logs for that date
-    const [ticketLogs] = await db.query(
-      `SELECT tl.id, tl.ticket_id, tl.minutes, tl.note,
-              tk.title AS ticket_title
-       FROM ticket_time_logs tl
-       JOIN tickets tk ON tk.id = tl.ticket_id
-       WHERE tl.user_id = ? AND DATE(tl.created_at) = ?
-       AND tl.note LIKE '%Auto-stopped by system%'`,
-      [userId, attendanceDate]
-    );
-
-    // Fetch daily plans for that attendance
-    const [plans] = await db.query(
-      `SELECT id, point_text, status, is_additional, sort_order
-       FROM daily_plans
-       WHERE attendance_id = ? AND user_id = ?
-       ORDER BY sort_order`,
-      [record.id, userId]
-    );
-
     return res.json({
       needs_correction: true,
       attendance_id: record.id,
       date: record.date,
       clock_in: record.clock_in,
-      clock_out: record.clock_out,
-      task_logs: taskLogs,
-      ticket_logs: ticketLogs,
-      plans: plans
+      clock_out: record.clock_out
     });
   } catch (err) {
     console.error('Check auto clock-out error:', err);
@@ -1197,12 +1160,12 @@ exports.checkAutoClockOut = async (req, res) => {
 
 /**
  * POST /api/attendance/correct-clockout
- * User submits their actual clock-out time, timer log notes, and plan statuses
+ * User submits their actual clock-out time after auto clock-out
  */
 exports.correctClockOut = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { attendance_id, actual_clock_out_time, timer_logs, plans } = req.body;
+    const { attendance_id, actual_clock_out_time } = req.body;
 
     if (!attendance_id || !actual_clock_out_time) {
       return res.status(400).json({ message: 'attendance_id and actual_clock_out_time are required' });
@@ -1224,14 +1187,15 @@ exports.correctClockOut = async (req, res) => {
     const attendanceDate = new Date(record.date).toISOString().split('T')[0];
     const correctedDateTime = new Date(`${attendanceDate}T${actual_clock_out_time}:00`);
 
-    // Validate: corrected time must be after clock-in
+    // Validate: corrected time must be after clock-in and before midnight
     const clockInTime = new Date(record.clock_in);
     if (correctedDateTime <= clockInTime) {
       return res.status(400).json({ message: 'Corrected time must be after clock-in time' });
     }
 
-    // 1. Update attendance clock-out time
+    // Recalculate served seconds
     const newServedSeconds = Math.floor((correctedDateTime - clockInTime) / 1000);
+
     await db.query(
       `UPDATE attendance 
        SET corrected_clock_out = ?, clock_out = ?, total_served_seconds = ?, correction_submitted_at = NOW()
@@ -1239,59 +1203,7 @@ exports.correctClockOut = async (req, res) => {
       [correctedDateTime, correctedDateTime, newServedSeconds, attendance_id]
     );
 
-    // 2. Update timer logs (notes + recalculate durations based on corrected clock-out)
-    if (timer_logs && timer_logs.length) {
-      for (const log of timer_logs) {
-        if (!log.id) continue;
-
-        // Get the existing log
-        const [existingLog] = await db.query(
-          'SELECT * FROM task_time_logs WHERE id = ? AND user_id = ?',
-          [log.id, userId]
-        );
-
-        if (existingLog.length === 0) continue;
-
-        const oldDuration = existingLog[0].duration;
-        const startedAt = new Date(existingLog[0].started_at);
-
-        // If the timer ended after the corrected clock-out, adjust the end time
-        let newEndedAt = new Date(existingLog[0].ended_at);
-        if (newEndedAt > correctedDateTime) {
-          newEndedAt = correctedDateTime;
-        }
-
-        const newDuration = Math.max(1, Math.floor((newEndedAt - startedAt) / 1000));
-        const durationDiff = newDuration - oldDuration;
-
-        // Update the time log with new note, end time, and duration
-        await db.query(
-          `UPDATE task_time_logs SET ended_at = ?, duration = ?, note = ? WHERE id = ?`,
-          [newEndedAt, newDuration, log.note || existingLog[0].note, log.id]
-        );
-
-        // Adjust the task's time_spent
-        if (durationDiff !== 0) {
-          await db.query(
-            'UPDATE tasks SET time_spent = GREATEST(0, time_spent + ?) WHERE id = ?',
-            [durationDiff, existingLog[0].task_id]
-          );
-        }
-      }
-    }
-
-    // 3. Update daily plan statuses
-    if (plans && plans.length) {
-      for (const plan of plans) {
-        if (!plan.id) continue;
-        await db.query(
-          'UPDATE daily_plans SET status = ? WHERE id = ? AND user_id = ?',
-          [plan.status, plan.id, userId]
-        );
-      }
-    }
-
-    return res.json({ message: 'Correction submitted successfully', new_served_seconds: newServedSeconds });
+    return res.json({ message: 'Clock-out time corrected successfully', new_served_seconds: newServedSeconds });
   } catch (err) {
     console.error('Correct clock-out error:', err);
     return res.status(500).json({ message: 'Server error' });
