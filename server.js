@@ -184,6 +184,8 @@ server.listen(PORT, () => {
   startRecurringExpensesCron();
 
   // ── Start Auto Clock-Out Cron (7:00 PM IST daily) ───────────────────────────
-  const { startAutoClockOutCron } = require('./src/jobs/autoClockOutCron');
-  startAutoClockOutCron();
+  // DISABLED: Auto clock-out caused mid-day issues on server restarts.
+  // Timers are now stopped automatically when the user manually clocks out.
+  // const { startAutoClockOutCron } = require('./src/jobs/autoClockOutCron');
+  // startAutoClockOutCron();
 });

@@ -59,14 +59,14 @@ async function autoClockOut(isCatchUp = false) {
 
   try {
     // Find all users still clocked in with no clock_out
-    // If catch-up: check all dates (handles server restarts/missed runs)
-    // If scheduled: check only today
+    // If catch-up: only process PAST dates (not today) to avoid clocking out users mid-workday on server restart
+    // If scheduled: check only today (runs at 7 PM IST)
     const query = isCatchUp
       ? `SELECT a.id AS attendance_id, a.user_id, a.clock_in, a.date,
                 u.first_name, u.last_name, u.email
          FROM attendance a
          JOIN users u ON u.id = a.user_id
-         WHERE a.clock_out IS NULL`
+         WHERE a.clock_out IS NULL AND a.date < CURDATE()`
       : `SELECT a.id AS attendance_id, a.user_id, a.clock_in, a.date,
                 u.first_name, u.last_name, u.email
          FROM attendance a
@@ -132,7 +132,7 @@ async function autoClockOut(isCatchUp = false) {
           const minutes = Math.ceil(duration / 60);
 
           await db.query(
-            `INSERT INTO ticket_time_logs (ticket_id, user_id, minutes, note, created_at)
+            `INSERT INTO ticket_time_logs (ticket_id, user_id, minutes, description, created_at)
              VALUES (?, ?, ?, ?, ?)`,
             [timer.ticket_id, record.user_id, minutes, 'Auto-stopped by system (forgot to clock out)', clockOutTime]
           );

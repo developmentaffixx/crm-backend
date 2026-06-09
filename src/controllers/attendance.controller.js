@@ -91,7 +91,79 @@ exports.clockOut = async (req, res) => {
 
     const attendance = records[0];
     const attendanceId = attendance.id;
+    const now = new Date();
 
+    // ── Stop all running task timers ──────────────────────────────────────────
+    const [activeTaskTimers] = await db.query(
+      'SELECT id, task_id, started_at FROM task_active_timers WHERE user_id = ?',
+      [userId]
+    );
+    for (const timer of activeTaskTimers) {
+      const startedAt = new Date(timer.started_at);
+      const duration = Math.max(1, Math.floor((now - startedAt) / 1000));
+      await db.query(
+        `INSERT INTO task_time_logs (task_id, user_id, started_at, ended_at, duration, note)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [timer.task_id, userId, timer.started_at, now, duration, 'Auto-stopped on clock out']
+      );
+      await db.query(
+        'UPDATE tasks SET time_spent = time_spent + ?, timer_started_at = NULL WHERE id = ?',
+        [duration, timer.task_id]
+      );
+      await db.query('DELETE FROM task_active_timers WHERE id = ?', [timer.id]);
+    }
+
+    // ── Stop all running ticket timers ────────────────────────────────────────
+    const [activeTicketTimers] = await db.query(
+      'SELECT id, ticket_id, started_at FROM ticket_active_timers WHERE user_id = ?',
+      [userId]
+    );
+    for (const timer of activeTicketTimers) {
+      const startedAt = new Date(timer.started_at);
+      const duration = Math.max(1, Math.floor((now - startedAt) / 1000));
+      const minutes = Math.ceil(duration / 60);
+      await db.query(
+        `INSERT INTO ticket_time_logs (ticket_id, user_id, minutes, description, started_at, ended_at, duration, log_date, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, CURDATE(), ?)`,
+        [timer.ticket_id, userId, minutes, 'Auto-stopped on clock out', timer.started_at, now, duration, now]
+      );
+      await db.query('DELETE FROM ticket_active_timers WHERE id = ?', [timer.id]);
+    }
+
+    // ── Stop all running meeting timers ───────────────────────────────────────
+    const [activeMeetingTimers] = await db.query(
+      'SELECT id, meeting_id, started_at FROM meeting_active_timers WHERE user_id = ?',
+      [userId]
+    );
+    for (const timer of activeMeetingTimers) {
+      const startedAt = new Date(timer.started_at);
+      const duration = Math.max(1, Math.floor((now - startedAt) / 1000));
+      await db.query(
+        `INSERT INTO meeting_time_logs (meeting_id, user_id, started_at, ended_at, duration, note)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [timer.meeting_id, userId, timer.started_at, now, duration, 'Auto-stopped on clock out']
+      );
+      await db.query('DELETE FROM meeting_active_timers WHERE id = ?', [timer.id]);
+    }
+
+    // ── End any active AFS session ────────────────────────────────────────────
+    const [activeAfs] = await db.query(
+      'SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL',
+      [userId]
+    );
+    for (const afs of activeAfs) {
+      const afsDuration = Math.floor((now - new Date(afs.start_time)) / 1000);
+      await db.query(
+        'UPDATE afs_logs SET end_time = ?, duration_seconds = ? WHERE id = ?',
+        [now, afsDuration, afs.id]
+      );
+      await db.query(
+        'UPDATE attendance SET total_afs_seconds = total_afs_seconds + ? WHERE id = ?',
+        [afsDuration, attendanceId]
+      );
+    }
+
+    // ── Calculate served time and clock out ────────────────────────────────────
     const [servedResult] = await db.query(
       'SELECT TIMESTAMPDIFF(SECOND, clock_in, NOW()) AS total_served FROM attendance WHERE id = ?',
       [attendanceId]
