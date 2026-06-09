@@ -1,12 +1,14 @@
+const cron = require('node-cron');
 const db = require('../config/db');
 const nodemailer = require('nodemailer');
 
 /**
  * Auto Clock-Out Cron Job
- * Runs at 7:00 PM daily
- * - Finds users still clocked in
- * - Auto clocks them out at 7:00 PM
- * - Stops any running timers
+ * - Runs at 7:00 PM IST (13:30 UTC) every day via node-cron
+ * - Also runs on server startup to catch any missed clock-outs
+ * - Finds users still clocked in (today or past days)
+ * - Auto clocks them out
+ * - Stops any running task/ticket/meeting timers
  * - Sends email notification
  */
 
@@ -22,8 +24,8 @@ const transporter = nodemailer.createTransport({
 
 async function sendAutoClockOutEmail(user, clockOutTime) {
   try {
-    const timeStr = new Date(clockOutTime).toLocaleTimeString('en-US', {
-      hour: 'numeric', minute: '2-digit', hour12: true
+    const timeStr = new Date(clockOutTime).toLocaleTimeString('en-IN', {
+      hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata'
     });
 
     await transporter.sendMail({
@@ -42,24 +44,36 @@ async function sendAutoClockOutEmail(user, clockOutTime) {
         </div>
       `,
     });
-    console.log(`Auto clock-out email sent to ${user.email}`);
+    console.log(`[CRON] Auto clock-out email sent to ${user.email}`);
   } catch (err) {
-    console.error(`Failed to send auto clock-out email to ${user.email}:`, err.message);
+    console.error(`[CRON] Failed to send auto clock-out email to ${user.email}:`, err.message);
   }
 }
 
-async function autoClockOut() {
-  console.log('[CRON] Running auto clock-out check at', new Date().toLocaleTimeString());
+/**
+ * Main auto clock-out logic
+ * @param {boolean} isCatchUp - If true, this is a startup catch-up run (handles past dates too)
+ */
+async function autoClockOut(isCatchUp = false) {
+  console.log(`[CRON] Running auto clock-out ${isCatchUp ? '(catch-up)' : '(scheduled)'} at`, new Date().toISOString());
 
   try {
-    // Find all users still clocked in today (no clock_out)
-    const [openAttendance] = await db.query(
-      `SELECT a.id AS attendance_id, a.user_id, a.clock_in,
-              u.first_name, u.last_name, u.email
-       FROM attendance a
-       JOIN users u ON u.id = a.user_id
-       WHERE a.date = CURDATE() AND a.clock_out IS NULL`
-    );
+    // Find all users still clocked in with no clock_out
+    // If catch-up: check all dates (handles server restarts/missed runs)
+    // If scheduled: check only today
+    const query = isCatchUp
+      ? `SELECT a.id AS attendance_id, a.user_id, a.clock_in, a.date,
+                u.first_name, u.last_name, u.email
+         FROM attendance a
+         JOIN users u ON u.id = a.user_id
+         WHERE a.clock_out IS NULL`
+      : `SELECT a.id AS attendance_id, a.user_id, a.clock_in, a.date,
+                u.first_name, u.last_name, u.email
+         FROM attendance a
+         JOIN users u ON u.id = a.user_id
+         WHERE a.date = CURDATE() AND a.clock_out IS NULL`;
+
+    const [openAttendance] = await db.query(query);
 
     if (openAttendance.length === 0) {
       console.log('[CRON] No users to auto clock-out');
@@ -68,13 +82,18 @@ async function autoClockOut() {
 
     console.log(`[CRON] Found ${openAttendance.length} users still clocked in`);
 
-    const now = new Date();
-    // Always clock out at 7:00 PM of the attendance date, not current time
-    const clockOutTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 19, 0, 0); // 7:00 PM today
-
     for (const record of openAttendance) {
       try {
-        // 1. Stop any running task timers
+        // Determine clock-out time: 7:00 PM IST (13:30 UTC) of the attendance date
+        const attendanceDate = new Date(record.date);
+        const clockOutTime = new Date(Date.UTC(
+          attendanceDate.getFullYear(),
+          attendanceDate.getMonth(),
+          attendanceDate.getDate(),
+          13, 30, 0 // 13:30 UTC = 7:00 PM IST
+        ));
+
+        // 1. Stop any running task timers for this user
         const [activeTaskTimers] = await db.query(
           `SELECT id, task_id, started_at FROM task_active_timers WHERE user_id = ?`,
           [record.user_id]
@@ -101,9 +120,48 @@ async function autoClockOut() {
           await db.query('DELETE FROM task_active_timers WHERE id = ?', [timer.id]);
         }
 
-        // 2. End any active AFS session
+        // 2. Stop any running ticket timers
+        const [activeTicketTimers] = await db.query(
+          `SELECT id, ticket_id, started_at FROM ticket_active_timers WHERE user_id = ?`,
+          [record.user_id]
+        );
+
+        for (const timer of activeTicketTimers) {
+          const startedAt = new Date(timer.started_at);
+          const duration = Math.max(1, Math.floor((clockOutTime - startedAt) / 1000));
+          const minutes = Math.ceil(duration / 60);
+
+          await db.query(
+            `INSERT INTO ticket_time_logs (ticket_id, user_id, minutes, note, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [timer.ticket_id, record.user_id, minutes, 'Auto-stopped by system (forgot to clock out)', clockOutTime]
+          );
+
+          await db.query('DELETE FROM ticket_active_timers WHERE id = ?', [timer.id]);
+        }
+
+        // 3. Stop any running meeting timers
+        const [activeMeetingTimers] = await db.query(
+          `SELECT id, meeting_id, started_at FROM meeting_active_timers WHERE user_id = ?`,
+          [record.user_id]
+        );
+
+        for (const timer of activeMeetingTimers) {
+          const startedAt = new Date(timer.started_at);
+          const duration = Math.max(1, Math.floor((clockOutTime - startedAt) / 1000));
+
+          await db.query(
+            `INSERT INTO meeting_time_logs (meeting_id, user_id, started_at, ended_at, duration, note)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [timer.meeting_id, record.user_id, timer.started_at, clockOutTime, duration, 'Auto-stopped by system (forgot to clock out)']
+          );
+
+          await db.query('DELETE FROM meeting_active_timers WHERE id = ?', [timer.id]);
+        }
+
+        // 4. End any active AFS session
         const [activeAfs] = await db.query(
-          `SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL AND DATE(start_time) = CURDATE()`,
+          `SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL`,
           [record.user_id]
         );
 
@@ -119,11 +177,10 @@ async function autoClockOut() {
           );
         }
 
-        // 3. Calculate total served seconds
+        // 5. Calculate total served seconds and clock out
         const clockInTime = new Date(record.clock_in);
         const totalServedSeconds = Math.floor((clockOutTime - clockInTime) / 1000);
 
-        // 4. Auto clock-out
         await db.query(
           `UPDATE attendance 
            SET clock_out = ?, total_served_seconds = ?, auto_clock_out = 1
@@ -131,10 +188,10 @@ async function autoClockOut() {
           [clockOutTime, totalServedSeconds, record.attendance_id]
         );
 
-        // 5. Send email notification
+        // 6. Send email notification
         await sendAutoClockOutEmail(record, clockOutTime);
 
-        console.log(`[CRON] Auto clocked-out: ${record.first_name} ${record.last_name}`);
+        console.log(`[CRON] Auto clocked-out: ${record.first_name} ${record.last_name} (date: ${record.date})`);
       } catch (userErr) {
         console.error(`[CRON] Error processing user ${record.user_id}:`, userErr.message);
       }
@@ -146,4 +203,24 @@ async function autoClockOut() {
   }
 }
 
-module.exports = { autoClockOut };
+/**
+ * Start the auto clock-out cron scheduler
+ * - Schedules daily at 7:00 PM IST (13:30 UTC)
+ * - Runs catch-up immediately on startup for any missed clock-outs
+ */
+function startAutoClockOutCron() {
+  // Run catch-up on startup: handle any missed auto-clock-outs (e.g., server was down)
+  console.log('⏰  Running auto clock-out catch-up on startup...');
+  autoClockOut(true);
+
+  // Schedule: 13:30 UTC = 7:00 PM IST, every day
+  cron.schedule('30 13 * * *', () => {
+    autoClockOut(false);
+  }, {
+    timezone: 'UTC'
+  });
+
+  console.log('⏰  Auto clock-out cron scheduled for 7:00 PM IST (13:30 UTC) daily');
+}
+
+module.exports = { autoClockOut, startAutoClockOutCron };

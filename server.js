@@ -183,25 +183,7 @@ server.listen(PORT, () => {
   const { startRecurringExpensesCron } = require('./src/jobs/recurringExpensesCron');
   startRecurringExpensesCron();
 
-  // ── Start Auto Clock-Out Cron (7:00 PM daily) ──────────────────────────────
-  const { autoClockOut } = require('./src/jobs/autoClockOutCron');
-  const scheduleAutoClockOut = () => {
-    const now = new Date();
-    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 19, 0, 0); // 7:00 PM
-    let delay = target - now;
-
-    // If already past 7 PM today, run immediately for missed clock-outs then schedule tomorrow
-    if (delay < 0) {
-      console.log('⏰  Past 7 PM — running auto clock-out immediately for any missed users');
-      autoClockOut();
-      delay += 24 * 60 * 60 * 1000; // Schedule for tomorrow 7 PM
-    }
-
-    setTimeout(() => {
-      autoClockOut();
-      setInterval(autoClockOut, 24 * 60 * 60 * 1000); // Repeat every 24h
-    }, delay);
-    console.log(`⏰  Auto clock-out scheduled for 7:00 PM (in ${Math.round(delay / 60000)} minutes)`);
-  };
-  scheduleAutoClockOut();
+  // ── Start Auto Clock-Out Cron (7:00 PM IST daily) ───────────────────────────
+  const { startAutoClockOutCron } = require('./src/jobs/autoClockOutCron');
+  startAutoClockOutCron();
 });
