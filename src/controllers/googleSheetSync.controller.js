@@ -99,7 +99,7 @@ exports.syncFromGoogleSheet = async (req, res) => {
 
   try {
     const sheets = getSheetsClient();
-    const range = sheetName ? `${sheetName}!A:Z` : 'A:Z';
+    const range = sheetName ? `'${sheetName}'!A:Z` : 'A:Z';
 
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
