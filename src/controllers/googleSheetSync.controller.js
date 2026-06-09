@@ -39,11 +39,24 @@ const fs = require('fs');
 
 // ─── Helper: Get authenticated Google Sheets client ──────────────────────────
 function getSheetsClient() {
-  // Read the service account key file directly from the backend root
-  const keyFilePath = path.join(__dirname, '..', '..', 'google-credentials.json');
-  
-  if (!fs.existsSync(keyFilePath)) {
-    throw new Error('google-credentials.json file not found in backend root folder');
+  // Try multiple possible locations for the credentials file
+  const possiblePaths = [
+    path.join(__dirname, '..', '..', 'google-credentials.json'),  // backend/google-credentials.json (from src/controllers/)
+    path.join(process.cwd(), 'google-credentials.json'),          // current working directory
+    path.join(__dirname, '..', 'google-credentials.json'),        // backend/src/google-credentials.json
+    '/app/google-credentials.json',                               // Docker/container root
+  ];
+
+  let keyFilePath = null;
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      keyFilePath = p;
+      break;
+    }
+  }
+
+  if (!keyFilePath) {
+    throw new Error(`google-credentials.json not found. Looked in: ${possiblePaths.join(', ')}. CWD: ${process.cwd()}`);
   }
 
   const auth = new google.auth.GoogleAuth({
@@ -91,10 +104,6 @@ exports.syncFromGoogleSheet = async (req, res) => {
 
   if (!spreadsheetId) {
     return res.status(400).json({ message: 'Spreadsheet ID is required' });
-  }
-
-  if (!process.env.GOOGLE_CLIENT_EMAIL && !require('fs').existsSync(require('path').join(__dirname, '..', '..', 'google-credentials.json'))) {
-    return res.status(500).json({ message: 'google-credentials.json file not found in backend folder' });
   }
 
   try {
