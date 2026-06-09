@@ -39,28 +39,47 @@ const fs = require('fs');
 
 // ─── Helper: Get authenticated Google Sheets client ──────────────────────────
 function getSheetsClient() {
-  // Try multiple possible locations for the credentials file
+  // First try: credentials JSON file (if manually uploaded)
   const possiblePaths = [
-    path.join(__dirname, '..', '..', 'google-credentials.json'),  // backend/google-credentials.json (from src/controllers/)
-    path.join(process.cwd(), 'google-credentials.json'),          // current working directory
-    path.join(__dirname, '..', 'google-credentials.json'),        // backend/src/google-credentials.json
-    '/app/google-credentials.json',                               // Docker/container root
+    path.join(process.cwd(), 'google-credentials.json'),
+    path.join(__dirname, '..', '..', 'google-credentials.json'),
   ];
 
-  let keyFilePath = null;
   for (const p of possiblePaths) {
     if (fs.existsSync(p)) {
-      keyFilePath = p;
-      break;
+      const auth = new google.auth.GoogleAuth({
+        keyFile: p,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+      });
+      return google.sheets({ version: 'v4', auth });
     }
   }
 
-  if (!keyFilePath) {
-    throw new Error(`google-credentials.json not found. Looked in: ${possiblePaths.join(', ')}. CWD: ${process.cwd()}`);
+  // Second: use env variables (GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY)
+  if (!process.env.GOOGLE_CLIENT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY) {
+    throw new Error('Google credentials not configured. Set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY env variables.');
   }
 
+  // The private key from Hostinger env panel has literal \n characters
+  // We need to convert ALL variations to actual newlines
+  let privateKey = process.env.GOOGLE_PRIVATE_KEY;
+  
+  // Replace literal string \n (from env panels that don't support multiline)
+  privateKey = privateKey.split(String.raw`\n`).join('\n');
+
+  const credentials = {
+    type: 'service_account',
+    project_id: process.env.GOOGLE_PROJECT_ID || '',
+    private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID || '',
+    private_key: privateKey,
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    client_id: process.env.GOOGLE_CLIENT_ID || '',
+    auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+    token_uri: 'https://oauth2.googleapis.com/token',
+  };
+
   const auth = new google.auth.GoogleAuth({
-    keyFile: keyFilePath,
+    credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
   });
   return google.sheets({ version: 'v4', auth });
