@@ -34,50 +34,20 @@ async function generateLeadId(connection, customDate) {
   return `${prefix}-${seq}`;
 }
 
+const path = require('path');
+const fs = require('fs');
+
 // ─── Helper: Get authenticated Google Sheets client ──────────────────────────
 function getSheetsClient() {
-  // Option 1: Use a key file path (most reliable)
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    const auth = new google.auth.GoogleAuth({
-      keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
-    });
-    return google.sheets({ version: 'v4', auth });
-  }
-
-  // Option 2: Use individual env variables
-  let privateKey = process.env.GOOGLE_PRIVATE_KEY || '';
+  // Read the service account key file directly from the backend root
+  const keyFilePath = path.join(__dirname, '..', '..', 'google-credentials.json');
   
-  // Try base64 decode first (safest way to pass private keys via env)
-  if (privateKey && !privateKey.includes('-----BEGIN')) {
-    try {
-      privateKey = Buffer.from(privateKey, 'base64').toString('utf8');
-    } catch (e) {
-      // Not base64, try as-is
-    }
+  if (!fs.existsSync(keyFilePath)) {
+    throw new Error('google-credentials.json file not found in backend root folder');
   }
-  
-  // Replace literal \n with actual newlines
-  privateKey = privateKey.replace(/\\n/g, '\n');
-  
-  // Strip wrapping quotes if any
-  if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
-    privateKey = privateKey.slice(1, -1).replace(/\\n/g, '\n');
-  }
-
-  const credentials = {
-    type: 'service_account',
-    project_id: process.env.GOOGLE_PROJECT_ID,
-    private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
-    private_key: privateKey,
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    client_id: process.env.GOOGLE_CLIENT_ID,
-    auth_uri: 'https://accounts.google.com/o/oauth2/auth',
-    token_uri: 'https://oauth2.googleapis.com/token',
-  };
 
   const auth = new google.auth.GoogleAuth({
-    credentials,
+    keyFile: keyFilePath,
     scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
   });
   return google.sheets({ version: 'v4', auth });
@@ -123,8 +93,8 @@ exports.syncFromGoogleSheet = async (req, res) => {
     return res.status(400).json({ message: 'Spreadsheet ID is required' });
   }
 
-  if (!process.env.GOOGLE_CLIENT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY) {
-    return res.status(500).json({ message: 'Google service account not configured on server. Add GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY.' });
+  if (!process.env.GOOGLE_CLIENT_EMAIL && !require('fs').existsSync(require('path').join(__dirname, '..', '..', 'google-credentials.json'))) {
+    return res.status(500).json({ message: 'google-credentials.json file not found in backend folder' });
   }
 
   try {
