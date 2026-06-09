@@ -269,6 +269,6 @@ exports.syncFromGoogleSheet = async (req, res) => {
       return res.status(403).json({ message: 'Access denied. Make sure the Google Sheet is shared with the service account email.' });
     }
 
-    return res.status(500).json({ message: err.message || 'Failed to sync from Google Sheet' });
+    return res.status(500).json({ message: err.message || 'Failed to sync from Google Sheet', debug: String(err) });
   }
 };
