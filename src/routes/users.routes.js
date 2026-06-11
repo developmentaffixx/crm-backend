@@ -73,6 +73,7 @@ router.delete('/me/skills/:id', usersController.deleteSkill);
 
 // ─── Timesheet ────────────────────────────────────────────────────────────────
 router.get('/me/timesheet', usersController.myTimesheet);
+router.get('/me/timesheet/day', usersController.myTimesheetDay);
 
 // ─── Tickets (for profile) ────────────────────────────────────────────────────
 router.get('/me/tickets', usersController.myTickets);

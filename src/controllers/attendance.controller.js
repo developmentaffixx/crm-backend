@@ -1473,3 +1473,180 @@ exports.adminMonthBalanceReport = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+/**
+ * GET /api/attendance/admin/timesheet?user_id=X&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+ * Admin: Returns timesheet data for any employee for a given period.
+ */
+exports.adminTimesheet = async (req, res) => {
+  try {
+    const { user_id, start_date, end_date } = req.query;
+
+    if (!user_id) return res.status(400).json({ message: 'user_id is required' });
+
+    // Default to current week
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(now);
+    monday.setDate(now.getDate() + mondayOffset);
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+
+    const startStr = start_date || monday.toISOString().split('T')[0];
+    const endStr = end_date || sunday.toISOString().split('T')[0];
+
+    // Attendance records
+    const [attendance] = await db.query(
+      `SELECT date, clock_in, clock_out, clock_in_status, total_served_seconds, total_afs_seconds
+       FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ?
+       ORDER BY date ASC`,
+      [user_id, startStr, endStr]
+    );
+
+    // Task time logs
+    const [taskTime] = await db.query(
+      `SELECT DATE(started_at) AS log_date, SUM(duration) AS total_seconds
+       FROM task_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       GROUP BY DATE(started_at)`,
+      [user_id, startStr, endStr]
+    );
+
+    // Ticket time logs
+    const [ticketTime] = await db.query(
+      `SELECT log_date, SUM(minutes) AS total_minutes
+       FROM ticket_time_logs WHERE user_id = ? AND log_date BETWEEN ? AND ?
+       GROUP BY log_date`,
+      [user_id, startStr, endStr]
+    );
+
+    // Meeting time
+    const [meetingTime] = await db.query(
+      `SELECT m.meeting_date AS log_date,
+              SUM(TIMESTAMPDIFF(MINUTE, m.start_time, m.end_time)) AS total_minutes
+       FROM (
+         SELECT DISTINCT m2.id, m2.meeting_date, m2.start_time, m2.end_time
+         FROM meetings m2
+         LEFT JOIN meeting_members mm2 ON mm2.meeting_id = m2.id
+         WHERE (m2.created_by = ? OR mm2.user_id = ?)
+         AND m2.status = 'completed' AND m2.deleted = 0
+         AND m2.meeting_date BETWEEN ? AND ?
+       ) m
+       GROUP BY m.meeting_date`,
+      [user_id, user_id, startStr, endStr]
+    );
+
+    // Summary
+    const totalServed = attendance.reduce((sum, a) => sum + (Number(a.total_served_seconds) || 0), 0);
+    const totalAfs = attendance.reduce((sum, a) => sum + (Number(a.total_afs_seconds) || 0), 0);
+    const totalTaskSeconds = taskTime.reduce((sum, t) => sum + (Number(t.total_seconds) || 0), 0);
+    const totalTicketMinutes = ticketTime.reduce((sum, t) => sum + (Number(t.total_minutes) || 0), 0);
+    const totalMeetingMinutes = meetingTime.reduce((sum, m) => sum + (Number(m.total_minutes) || 0), 0);
+
+    return res.json({
+      period: { start: startStr, end: endStr },
+      attendance,
+      taskTime,
+      ticketTime,
+      meetingTime,
+      summary: {
+        total_served_seconds: totalServed,
+        total_afs_seconds: totalAfs,
+        productive_seconds: totalTaskSeconds + (totalTicketMinutes * 60) + (totalMeetingMinutes * 60),
+        total_task_seconds: totalTaskSeconds,
+        total_ticket_minutes: totalTicketMinutes,
+        total_meeting_minutes: totalMeetingMinutes,
+        days_present: attendance.length,
+      },
+    });
+  } catch (err) {
+    console.error('Admin timesheet error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/attendance/admin/timesheet/day?user_id=X&date=YYYY-MM-DD
+ * Admin: Returns detailed breakdown of a specific day for any employee.
+ */
+exports.adminTimesheetDay = async (req, res) => {
+  try {
+    const { user_id, date } = req.query;
+
+    if (!user_id) return res.status(400).json({ message: 'user_id is required' });
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ message: 'Valid date (YYYY-MM-DD) is required' });
+    }
+
+    // Task time logs with task title
+    const [taskLogs] = await db.query(
+      `SELECT tl.id, tl.task_id, t.title AS task_title, tl.started_at, tl.ended_at, tl.duration, tl.note
+       FROM task_time_logs tl
+       JOIN tasks t ON t.id = tl.task_id
+       WHERE tl.user_id = ? AND DATE(tl.started_at) = ?
+       ORDER BY tl.started_at ASC`,
+      [user_id, date]
+    );
+
+    // Ticket time logs with ticket title
+    const [ticketLogs] = await db.query(
+      `SELECT tl.id, tl.ticket_id, tk.title AS ticket_title, tl.started_at, tl.ended_at, tl.duration, tl.description AS note
+       FROM ticket_time_logs tl
+       JOIN tickets tk ON tk.id = tl.ticket_id
+       WHERE tl.user_id = ? AND DATE(tl.started_at) = ?
+       ORDER BY tl.started_at ASC`,
+      [user_id, date]
+    );
+
+    // Meeting time logs with meeting title
+    const [meetingLogs] = await db.query(
+      `SELECT ml.id, ml.meeting_id, m.title AS meeting_title, ml.started_at, ml.ended_at, ml.duration, ml.note
+       FROM meeting_time_logs ml
+       JOIN meetings m ON m.id = ml.meeting_id
+       WHERE ml.user_id = ? AND DATE(ml.started_at) = ?
+       ORDER BY ml.started_at ASC`,
+      [user_id, date]
+    );
+
+    // AFS logs
+    const [afsLogs] = await db.query(
+      `SELECT id, start_time, end_time, duration_seconds
+       FROM afs_logs
+       WHERE user_id = ? AND DATE(start_time) = ?
+       ORDER BY start_time ASC`,
+      [user_id, date]
+    );
+
+    // Attendance for that day
+    const [attendance] = await db.query(
+      `SELECT clock_in, clock_out, clock_in_status, total_served_seconds, total_afs_seconds
+       FROM attendance WHERE user_id = ? AND date = ?`,
+      [user_id, date]
+    );
+
+    const totalTaskSeconds = taskLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
+    const totalTicketSeconds = ticketLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
+    const totalMeetingSeconds = meetingLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
+    const totalAfsSeconds = afsLogs.reduce((sum, l) => sum + (Number(l.duration_seconds) || 0), 0);
+    const productiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
+
+    return res.json({
+      date,
+      attendance: attendance[0] || null,
+      tasks: taskLogs,
+      tickets: ticketLogs,
+      meetings: meetingLogs,
+      afs: afsLogs,
+      summary: {
+        total_task_seconds: totalTaskSeconds,
+        total_ticket_seconds: totalTicketSeconds,
+        total_meeting_seconds: totalMeetingSeconds,
+        total_afs_seconds: totalAfsSeconds,
+        productive_seconds: productiveSeconds,
+      },
+    });
+  } catch (err) {
+    console.error('Admin timesheet day error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};

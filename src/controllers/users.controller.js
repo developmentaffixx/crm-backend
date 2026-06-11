@@ -749,6 +749,92 @@ exports.myTimesheet = async (req, res) => {
 };
 
 /**
+ * GET /api/users/me/timesheet/day?date=YYYY-MM-DD
+ * Returns detailed breakdown of a specific day: task logs, ticket logs, meeting logs, AFS logs
+ */
+exports.myTimesheetDay = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { date } = req.query;
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ message: 'Valid date (YYYY-MM-DD) is required' });
+    }
+
+    // Task time logs with task title
+    const [taskLogs] = await db.query(
+      `SELECT tl.id, tl.task_id, t.title AS task_title, tl.started_at, tl.ended_at, tl.duration, tl.note
+       FROM task_time_logs tl
+       JOIN tasks t ON t.id = tl.task_id
+       WHERE tl.user_id = ? AND DATE(tl.started_at) = ?
+       ORDER BY tl.started_at ASC`,
+      [userId, date]
+    );
+
+    // Ticket time logs with ticket title
+    const [ticketLogs] = await db.query(
+      `SELECT tl.id, tl.ticket_id, tk.title AS ticket_title, tl.started_at, tl.ended_at, tl.duration, tl.description AS note
+       FROM ticket_time_logs tl
+       JOIN tickets tk ON tk.id = tl.ticket_id
+       WHERE tl.user_id = ? AND DATE(tl.started_at) = ?
+       ORDER BY tl.started_at ASC`,
+      [userId, date]
+    );
+
+    // Meeting time logs with meeting title
+    const [meetingLogs] = await db.query(
+      `SELECT ml.id, ml.meeting_id, m.title AS meeting_title, ml.started_at, ml.ended_at, ml.duration, ml.note
+       FROM meeting_time_logs ml
+       JOIN meetings m ON m.id = ml.meeting_id
+       WHERE ml.user_id = ? AND DATE(ml.started_at) = ?
+       ORDER BY ml.started_at ASC`,
+      [userId, date]
+    );
+
+    // AFS logs
+    const [afsLogs] = await db.query(
+      `SELECT id, start_time, end_time, duration_seconds
+       FROM afs_logs
+       WHERE user_id = ? AND DATE(start_time) = ?
+       ORDER BY start_time ASC`,
+      [userId, date]
+    );
+
+    // Attendance for that day
+    const [attendance] = await db.query(
+      `SELECT clock_in, clock_out, clock_in_status, total_served_seconds, total_afs_seconds
+       FROM attendance WHERE user_id = ? AND date = ?`,
+      [userId, date]
+    );
+
+    const totalTaskSeconds = taskLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
+    const totalTicketSeconds = ticketLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
+    const totalMeetingSeconds = meetingLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
+    const totalAfsSeconds = afsLogs.reduce((sum, l) => sum + (Number(l.duration_seconds) || 0), 0);
+    const productiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
+
+    return res.json({
+      date,
+      attendance: attendance[0] || null,
+      tasks: taskLogs,
+      tickets: ticketLogs,
+      meetings: meetingLogs,
+      afs: afsLogs,
+      summary: {
+        total_task_seconds: totalTaskSeconds,
+        total_ticket_seconds: totalTicketSeconds,
+        total_meeting_seconds: totalMeetingSeconds,
+        total_afs_seconds: totalAfsSeconds,
+        productive_seconds: productiveSeconds,
+      },
+    });
+  } catch (err) {
+    console.error('myTimesheetDay error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * GET /api/users/me/tickets
  * Returns tickets assigned to or reported by the user
  */
