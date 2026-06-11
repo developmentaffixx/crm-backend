@@ -41,11 +41,15 @@ exports.autoStats = async (req, res) => {
     const targetDate = date || new Date().toISOString().split('T')[0];
     const userId = (!req.user.is_admin) ? req.user.id : (req.query.user_id || req.user.id);
 
+    // Use date range to avoid timezone issues (start of day to end of day)
+    const dateStart = `${targetDate} 00:00:00`;
+    const dateEnd = `${targetDate} 23:59:59`;
+
     // 1. Leads sourced today (created by this user on this date)
     const [leadsSourced] = await db.query(
       `SELECT COUNT(*) AS count FROM leads 
-       WHERE created_by = ? AND DATE(created_at) = ? AND deleted = 0`,
-      [userId, targetDate]
+       WHERE created_by = ? AND created_at >= ? AND created_at <= ? AND deleted = 0`,
+      [userId, dateStart, dateEnd]
     );
 
     // 2. Follow-up counts by type (for this user on this date)
@@ -58,31 +62,31 @@ exports.autoStats = async (req, res) => {
         COALESCE(SUM(CASE WHEN type IN ('Call', 'Phone Call') THEN 1 ELSE 0 END), 0) AS calls_done,
         COUNT(*) AS total_follow_ups
        FROM lead_follow_ups
-       WHERE created_by = ? AND DATE(created_at) = ?`,
-      [userId, targetDate]
+       WHERE created_by = ? AND created_at >= ? AND created_at <= ?`,
+      [userId, dateStart, dateEnd]
     );
 
     // 3. Meetings booked (outcome = 'Meeting Scheduled')
     const [meetingsBooked] = await db.query(
       `SELECT COUNT(*) AS count FROM lead_follow_ups
-       WHERE created_by = ? AND DATE(created_at) = ? AND outcome = 'Meeting Scheduled'`,
-      [userId, targetDate]
+       WHERE created_by = ? AND created_at >= ? AND created_at <= ? AND outcome = 'Meeting Scheduled'`,
+      [userId, dateStart, dateEnd]
     );
 
     // 4. Replies received (any outcome that is NOT 'No Response' and NOT NULL)
     const [repliesReceived] = await db.query(
       `SELECT COUNT(*) AS count FROM lead_follow_ups
-       WHERE created_by = ? AND DATE(created_at) = ? 
+       WHERE created_by = ? AND created_at >= ? AND created_at <= ?
        AND outcome IS NOT NULL AND outcome != '' AND outcome != 'No Response'`,
-      [userId, targetDate]
+      [userId, dateStart, dateEnd]
     );
 
     // 5. Interested leads (outcome in positive categories)
     const [interestedLeads] = await db.query(
       `SELECT COUNT(*) AS count FROM lead_follow_ups
-       WHERE created_by = ? AND DATE(created_at) = ? 
+       WHERE created_by = ? AND created_at >= ? AND created_at <= ?
        AND outcome IN ('Interested', 'Warm Lead', 'Hot Lead', 'Proposal Requested', 'Meeting Scheduled')`,
-      [userId, targetDate]
+      [userId, dateStart, dateEnd]
     );
 
     // 6. CRM updated (any activity today = yes)
@@ -94,10 +98,10 @@ exports.autoStats = async (req, res) => {
       `SELECT DISTINCT l.name, l.business_name, l.lead_id
        FROM leads l
        INNER JOIN lead_follow_ups f ON f.lead_id = l.id
-       WHERE f.created_by = ? AND DATE(f.created_at) = ?
+       WHERE f.created_by = ? AND f.created_at >= ? AND f.created_at <= ?
        AND l.lead_score >= 4 AND l.deleted = 0
        LIMIT 10`,
-      [userId, targetDate]
+      [userId, dateStart, dateEnd]
     );
 
     // 8. Tomorrow's due follow-ups (auto-suggest)
@@ -132,8 +136,8 @@ exports.autoStats = async (req, res) => {
     // 10. Industries focused (from leads created today)
     const [industriesFocused] = await db.query(
       `SELECT DISTINCT industry FROM leads
-       WHERE created_by = ? AND DATE(created_at) = ? AND deleted = 0 AND industry IS NOT NULL AND industry != ''`,
-      [userId, targetDate]
+       WHERE created_by = ? AND created_at >= ? AND created_at <= ? AND deleted = 0 AND industry IS NOT NULL AND industry != ''`,
+      [userId, dateStart, dateEnd]
     );
 
     const stats = followUpsByType[0];
