@@ -472,6 +472,28 @@ exports.remove = async (req, res) => {
   }
 };
 
+// ─── Helper: Auto-derive lead_stage and lead_score from follow-up outcome ─────
+function deriveStageAndScore(outcome) {
+  const map = {
+    'No Response':                  { stage: 'Contacted',         score: 1 },
+    'Callback Requested':           { stage: 'Contacted',         score: 2 },
+    'Follow-Up Needed':             { stage: 'Contacted',         score: 2 },
+    'Warm Lead':                    { stage: 'Replied',           score: 3 },
+    'Interested':                   { stage: 'Interested',        score: 3 },
+    'Hot Lead':                     { stage: 'Interested',        score: 4 },
+    'Proposal Requested':           { stage: 'Qualified',         score: 4 },
+    'Meeting Scheduled':            { stage: 'Meeting Scheduled', score: 4 },
+    'Negotiation Stage':            { stage: 'Negotiation',       score: 4 },
+    'Decision Pending':             { stage: 'Negotiation',       score: 4 },
+    'Budget Issue':                 { stage: 'Negotiation',       score: 3 },
+    'Timing Issue':                 { stage: 'Negotiation',       score: 3 },
+    'Already Working With Agency':  { stage: 'Lost',              score: 1 },
+    'Not Interested':               { stage: 'Lost',              score: 1 },
+    'Converted':                    { stage: 'Won',               score: 5 },
+  };
+  return map[outcome] || null;
+}
+
 /**
  * POST /api/leads/:id/follow-ups
  */
@@ -490,11 +512,54 @@ exports.addFollowUp = async (req, res) => {
       [req.params.id, type || 'Phone Call', outcome || null, note, follow_up_date || null, req.user.id, created_at ? new Date(created_at) : new Date()]
     );
 
-    // Auto-update lead fields if provided along with follow-up
+    // Auto-update lead stage & score from outcome, unless manually overridden
+    const auto = outcome ? deriveStageAndScore(outcome) : null;
     const leadUpdates = {};
-    if (lead_stage) leadUpdates.lead_stage = lead_stage;
-    if (lead_score) leadUpdates.lead_score = lead_score;
+
+    if (lead_stage) {
+      leadUpdates.lead_stage = lead_stage; // manual override takes priority
+    } else if (auto?.stage) {
+      // Only auto-advance — never go backwards (except to Lost/Won)
+      const stageOrder = ['Cold','Contacted','Replied','Interested','Qualified','Meeting Scheduled','Proposal Sent','Negotiation','Won','Lost'];
+      const [currentLead] = await db.query('SELECT lead_stage, lead_score FROM leads WHERE id = ?', [req.params.id]);
+      const currentStageIdx = stageOrder.indexOf(currentLead[0]?.lead_stage || 'Cold');
+      const newStageIdx = stageOrder.indexOf(auto.stage);
+      // Always allow Won/Lost; otherwise only advance forward
+      if (auto.stage === 'Won' || auto.stage === 'Lost' || newStageIdx > currentStageIdx) {
+        leadUpdates.lead_stage = auto.stage;
+      }
+    }
+
+    if (lead_score) {
+      leadUpdates.lead_score = lead_score; // manual override
+    } else if (auto?.score) {
+      // Only increase score, never decrease (except on Lost)
+      const [currentLead] = await db.query('SELECT lead_score FROM leads WHERE id = ?', [req.params.id]);
+      const currentScore = currentLead[0]?.lead_score || 1;
+      if (outcome === 'Not Interested' || outcome === 'Already Working With Agency') {
+        leadUpdates.lead_score = 1; // reset on loss
+      } else if (auto.score > currentScore) {
+        leadUpdates.lead_score = auto.score;
+      }
+    }
+
     if (next_action) leadUpdates.next_action = next_action;
+    else if (auto?.stage) {
+      // Auto-suggest next action based on stage
+      const nextActionMap = {
+        'Contacted':         'Follow-Up Call',
+        'Replied':           'Follow-Up Call',
+        'Interested':        'Schedule Meeting',
+        'Qualified':         'Send Proposal',
+        'Meeting Scheduled': 'Send Proposal',
+        'Proposal Sent':     'Waiting for Client',
+        'Negotiation':       'Send Pricing',
+        'Won':               null,
+        'Lost':              null,
+      };
+      const suggested = nextActionMap[leadUpdates.lead_stage || auto.stage];
+      if (suggested) leadUpdates.next_action = suggested;
+    }
 
     if (Object.keys(leadUpdates).length > 0) {
       const setClauses = Object.keys(leadUpdates).map(k => `${k} = ?`).join(', ');
