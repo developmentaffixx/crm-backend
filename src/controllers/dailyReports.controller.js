@@ -8,13 +8,13 @@ async function getDailyTargetsFromDB() {
     // Fallback defaults
     return {
       target_mode: 'range',
-      leads_sourced: { min: 40, max: 60 },
-      total_outreach: { min: 40, max: 60 },
-      follow_ups_done: { min: 20, max: 40 },
-      calls_done: { min: 5, max: 10 },
-      meetings_booked: { min: 3, max: 5 },
-      conversion_target: { min: 2, max: 5 },
-      conversion_value: { min: 50000, max: 100000 },
+      leads_sourced: { min: 40, max: 50 },
+      total_outreach: { min: 30, max: 40 },
+      follow_ups_done: { min: 10, max: 15 },
+      calls_done: { min: 2, max: 3 },
+      meetings_booked: { min: 1, max: 2 },
+      monthly_conversion: { min: 3, max: 5 },
+      monthly_revenue: { min: 150000, max: 200000 },
     };
   }
   const s = rows[0];
@@ -25,10 +25,161 @@ async function getDailyTargetsFromDB() {
     follow_ups_done: { min: s.follow_ups_min, max: s.follow_ups_max },
     calls_done: { min: s.calls_min, max: s.calls_max },
     meetings_booked: { min: s.meetings_booked_min, max: s.meetings_booked_max },
-    conversion_target: { min: s.conversion_target_min, max: s.conversion_target_max },
-    conversion_value: { min: s.conversion_value_min, max: s.conversion_value_max },
+    monthly_conversion: { min: s.monthly_conversion_min || 3, max: s.monthly_conversion_max || 5 },
+    monthly_revenue: { min: s.monthly_revenue_min || 150000, max: s.monthly_revenue_max || 200000 },
   };
 }
+
+/**
+ * GET /api/daily-reports/auto-stats
+ * Auto-fetches daily activity stats from leads & follow_ups tables
+ * Query params: date (YYYY-MM-DD), user_id (optional, admin only)
+ */
+exports.autoStats = async (req, res) => {
+  try {
+    const { date } = req.query;
+    const targetDate = date || new Date().toISOString().split('T')[0];
+    const userId = (!req.user.is_admin) ? req.user.id : (req.query.user_id || req.user.id);
+
+    // 1. Leads sourced today (created by this user on this date)
+    const [leadsSourced] = await db.query(
+      `SELECT COUNT(*) AS count FROM leads 
+       WHERE created_by = ? AND DATE(created_at) = ? AND deleted = 0`,
+      [userId, targetDate]
+    );
+
+    // 2. Follow-up counts by type (for this user on this date)
+    const [followUpsByType] = await db.query(
+      `SELECT 
+        COALESCE(SUM(CASE WHEN type IN ('Instagram', 'Instagram DM') THEN 1 ELSE 0 END), 0) AS instagram_outreach,
+        COALESCE(SUM(CASE WHEN type IN ('WhatsApp', 'WhatsApp Message') THEN 1 ELSE 0 END), 0) AS whatsapp_outreach,
+        COALESCE(SUM(CASE WHEN type IN ('Email', 'Email Sent') THEN 1 ELSE 0 END), 0) AS email_outreach,
+        COALESCE(SUM(CASE WHEN type IN ('LinkedIn', 'LinkedIn Message') THEN 1 ELSE 0 END), 0) AS linkedin_outreach,
+        COALESCE(SUM(CASE WHEN type IN ('Call', 'Phone Call') THEN 1 ELSE 0 END), 0) AS calls_done,
+        COUNT(*) AS total_follow_ups
+       FROM lead_follow_ups
+       WHERE created_by = ? AND DATE(created_at) = ?`,
+      [userId, targetDate]
+    );
+
+    // 3. Meetings booked (outcome = 'Meeting Scheduled')
+    const [meetingsBooked] = await db.query(
+      `SELECT COUNT(*) AS count FROM lead_follow_ups
+       WHERE created_by = ? AND DATE(created_at) = ? AND outcome = 'Meeting Scheduled'`,
+      [userId, targetDate]
+    );
+
+    // 4. Replies received (any outcome that is NOT 'No Response' and NOT NULL)
+    const [repliesReceived] = await db.query(
+      `SELECT COUNT(*) AS count FROM lead_follow_ups
+       WHERE created_by = ? AND DATE(created_at) = ? 
+       AND outcome IS NOT NULL AND outcome != '' AND outcome != 'No Response'`,
+      [userId, targetDate]
+    );
+
+    // 5. Interested leads (outcome in positive categories)
+    const [interestedLeads] = await db.query(
+      `SELECT COUNT(*) AS count FROM lead_follow_ups
+       WHERE created_by = ? AND DATE(created_at) = ? 
+       AND outcome IN ('Interested', 'Warm Lead', 'Hot Lead', 'Proposal Requested', 'Meeting Scheduled')`,
+      [userId, targetDate]
+    );
+
+    // 6. CRM updated (any activity today = yes)
+    const totalActivity = (leadsSourced[0].count || 0) + (followUpsByType[0].total_follow_ups || 0);
+    const crmUpdated = totalActivity > 0;
+
+    // 7. Hot leads today (leads with score >= 4 that had activity today)
+    const [hotLeads] = await db.query(
+      `SELECT DISTINCT l.name, l.business_name, l.lead_id
+       FROM leads l
+       INNER JOIN lead_follow_ups f ON f.lead_id = l.id
+       WHERE f.created_by = ? AND DATE(f.created_at) = ?
+       AND l.lead_score >= 4 AND l.deleted = 0
+       LIMIT 10`,
+      [userId, targetDate]
+    );
+
+    // 8. Tomorrow's due follow-ups (auto-suggest)
+    const tomorrow = new Date(targetDate);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().split('T')[0];
+
+    const [tomorrowFollowUps] = await db.query(
+      `SELECT f.id, f.note, f.follow_up_date, l.name, l.business_name, l.lead_id
+       FROM lead_follow_ups f
+       JOIN leads l ON l.id = f.lead_id AND l.deleted = 0
+       WHERE (l.assigned_to = ? OR l.created_by = ?)
+       AND DATE(f.follow_up_date) = ?
+       ORDER BY f.follow_up_date ASC
+       LIMIT 10`,
+      [userId, userId, tomorrowStr]
+    );
+
+    // 9. Monthly stats (conversion & revenue for current month)
+    const monthStart = targetDate.substring(0, 7) + '-01'; // YYYY-MM-01
+    const [monthlyStats] = await db.query(
+      `SELECT 
+        COALESCE(SUM(CASE WHEN status = 'Won' THEN 1 ELSE 0 END), 0) AS conversions_this_month,
+        COALESCE(SUM(CASE WHEN status = 'Won' THEN expected_revenue ELSE 0 END), 0) AS revenue_closed_this_month
+       FROM leads
+       WHERE (assigned_to = ? OR created_by = ?)
+       AND DATE(updated_at) >= ? AND DATE(updated_at) <= LAST_DAY(?)
+       AND status = 'Won' AND deleted = 0`,
+      [userId, userId, monthStart, monthStart]
+    );
+
+    // 10. Industries focused (from leads created today)
+    const [industriesFocused] = await db.query(
+      `SELECT DISTINCT industry FROM leads
+       WHERE created_by = ? AND DATE(created_at) = ? AND deleted = 0 AND industry IS NOT NULL AND industry != ''`,
+      [userId, targetDate]
+    );
+
+    const stats = followUpsByType[0];
+    const totalOutreach = (stats.instagram_outreach || 0) + (stats.whatsapp_outreach || 0) +
+      (stats.email_outreach || 0) + (stats.linkedin_outreach || 0);
+
+    return res.json({
+      date: targetDate,
+      user_id: userId,
+      // Auto-calculated fields
+      auto: {
+        leads_sourced: leadsSourced[0].count || 0,
+        instagram_outreach: stats.instagram_outreach || 0,
+        whatsapp_outreach: stats.whatsapp_outreach || 0,
+        email_outreach: stats.email_outreach || 0,
+        linkedin_outreach: stats.linkedin_outreach || 0,
+        total_outreach: totalOutreach,
+        calls_done: stats.calls_done || 0,
+        follow_ups_done: stats.total_follow_ups || 0,
+        meetings_booked: meetingsBooked[0].count || 0,
+        replies_received: repliesReceived[0].count || 0,
+        interested_leads: interestedLeads[0].count || 0,
+        crm_updated: crmUpdated,
+        industries_focused: industriesFocused.map(r => r.industry).join(', '),
+      },
+      // Auto-suggested content
+      suggestions: {
+        hot_leads: hotLeads.map(l => l.business_name || l.name).join(', '),
+        tomorrow_follow_ups: tomorrowFollowUps.map(f => ({
+          lead_name: f.business_name || f.name,
+          lead_id: f.lead_id,
+          note: f.note,
+          date: f.follow_up_date,
+        })),
+      },
+      // Monthly targets progress
+      monthly: {
+        conversions_this_month: monthlyStats[0].conversions_this_month || 0,
+        revenue_closed_this_month: parseFloat(monthlyStats[0].revenue_closed_this_month) || 0,
+      },
+    });
+  } catch (err) {
+    console.error('Auto stats error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
 
 /**
  * GET /api/daily-reports/targets

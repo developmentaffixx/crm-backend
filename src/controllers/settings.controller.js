@@ -778,6 +778,9 @@ exports.updateDailyTargets = async (req, res) => {
     follow_ups_min, follow_ups_max,
     calls_min, calls_max,
     meetings_booked_min, meetings_booked_max,
+    monthly_conversion_min, monthly_conversion_max,
+    monthly_revenue_min, monthly_revenue_max,
+    // Support old field names for backward compatibility
     conversion_target_min, conversion_target_max,
     conversion_value_min, conversion_value_max,
   } = req.body;
@@ -798,10 +801,10 @@ exports.updateDailyTargets = async (req, res) => {
       calls_max:             calls_max             !== undefined ? parseInt(calls_max, 10)             : current.calls_max,
       meetings_booked_min:   meetings_booked_min   !== undefined ? parseInt(meetings_booked_min, 10)   : current.meetings_booked_min,
       meetings_booked_max:   meetings_booked_max   !== undefined ? parseInt(meetings_booked_max, 10)   : current.meetings_booked_max,
-      conversion_target_min: conversion_target_min !== undefined ? parseInt(conversion_target_min, 10) : current.conversion_target_min,
-      conversion_target_max: conversion_target_max !== undefined ? parseInt(conversion_target_max, 10) : current.conversion_target_max,
-      conversion_value_min:  conversion_value_min  !== undefined ? parseInt(conversion_value_min, 10)  : current.conversion_value_min,
-      conversion_value_max:  conversion_value_max  !== undefined ? parseInt(conversion_value_max, 10)  : current.conversion_value_max,
+      monthly_conversion_min: (monthly_conversion_min ?? conversion_target_min) !== undefined ? parseInt(monthly_conversion_min ?? conversion_target_min, 10) : current.monthly_conversion_min,
+      monthly_conversion_max: (monthly_conversion_max ?? conversion_target_max) !== undefined ? parseInt(monthly_conversion_max ?? conversion_target_max, 10) : current.monthly_conversion_max,
+      monthly_revenue_min:    (monthly_revenue_min ?? conversion_value_min) !== undefined ? parseInt(monthly_revenue_min ?? conversion_value_min, 10) : current.monthly_revenue_min,
+      monthly_revenue_max:    (monthly_revenue_max ?? conversion_value_max) !== undefined ? parseInt(monthly_revenue_max ?? conversion_value_max, 10) : current.monthly_revenue_max,
     };
 
     await db.query(
@@ -812,8 +815,8 @@ exports.updateDailyTargets = async (req, res) => {
            follow_ups_min        = ?, follow_ups_max        = ?,
            calls_min             = ?, calls_max             = ?,
            meetings_booked_min   = ?, meetings_booked_max   = ?,
-           conversion_target_min = ?, conversion_target_max = ?,
-           conversion_value_min  = ?, conversion_value_max  = ?
+           monthly_conversion_min = ?, monthly_conversion_max = ?,
+           monthly_revenue_min  = ?, monthly_revenue_max  = ?
        WHERE id = 1`,
       [
         newSettings.target_mode,
@@ -822,8 +825,8 @@ exports.updateDailyTargets = async (req, res) => {
         newSettings.follow_ups_min, newSettings.follow_ups_max,
         newSettings.calls_min, newSettings.calls_max,
         newSettings.meetings_booked_min, newSettings.meetings_booked_max,
-        newSettings.conversion_target_min, newSettings.conversion_target_max,
-        newSettings.conversion_value_min, newSettings.conversion_value_max,
+        newSettings.monthly_conversion_min, newSettings.monthly_conversion_max,
+        newSettings.monthly_revenue_min, newSettings.monthly_revenue_max,
       ]
     );
 

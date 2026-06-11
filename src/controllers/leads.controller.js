@@ -221,7 +221,8 @@ exports.create = async (req, res) => {
     name, business_name, industry, service_required, budget_min, budget_max, no_budget_idea,
     purpose_of_services, phone, email, address, country, state, city, zip_code,
     temperature, source, status, current_marketing_status, assigned_to, social_links,
-    resource, initial_followup, created_at
+    resource, initial_followup, created_at,
+    lead_stage, lead_score, expected_revenue, next_action, interested_services
   } = req.body;
 
   try {
@@ -231,8 +232,9 @@ exports.create = async (req, res) => {
     const [result] = await db.query(
       `INSERT INTO leads (lead_id, name, business_name, industry, service_required, budget_min, budget_max, no_budget_idea,
         purpose_of_services, phone, email, address, country, state, city, zip_code,
-        temperature, source, resource, status, current_marketing_status, assigned_to, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        temperature, source, resource, status, current_marketing_status, assigned_to, created_by, created_at,
+        lead_stage, lead_score, expected_revenue, next_action, interested_services)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         lead_id,
         name, business_name || null, industry || null, service_required || null,
@@ -243,7 +245,10 @@ exports.create = async (req, res) => {
         address || null, country || null, state || null, city || null, zip_code || null,
         temperature || 'cold', source || null, resource || null, status || 'New',
         current_marketing_status || null, assigned_to || null, req.user.id,
-        created_at ? new Date(created_at) : new Date()
+        created_at ? new Date(created_at) : new Date(),
+        lead_stage || 'Cold', lead_score || 1, expected_revenue || null,
+        next_action || null,
+        interested_services ? (Array.isArray(interested_services) ? interested_services.join(',') : interested_services) : null
       ]
     );
 
@@ -301,11 +306,21 @@ exports.update = async (req, res) => {
     const allowed = [
       'name', 'business_name', 'industry', 'service_required', 'budget_min', 'budget_max', 'no_budget_idea',
       'purpose_of_services', 'phone', 'email', 'address', 'country', 'state', 'city', 'zip_code',
-      'temperature', 'source', 'resource', 'status', 'current_marketing_status', 'assigned_to'
+      'temperature', 'source', 'resource', 'status', 'current_marketing_status', 'assigned_to',
+      'lead_stage', 'lead_score', 'expected_revenue', 'next_action', 'interested_services'
     ];
 
     const updates = {};
-    allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+    allowed.forEach(f => {
+      if (req.body[f] !== undefined) {
+        // Handle interested_services array → comma-separated string
+        if (f === 'interested_services' && Array.isArray(req.body[f])) {
+          updates[f] = req.body[f].join(',');
+        } else {
+          updates[f] = req.body[f];
+        }
+      }
+    });
 
     // Handle created_at change — regenerate lead_id based on new date
     if (req.body.created_at) {
@@ -468,12 +483,24 @@ exports.addFollowUp = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM leads WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Lead not found' });
 
-    const { note, follow_up_date, type, outcome, created_at } = req.body;
+    const { note, follow_up_date, type, outcome, created_at, lead_stage, lead_score, next_action } = req.body;
 
     const [result] = await db.query(
       'INSERT INTO lead_follow_ups (lead_id, type, outcome, note, follow_up_date, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [req.params.id, type || 'Phone Call', outcome || null, note, follow_up_date || null, req.user.id, created_at ? new Date(created_at) : new Date()]
     );
+
+    // Auto-update lead fields if provided along with follow-up
+    const leadUpdates = {};
+    if (lead_stage) leadUpdates.lead_stage = lead_stage;
+    if (lead_score) leadUpdates.lead_score = lead_score;
+    if (next_action) leadUpdates.next_action = next_action;
+
+    if (Object.keys(leadUpdates).length > 0) {
+      const setClauses = Object.keys(leadUpdates).map(k => `${k} = ?`).join(', ');
+      const values = [...Object.values(leadUpdates), req.params.id];
+      await db.query(`UPDATE leads SET ${setClauses} WHERE id = ?`, values);
+    }
 
     const [followUp] = await db.query(
       `SELECT f.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name

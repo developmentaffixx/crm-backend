@@ -10,6 +10,9 @@ router.use(authenticate);
 // GET /api/daily-reports/targets — static daily targets
 router.get('/targets', dailyReportsController.getTargets);
 
+// GET /api/daily-reports/auto-stats — auto-calculated stats from CRM data
+router.get('/auto-stats', dailyReportsController.autoStats);
+
 // GET /api/daily-reports/summary/weekly — weekly summary
 router.get('/summary/weekly', dailyReportsController.weeklySummary);
 
