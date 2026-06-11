@@ -146,25 +146,25 @@ exports.autoStats = async (req, res) => {
     );
 
     const stats = followUpsByType[0];
-    const totalOutreach = (stats.instagram_outreach || 0) + (stats.whatsapp_outreach || 0) +
-      (stats.email_outreach || 0) + (stats.linkedin_outreach || 0);
+    const totalOutreach = Number(stats.instagram_outreach || 0) + Number(stats.whatsapp_outreach || 0) +
+      Number(stats.email_outreach || 0) + Number(stats.linkedin_outreach || 0);
 
     return res.json({
       date: targetDate,
       user_id: userId,
       // Auto-calculated fields
       auto: {
-        leads_sourced: leadsSourced[0].count || 0,
-        instagram_outreach: stats.instagram_outreach || 0,
-        whatsapp_outreach: stats.whatsapp_outreach || 0,
-        email_outreach: stats.email_outreach || 0,
-        linkedin_outreach: stats.linkedin_outreach || 0,
+        leads_sourced: Number(leadsSourced[0].count) || 0,
+        instagram_outreach: Number(stats.instagram_outreach) || 0,
+        whatsapp_outreach: Number(stats.whatsapp_outreach) || 0,
+        email_outreach: Number(stats.email_outreach) || 0,
+        linkedin_outreach: Number(stats.linkedin_outreach) || 0,
         total_outreach: totalOutreach,
-        calls_done: stats.calls_done || 0,
-        follow_ups_done: stats.total_follow_ups || 0,
-        meetings_booked: meetingsBooked[0].count || 0,
-        replies_received: repliesReceived[0].count || 0,
-        interested_leads: interestedLeads[0].count || 0,
+        calls_done: Number(stats.calls_done) || 0,
+        follow_ups_done: Number(stats.total_follow_ups) || 0,
+        meetings_booked: Number(meetingsBooked[0].count) || 0,
+        replies_received: Number(repliesReceived[0].count) || 0,
+        interested_leads: Number(interestedLeads[0].count) || 0,
         crm_updated: crmUpdated,
         industries_focused: industriesFocused.map(r => r.industry).join(', '),
       },
