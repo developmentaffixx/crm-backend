@@ -39,20 +39,24 @@ exports.autoStats = async (req, res) => {
   try {
     const { date } = req.query;
     const targetDate = date || new Date().toISOString().split('T')[0];
-    const userId = (!req.user.is_admin) ? req.user.id : (req.query.user_id || req.user.id);
+    const userId = (!req.user.is_admin) ? req.user.id : (req.query.user_id || null);
 
     // Use date range to avoid timezone issues (start of day to end of day)
     const dateStart = `${targetDate} 00:00:00`;
     const dateEnd = `${targetDate} 23:59:59`;
 
-    // 1. Leads sourced today (created by this user on this date)
+    // Build user filter — admin sees all if no user_id specified
+    const userFilter = userId ? 'AND created_by = ?' : '';
+    const userParams = userId ? [userId] : [];
+
+    // 1. Leads sourced today
     const [leadsSourced] = await db.query(
       `SELECT COUNT(*) AS count FROM leads 
-       WHERE created_by = ? AND created_at >= ? AND created_at <= ? AND deleted = 0`,
-      [userId, dateStart, dateEnd]
+       WHERE created_at >= ? AND created_at <= ? AND deleted = 0 ${userId ? 'AND created_by = ?' : ''}`,
+      [dateStart, dateEnd, ...userParams]
     );
 
-    // 2. Follow-up counts by type (for this user on this date)
+    // 2. Follow-up counts by type
     const [followUpsByType] = await db.query(
       `SELECT 
         COALESCE(SUM(CASE WHEN type IN ('Instagram', 'Instagram DM') THEN 1 ELSE 0 END), 0) AS instagram_outreach,
@@ -62,31 +66,31 @@ exports.autoStats = async (req, res) => {
         COALESCE(SUM(CASE WHEN type IN ('Call', 'Phone Call') THEN 1 ELSE 0 END), 0) AS calls_done,
         COUNT(*) AS total_follow_ups
        FROM lead_follow_ups
-       WHERE created_by = ? AND created_at >= ? AND created_at <= ?`,
-      [userId, dateStart, dateEnd]
+       WHERE created_at >= ? AND created_at <= ? ${userId ? 'AND created_by = ?' : ''}`,
+      [dateStart, dateEnd, ...userParams]
     );
 
     // 3. Meetings booked (outcome = 'Meeting Scheduled')
     const [meetingsBooked] = await db.query(
       `SELECT COUNT(*) AS count FROM lead_follow_ups
-       WHERE created_by = ? AND created_at >= ? AND created_at <= ? AND outcome = 'Meeting Scheduled'`,
-      [userId, dateStart, dateEnd]
+       WHERE created_at >= ? AND created_at <= ? AND outcome = 'Meeting Scheduled' ${userId ? 'AND created_by = ?' : ''}`,
+      [dateStart, dateEnd, ...userParams]
     );
 
     // 4. Replies received (any outcome that is NOT 'No Response' and NOT NULL)
     const [repliesReceived] = await db.query(
       `SELECT COUNT(*) AS count FROM lead_follow_ups
-       WHERE created_by = ? AND created_at >= ? AND created_at <= ?
-       AND outcome IS NOT NULL AND outcome != '' AND outcome != 'No Response'`,
-      [userId, dateStart, dateEnd]
+       WHERE created_at >= ? AND created_at <= ?
+       AND outcome IS NOT NULL AND outcome != '' AND outcome != 'No Response' ${userId ? 'AND created_by = ?' : ''}`,
+      [dateStart, dateEnd, ...userParams]
     );
 
     // 5. Interested leads (outcome in positive categories)
     const [interestedLeads] = await db.query(
       `SELECT COUNT(*) AS count FROM lead_follow_ups
-       WHERE created_by = ? AND created_at >= ? AND created_at <= ?
-       AND outcome IN ('Interested', 'Warm Lead', 'Hot Lead', 'Proposal Requested', 'Meeting Scheduled')`,
-      [userId, dateStart, dateEnd]
+       WHERE created_at >= ? AND created_at <= ?
+       AND outcome IN ('Interested', 'Warm Lead', 'Hot Lead', 'Proposal Requested', 'Meeting Scheduled') ${userId ? 'AND created_by = ?' : ''}`,
+      [dateStart, dateEnd, ...userParams]
     );
 
     // 6. CRM updated (any activity today = yes)
@@ -98,10 +102,10 @@ exports.autoStats = async (req, res) => {
       `SELECT DISTINCT l.name, l.business_name, l.lead_id
        FROM leads l
        INNER JOIN lead_follow_ups f ON f.lead_id = l.id
-       WHERE f.created_by = ? AND f.created_at >= ? AND f.created_at <= ?
-       AND l.lead_score >= 4 AND l.deleted = 0
+       WHERE f.created_at >= ? AND f.created_at <= ?
+       AND l.lead_score >= 4 AND l.deleted = 0 ${userId ? 'AND f.created_by = ?' : ''}
        LIMIT 10`,
-      [userId, dateStart, dateEnd]
+      [dateStart, dateEnd, ...userParams]
     );
 
     // 8. Tomorrow's due follow-ups (auto-suggest)
@@ -113,11 +117,11 @@ exports.autoStats = async (req, res) => {
       `SELECT f.id, f.note, f.follow_up_date, l.name, l.business_name, l.lead_id
        FROM lead_follow_ups f
        JOIN leads l ON l.id = f.lead_id AND l.deleted = 0
-       WHERE (l.assigned_to = ? OR l.created_by = ?)
-       AND DATE(f.follow_up_date) = ?
+       WHERE DATE(f.follow_up_date) = ?
+       ${userId ? 'AND (l.assigned_to = ? OR l.created_by = ?)' : ''}
        ORDER BY f.follow_up_date ASC
        LIMIT 10`,
-      [userId, userId, tomorrowStr]
+      [tomorrowStr, ...(userId ? [userId, userId] : [])]
     );
 
     // 9. Monthly stats (conversion & revenue for current month)
@@ -127,17 +131,18 @@ exports.autoStats = async (req, res) => {
         COALESCE(SUM(CASE WHEN status = 'Won' THEN 1 ELSE 0 END), 0) AS conversions_this_month,
         COALESCE(SUM(CASE WHEN status = 'Won' THEN expected_revenue ELSE 0 END), 0) AS revenue_closed_this_month
        FROM leads
-       WHERE (assigned_to = ? OR created_by = ?)
-       AND DATE(updated_at) >= ? AND DATE(updated_at) <= LAST_DAY(?)
-       AND status = 'Won' AND deleted = 0`,
-      [userId, userId, monthStart, monthStart]
+       WHERE DATE(updated_at) >= ? AND DATE(updated_at) <= LAST_DAY(?)
+       AND status = 'Won' AND deleted = 0
+       ${userId ? 'AND (assigned_to = ? OR created_by = ?)' : ''}`,
+      [monthStart, monthStart, ...(userId ? [userId, userId] : [])]
     );
 
     // 10. Industries focused (from leads created today)
     const [industriesFocused] = await db.query(
       `SELECT DISTINCT industry FROM leads
-       WHERE created_by = ? AND created_at >= ? AND created_at <= ? AND deleted = 0 AND industry IS NOT NULL AND industry != ''`,
-      [userId, dateStart, dateEnd]
+       WHERE created_at >= ? AND created_at <= ? AND deleted = 0 AND industry IS NOT NULL AND industry != ''
+       ${userId ? 'AND created_by = ?' : ''}`,
+      [dateStart, dateEnd, ...userParams]
     );
 
     const stats = followUpsByType[0];
