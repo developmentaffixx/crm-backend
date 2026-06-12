@@ -1542,6 +1542,8 @@ exports.adminTimesheet = async (req, res) => {
     const totalTaskSeconds = taskTime.reduce((sum, t) => sum + (Number(t.total_seconds) || 0), 0);
     const totalTicketMinutes = ticketTime.reduce((sum, t) => sum + (Number(t.total_minutes) || 0), 0);
     const totalMeetingMinutes = meetingTime.reduce((sum, m) => sum + (Number(m.total_minutes) || 0), 0);
+    const productiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + (totalMeetingMinutes * 60);
+    const idleSeconds = Math.max(0, totalServed - productiveSeconds - totalAfs);
 
     return res.json({
       period: { start: startStr, end: endStr },
@@ -1552,7 +1554,8 @@ exports.adminTimesheet = async (req, res) => {
       summary: {
         total_served_seconds: totalServed,
         total_afs_seconds: totalAfs,
-        productive_seconds: totalTaskSeconds + (totalTicketMinutes * 60) + (totalMeetingMinutes * 60),
+        productive_seconds: productiveSeconds,
+        idle_seconds: idleSeconds,
         total_task_seconds: totalTaskSeconds,
         total_ticket_minutes: totalTicketMinutes,
         total_meeting_minutes: totalMeetingMinutes,
@@ -1629,6 +1632,8 @@ exports.adminTimesheetDay = async (req, res) => {
     const totalMeetingSeconds = meetingLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
     const totalAfsSeconds = afsLogs.reduce((sum, l) => sum + (Number(l.duration_seconds) || 0), 0);
     const productiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
+    const totalServedSeconds = Number(attendance[0]?.total_served_seconds) || 0;
+    const idleSeconds = Math.max(0, totalServedSeconds - productiveSeconds - totalAfsSeconds);
 
     return res.json({
       date,
@@ -1643,6 +1648,7 @@ exports.adminTimesheetDay = async (req, res) => {
         total_meeting_seconds: totalMeetingSeconds,
         total_afs_seconds: totalAfsSeconds,
         productive_seconds: productiveSeconds,
+        idle_seconds: idleSeconds,
       },
     });
   } catch (err) {
