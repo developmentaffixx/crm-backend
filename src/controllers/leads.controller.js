@@ -70,7 +70,7 @@ async function generateLeadId(connection, customDate) {
  */
 exports.list = async (req, res) => {
   try {
-    const { temperature, source, status, search, page = 1, limit = 20, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
+    const { temperature, source, status, search, page = 1, limit = 50, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     let where = 'l.deleted = 0';
     const params = [];
 
