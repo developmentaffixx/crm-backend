@@ -606,7 +606,7 @@ exports.updateFollowUp = async (req, res) => {
     if (outcome !== undefined) updates.outcome = outcome || null;
     if (note !== undefined) updates.note = note;
     if (follow_up_date !== undefined) updates.follow_up_date = follow_up_date || null;
-    if (created_at !== undefined) updates.created_at = created_at ? new Date(created_at) : followUp.created_at;
+    if (created_at !== undefined) updates.created_at = created_at || followUp.created_at;
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ message: 'No valid fields to update' });
