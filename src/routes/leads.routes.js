@@ -4,6 +4,7 @@ const { body, param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const leadsController = require('../controllers/leads.controller');
 const leadSummaryController = require('../controllers/leadSummary.controller');
+const leadSwotController = require('../controllers/leadSwot.controller');
 const googleSheetSyncController = require('../controllers/googleSheetSync.controller');
 
 // All lead routes require authentication
@@ -71,5 +72,35 @@ router.put(
 
 // POST /api/leads/:id/summary — generate AI summary + next action
 router.post('/:id/summary', param('id').isInt(), leadSummaryController.generateSummary);
+
+// ── SWOT (Talk) ───────────────────────────────────────────────────────────────
+
+// GET  /api/leads/:id/swot — get all SWOT points
+router.get('/:id/swot', param('id').isInt(), leadSwotController.getSwot);
+
+// POST /api/leads/:id/swot — add a SWOT point
+router.post(
+  '/:id/swot',
+  [
+    param('id').isInt(),
+    body('category').isIn(['strength', 'weakness', 'opportunity']).withMessage('Invalid category'),
+    body('point').notEmpty().withMessage('Point is required'),
+  ],
+  leadSwotController.addSwotPoint
+);
+
+// PUT  /api/leads/:id/swot/:pointId — update a SWOT point
+router.put(
+  '/:id/swot/:pointId',
+  [param('id').isInt(), param('pointId').isInt(), body('point').notEmpty()],
+  leadSwotController.updateSwotPoint
+);
+
+// DELETE /api/leads/:id/swot/:pointId — delete a SWOT point
+router.delete(
+  '/:id/swot/:pointId',
+  [param('id').isInt(), param('pointId').isInt()],
+  leadSwotController.deleteSwotPoint
+);
 
 module.exports = router;
