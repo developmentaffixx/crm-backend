@@ -507,13 +507,9 @@ exports.addFollowUp = async (req, res) => {
 
     const { note, follow_up_date, type, outcome, created_at, lead_stage, lead_score, next_action } = req.body;
 
-    // Ensure datetime values are plain strings (YYYY-MM-DD HH:MM:SS) to avoid timezone conversion
-    const cleanFollowUpDate = follow_up_date ? follow_up_date.replace('T', ' ').slice(0, 19) : null;
-    const cleanCreatedAt = created_at ? created_at.replace('T', ' ').slice(0, 19) : new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata' }).replace('T', ' ');
-
     const [result] = await db.query(
       'INSERT INTO lead_follow_ups (lead_id, type, outcome, note, follow_up_date, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [req.params.id, type || 'Phone Call', outcome || null, note, cleanFollowUpDate, req.user.id, cleanCreatedAt]
+      [req.params.id, type || 'Phone Call', outcome || null, note, follow_up_date || null, req.user.id, created_at || new Date()]
     );
 
     // Auto-update lead stage & score from outcome, unless manually overridden
@@ -609,8 +605,8 @@ exports.updateFollowUp = async (req, res) => {
     if (type !== undefined) updates.type = type;
     if (outcome !== undefined) updates.outcome = outcome || null;
     if (note !== undefined) updates.note = note;
-    if (follow_up_date !== undefined) updates.follow_up_date = follow_up_date ? follow_up_date.replace('T', ' ').slice(0, 19) : null;
-    if (created_at !== undefined) updates.created_at = created_at ? created_at.replace('T', ' ').slice(0, 19) : followUp.created_at;
+    if (follow_up_date !== undefined) updates.follow_up_date = follow_up_date || null;
+    if (created_at !== undefined) updates.created_at = created_at || followUp.created_at;
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ message: 'No valid fields to update' });
