@@ -509,7 +509,7 @@ exports.addFollowUp = async (req, res) => {
 
     const [result] = await db.query(
       'INSERT INTO lead_follow_ups (lead_id, type, outcome, note, follow_up_date, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [req.params.id, type || 'Phone Call', outcome || null, note, follow_up_date || null, req.user.id, created_at ? new Date(created_at) : new Date()]
+      [req.params.id, type || 'Phone Call', outcome || null, note, follow_up_date || null, req.user.id, created_at || new Date()]
     );
 
     // Auto-update lead stage & score from outcome, unless manually overridden
