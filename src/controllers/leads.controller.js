@@ -700,6 +700,32 @@ async function generateClientCode() {
 }
 
 /**
+ * GET /api/leads/follow-ups/custom-options
+ * Returns distinct custom types and outcomes used across all follow-ups
+ */
+exports.getFollowUpCustomOptions = async (req, res) => {
+  try {
+    const defaultTypes = ['Phone Call', 'Email', 'WhatsApp', 'Meeting', 'Instagram', 'LinkedIn', 'Proposal Discussion', 'Payment Follow-Up', 'Other', 'Initial Follow-up'];
+    const defaultOutcomes = ['No Response', 'Interested', 'Warm Lead', 'Hot Lead', 'Callback Requested', 'Proposal Requested', 'Meeting Scheduled', 'Negotiation Stage', 'Follow-Up Needed', 'Not Interested', 'Budget Issue', 'Timing Issue', 'Already Working With Agency', 'Decision Pending', 'Converted'];
+
+    const [types] = await db.query(
+      `SELECT DISTINCT type FROM lead_follow_ups WHERE type IS NOT NULL AND type != ''`
+    );
+    const [outcomes] = await db.query(
+      `SELECT DISTINCT outcome FROM lead_follow_ups WHERE outcome IS NOT NULL AND outcome != ''`
+    );
+
+    const customTypes = types.map(r => r.type).filter(t => !defaultTypes.includes(t));
+    const customOutcomes = outcomes.map(r => r.outcome).filter(o => !defaultOutcomes.includes(o));
+
+    return res.json({ customTypes, customOutcomes });
+  } catch (err) {
+    console.error('Custom options error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * POST /api/leads/:id/convert
  * Convert a lead to client (set status = 'Won') — Admin only
  */

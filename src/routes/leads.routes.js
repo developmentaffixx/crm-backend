@@ -50,6 +50,9 @@ router.post('/:id/convert', param('id').isInt(), leadsController.convert);
 
 // ── Follow-ups ────────────────────────────────────────────────────────────────
 
+// GET  /api/leads/follow-ups/custom-options — get custom types/outcomes (must be before /:id/follow-ups)
+router.get('/follow-ups/custom-options', leadsController.getFollowUpCustomOptions);
+
 // GET  /api/leads/:id/follow-ups   — list follow-ups
 router.get('/:id/follow-ups', param('id').isInt(), leadsController.getFollowUps);
 
