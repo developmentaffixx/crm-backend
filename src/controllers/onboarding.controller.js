@@ -203,7 +203,7 @@ exports.getOne = async (req, res) => {
     const { afid } = req.params;
 
     const [regRows] = await db.query(
-      `SELECT id, afid, candidate_name, email, created_at AS invited_at
+      `SELECT id, afid, candidate_name, email, access_expires_at, created_at AS invited_at
        FROM pillars_candidate_registration
        WHERE afid = ? AND deleted = 0`,
       [afid]
@@ -230,6 +230,7 @@ exports.getOne = async (req, res) => {
       candidate_name:     reg.candidate_name,
       email:              reg.email,
       invited_at:         reg.invited_at,
+      access_expires_at:  reg.access_expires_at || null,
       status:             det?.onboarding_status || 'pending',
       progress_percentage: det?.progress_percentage || 0,
       submitted_at:       det?.submitted_at || null,
@@ -324,6 +325,46 @@ exports.update = async (req, res) => {
     return res.json({ message: 'Candidate updated successfully' });
   } catch (err) {
     console.error('onboarding update error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── POST /api/onboarding/:afid/extend ────────────────────────────────────────
+exports.extendAccess = async (req, res) => {
+  try {
+    const { afid } = req.params;
+    const { expires_at } = req.body;
+
+    if (!expires_at) {
+      return res.status(400).json({ message: 'expires_at (date-time) is required' });
+    }
+
+    const newExpiry = new Date(expires_at);
+    if (isNaN(newExpiry.getTime())) {
+      return res.status(400).json({ message: 'Invalid date-time format' });
+    }
+
+    if (newExpiry <= new Date()) {
+      return res.status(400).json({ message: 'Expiry date must be in the future' });
+    }
+
+    const [rows] = await db.query(
+      `SELECT id FROM pillars_candidate_registration WHERE afid = ? AND deleted = 0`,
+      [afid]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Candidate not found' });
+
+    await db.query(
+      `UPDATE pillars_candidate_registration SET access_expires_at = ? WHERE afid = ?`,
+      [newExpiry, afid]
+    );
+
+    return res.json({
+      message: 'Access extended successfully',
+      access_expires_at: newExpiry.toISOString(),
+    });
+  } catch (err) {
+    console.error('onboarding extendAccess error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

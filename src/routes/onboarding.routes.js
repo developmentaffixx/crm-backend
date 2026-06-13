@@ -21,6 +21,9 @@ router.patch('/:afid/status',    requireAdmin, ctrl.updateStatus);
 // PATCH /api/onboarding/:afid       — update candidate name/email (admin only)
 router.patch('/:afid',           requireAdmin, ctrl.update);
 
+// POST /api/onboarding/:afid/extend  — extend candidate access (admin only)
+router.post('/:afid/extend',     requireAdmin, ctrl.extendAccess);
+
 // POST /api/onboarding/:afid/resend  — resend invitation email (admin only)
 router.post('/:afid/resend',     requireAdmin, ctrl.resend);
 
