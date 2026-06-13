@@ -70,13 +70,17 @@ async function generateLeadId(connection, customDate) {
  */
 exports.list = async (req, res) => {
   try {
-    const { temperature, source, status, search, page = 1, limit = 50, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
+    const { temperature, source, status, search, industry, assigned_to, date_from, date_to, page = 1, limit = 50, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     let where = 'l.deleted = 0';
     const params = [];
 
     if (temperature) { where += ' AND l.temperature = ?'; params.push(temperature); }
     if (source)      { where += ' AND l.source = ?';      params.push(source); }
     if (status)      { where += ' AND l.status = ?';      params.push(status); }
+    if (industry)    { where += ' AND l.industry = ?';    params.push(industry); }
+    if (assigned_to) { where += ' AND l.assigned_to = ?'; params.push(assigned_to); }
+    if (date_from)   { where += ' AND DATE(l.created_at) >= ?'; params.push(date_from); }
+    if (date_to)     { where += ' AND DATE(l.created_at) <= ?'; params.push(date_to); }
     if (search) {
       where += ' AND (l.name LIKE ? OR l.business_name LIKE ? OR l.email LIKE ? OR l.phone LIKE ? OR l.lead_id LIKE ?)';
       const s = `%${search}%`;
@@ -759,6 +763,37 @@ exports.convert = async (req, res) => {
     return res.json({ message: 'Lead converted to client successfully', lead: updated[0] });
   } catch (err) {
     console.error('Lead convert error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/leads/filter-options
+ * Returns distinct values for filter dropdowns (source, industry, status, assigned users)
+ */
+exports.getFilterOptions = async (req, res) => {
+  try {
+    const [sources] = await db.query(
+      "SELECT DISTINCT source FROM leads WHERE deleted = 0 AND source IS NOT NULL AND source != '' ORDER BY source"
+    );
+    const [industries] = await db.query(
+      "SELECT DISTINCT industry FROM leads WHERE deleted = 0 AND industry IS NOT NULL AND industry != '' ORDER BY industry"
+    );
+    const [statuses] = await db.query(
+      "SELECT DISTINCT status FROM leads WHERE deleted = 0 AND status IS NOT NULL ORDER BY status"
+    );
+    const [users] = await db.query(
+      "SELECT id, CONCAT(first_name, ' ', last_name) AS name FROM users WHERE deleted = 0 AND is_active = 1 ORDER BY first_name"
+    );
+
+    return res.json({
+      sources: sources.map(r => r.source),
+      industries: industries.map(r => r.industry),
+      statuses: statuses.map(r => r.status),
+      users: users,
+    });
+  } catch (err) {
+    console.error('Lead filter options error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

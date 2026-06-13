@@ -276,6 +276,58 @@ exports.updateStatus = async (req, res) => {
   }
 };
 
+// ── PATCH /api/onboarding/:afid ──────────────────────────────────────────────
+exports.update = async (req, res) => {
+  try {
+    const { afid } = req.params;
+    const { candidate_name, email } = req.body;
+
+    if (!candidate_name?.trim() && !email?.trim()) {
+      return res.status(400).json({ message: 'At least one field (name or email) is required' });
+    }
+
+    const [rows] = await db.query(
+      `SELECT id FROM pillars_candidate_registration WHERE afid = ? AND deleted = 0`,
+      [afid]
+    );
+    if (!rows.length) return res.status(404).json({ message: 'Candidate not found' });
+
+    // Build dynamic update
+    const fields = [];
+    const params = [];
+
+    if (candidate_name?.trim()) {
+      fields.push('candidate_name = ?');
+      params.push(candidate_name.trim());
+    }
+    if (email?.trim()) {
+      // Check if new email conflicts with another candidate
+      const [dup] = await db.query(
+        `SELECT id FROM pillars_candidate_registration WHERE email = ? AND afid != ? AND deleted = 0`,
+        [email.trim().toLowerCase(), afid]
+      );
+      if (dup.length) {
+        return res.status(409).json({ message: 'Another candidate already uses this email' });
+      }
+      fields.push('email = ?');
+      params.push(email.trim().toLowerCase());
+    }
+
+    fields.push('updated_at = NOW()');
+    params.push(afid);
+
+    await db.query(
+      `UPDATE pillars_candidate_registration SET ${fields.join(', ')} WHERE afid = ?`,
+      params
+    );
+
+    return res.json({ message: 'Candidate updated successfully' });
+  } catch (err) {
+    console.error('onboarding update error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ── POST /api/onboarding/:afid/resend ────────────────────────────────────────
 exports.resend = async (req, res) => {
   try {

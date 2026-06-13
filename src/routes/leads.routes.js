@@ -16,6 +16,9 @@ router.get('/reminders/upcoming', leadsController.getFollowUpReminders);
 // GET  /api/leads/dropdown — lightweight list for dropdowns (id, name, business_name)
 router.get('/dropdown', leadsController.dropdown);
 
+// GET  /api/leads/filter-options — distinct values for filter dropdowns
+router.get('/filter-options', leadsController.getFilterOptions);
+
 // GET  /api/leads          — list leads (filtered by role, paginated, sortable)
 router.get('/', leadsController.list);
 
