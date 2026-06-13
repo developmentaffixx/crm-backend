@@ -70,7 +70,7 @@ async function generateLeadId(connection, customDate) {
  */
 exports.list = async (req, res) => {
   try {
-    const { temperature, source, status, search, industry, assigned_to, date_from, date_to, page = 1, limit = 50, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
+    const { temperature, source, status, search, industry, assigned_to, date_from, date_to, lead_stage, page = 1, limit = 50, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     let where = 'l.deleted = 0';
     const params = [];
 
@@ -78,6 +78,7 @@ exports.list = async (req, res) => {
     if (source)      { where += ' AND l.source = ?';      params.push(source); }
     if (status)      { where += ' AND l.status = ?';      params.push(status); }
     if (industry)    { where += ' AND l.industry = ?';    params.push(industry); }
+    if (lead_stage)  { where += ' AND l.lead_stage = ?';  params.push(lead_stage); }
     if (assigned_to) { where += ' AND l.assigned_to = ?'; params.push(assigned_to); }
     if (date_from)   { where += ' AND DATE(l.created_at) >= ?'; params.push(date_from); }
     if (date_to)     { where += ' AND DATE(l.created_at) <= ?'; params.push(date_to); }
@@ -776,6 +777,7 @@ exports.getFilterOptions = async (req, res) => {
     // Predefined options (always shown regardless of DB data)
     const predefinedStatuses = ['New', 'Contacted', 'Qualified', 'Proposal', 'Negotiation', 'Converted', 'Lost'];
     const predefinedSources = ['Google', 'Facebook', 'Instagram', 'LinkedIn', 'Referral', 'Cold Call', 'Website', 'WhatsApp', 'Event', 'Other'];
+    const predefinedStages = ['Cold', 'Contacted', 'Replied', 'Interested', 'Qualified', 'Meeting Scheduled', 'Proposal Sent', 'Negotiation', 'Won', 'Lost'];
 
     // Get additional values from DB that may not be in predefined lists
     const [dbSources] = await db.query(
@@ -787,6 +789,9 @@ exports.getFilterOptions = async (req, res) => {
     const [industries] = await db.query(
       "SELECT DISTINCT industry FROM leads WHERE deleted = 0 AND industry IS NOT NULL AND industry != '' ORDER BY industry"
     );
+    const [dbStages] = await db.query(
+      "SELECT DISTINCT lead_stage FROM leads WHERE deleted = 0 AND lead_stage IS NOT NULL AND lead_stage != '' ORDER BY lead_stage"
+    );
     const [users] = await db.query(
       "SELECT id, CONCAT(first_name, ' ', last_name) AS name FROM users WHERE deleted = 0 AND is_active = 1 ORDER BY first_name"
     );
@@ -794,11 +799,13 @@ exports.getFilterOptions = async (req, res) => {
     // Merge predefined + any extra from DB
     const allSources = [...new Set([...predefinedSources, ...dbSources.map(r => r.source)])];
     const allStatuses = [...new Set([...predefinedStatuses, ...dbStatuses.map(r => r.status)])];
+    const allStages = [...new Set([...predefinedStages, ...dbStages.map(r => r.lead_stage)])];
 
     return res.json({
       sources: allSources,
       industries: industries.map(r => r.industry),
       statuses: allStatuses,
+      stages: allStages,
       users: users,
     });
   } catch (err) {
