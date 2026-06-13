@@ -773,23 +773,32 @@ exports.convert = async (req, res) => {
  */
 exports.getFilterOptions = async (req, res) => {
   try {
-    const [sources] = await db.query(
+    // Predefined options (always shown regardless of DB data)
+    const predefinedStatuses = ['New', 'Contacted', 'Qualified', 'Proposal', 'Negotiation', 'Won', 'Lost'];
+    const predefinedSources = ['Google', 'Facebook', 'Instagram', 'LinkedIn', 'Referral', 'Cold Call', 'Website', 'WhatsApp', 'Event', 'Other'];
+
+    // Get additional values from DB that may not be in predefined lists
+    const [dbSources] = await db.query(
       "SELECT DISTINCT source FROM leads WHERE deleted = 0 AND source IS NOT NULL AND source != '' ORDER BY source"
+    );
+    const [dbStatuses] = await db.query(
+      "SELECT DISTINCT status FROM leads WHERE deleted = 0 AND status IS NOT NULL ORDER BY status"
     );
     const [industries] = await db.query(
       "SELECT DISTINCT industry FROM leads WHERE deleted = 0 AND industry IS NOT NULL AND industry != '' ORDER BY industry"
-    );
-    const [statuses] = await db.query(
-      "SELECT DISTINCT status FROM leads WHERE deleted = 0 AND status IS NOT NULL ORDER BY status"
     );
     const [users] = await db.query(
       "SELECT id, CONCAT(first_name, ' ', last_name) AS name FROM users WHERE deleted = 0 AND is_active = 1 ORDER BY first_name"
     );
 
+    // Merge predefined + any extra from DB
+    const allSources = [...new Set([...predefinedSources, ...dbSources.map(r => r.source)])];
+    const allStatuses = [...new Set([...predefinedStatuses, ...dbStatuses.map(r => r.status)])];
+
     return res.json({
-      sources: sources.map(r => r.source),
+      sources: allSources,
       industries: industries.map(r => r.industry),
-      statuses: statuses.map(r => r.status),
+      statuses: allStatuses,
       users: users,
     });
   } catch (err) {
