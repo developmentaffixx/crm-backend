@@ -50,6 +50,7 @@ const proposalsRoutes          = require('./src/routes/proposals.routes');
 const proposalPlansRoutes      = require('./src/routes/proposalPlans.routes');
 const serviceCyclesRoutes      = require('./src/routes/serviceCycles.routes');
 const withdrawalsRoutes        = require('./src/routes/withdrawals.routes');
+const salesPlanRoutes          = require('./src/routes/salesPlan.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -130,6 +131,7 @@ app.use('/api/proposals',             proposalsRoutes);
 app.use('/api/proposal-plans',        proposalPlansRoutes);
 app.use('/api/projects',              serviceCyclesRoutes);
 app.use('/api/withdrawals',           withdrawalsRoutes);
+app.use('/api/sales-plan',            salesPlanRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
 const { authenticate: authMiddleware } = require('./src/middleware/auth');

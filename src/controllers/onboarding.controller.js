@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const bcrypt = require('bcryptjs');
 const { sendRawEmail } = require('../services/email.service');
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -11,11 +12,11 @@ async function generateAfid() {
   const [rows] = await db.query(
     `SELECT afid FROM pillars_candidate_registration ORDER BY id DESC LIMIT 1`
   );
-  if (!rows.length) return 'AFID-0001';
+  if (!rows.length) return 'AFID0001';
 
-  const last = rows[0].afid; // e.g. "AFID-0042"
-  const num  = parseInt(last.replace('AFID-', ''), 10) || 0;
-  return `AFID-${String(num + 1).padStart(4, '0')}`;
+  const last = rows[0].afid; // e.g. "AFID0042"
+  const num  = parseInt(last.replace('AFID-', '').replace('AFID', ''), 10) || 0;
+  return `AFID${String(num + 1).padStart(4, '0')}`;
 }
 
 /**
@@ -86,9 +87,36 @@ async function sendInvitationEmail(toEmail, candidateName, afid, password) {
 // ── GET /api/onboarding ───────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
-    const { search, status } = req.query;
+    const { search, status, page = 1, limit = 20 } = req.query;
+    const pageNum  = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const offset   = (pageNum - 1) * limitNum;
 
-    let sql = `
+    let whereClause = ` WHERE r.deleted = 0 `;
+    const params = [];
+
+    if (search) {
+      whereClause += ` AND (r.candidate_name LIKE ? OR r.email LIKE ? OR r.afid LIKE ?)`;
+      const s = `%${search}%`;
+      params.push(s, s, s);
+    }
+    if (status) {
+      whereClause += ` AND COALESCE(d.onboarding_status, 'pending') = ?`;
+      params.push(status);
+    }
+
+    // Count query
+    const countSql = `
+      SELECT COUNT(*) AS total
+      FROM pillars_candidate_registration r
+      LEFT JOIN pillars_candidate_details d ON d.afid = r.afid AND d.deleted = 0
+      ${whereClause}
+    `;
+    const [countRows] = await db.query(countSql, params);
+    const total = countRows[0].total;
+
+    // Data query with pagination
+    const dataSql = `
       SELECT
         r.id,
         r.afid,
@@ -100,24 +128,19 @@ exports.list = async (req, res) => {
         d.submitted_at
       FROM pillars_candidate_registration r
       LEFT JOIN pillars_candidate_details d ON d.afid = r.afid AND d.deleted = 0
-      WHERE r.deleted = 0
+      ${whereClause}
+      ORDER BY r.created_at DESC
+      LIMIT ? OFFSET ?
     `;
-    const params = [];
+    const [rows] = await db.query(dataSql, [...params, limitNum, offset]);
 
-    if (search) {
-      sql += ` AND (r.candidate_name LIKE ? OR r.email LIKE ? OR r.afid LIKE ?)`;
-      const s = `%${search}%`;
-      params.push(s, s, s);
-    }
-    if (status) {
-      sql += ` AND COALESCE(d.onboarding_status, 'pending') = ?`;
-      params.push(status);
-    }
-
-    sql += ` ORDER BY r.created_at DESC`;
-
-    const [rows] = await db.query(sql, params);
-    return res.json({ candidates: rows, total: rows.length });
+    return res.json({
+      candidates: rows,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
+    });
   } catch (err) {
     console.error('onboarding list error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -144,13 +167,14 @@ exports.create = async (req, res) => {
 
     const afid     = await generateAfid();
     const password = generatePassword();
+    const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Insert candidate registration
+    // Insert candidate registration (store hashed password)
     await db.query(
       `INSERT INTO pillars_candidate_registration
          (afid, candidate_name, email, password, created_at)
        VALUES (?, ?, ?, ?, NOW())`,
-      [afid, candidate_name.trim(), email.trim().toLowerCase(), password]
+      [afid, candidate_name.trim(), email.trim().toLowerCase(), hashedPassword]
     );
 
     // Send invitation email (non-blocking — don't fail if email fails)
@@ -258,21 +282,29 @@ exports.resend = async (req, res) => {
     const { afid } = req.params;
 
     const [rows] = await db.query(
-      `SELECT candidate_name, email, password FROM pillars_candidate_registration
+      `SELECT candidate_name, email FROM pillars_candidate_registration
        WHERE afid = ? AND deleted = 0`,
       [afid]
     );
     if (!rows.length) return res.status(404).json({ message: 'Candidate not found' });
 
-    const { candidate_name, email, password } = rows[0];
+    const { candidate_name, email } = rows[0];
+
+    // Generate a new password, hash it, and update the record
+    const newPassword = generatePassword();
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await db.query(
+      `UPDATE pillars_candidate_registration SET password = ? WHERE afid = ?`,
+      [hashedPassword, afid]
+    );
 
     try {
-      await sendInvitationEmail(email, candidate_name, afid, password);
+      await sendInvitationEmail(email, candidate_name, afid, newPassword);
     } catch (emailErr) {
       return res.status(500).json({ message: 'Failed to send email: ' + emailErr.message });
     }
 
-    return res.json({ message: 'Invitation resent successfully' });
+    return res.json({ message: 'Invitation resent with a new password' });
   } catch (err) {
     console.error('onboarding resend error:', err);
     return res.status(500).json({ message: 'Server error' });
