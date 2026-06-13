@@ -43,6 +43,7 @@ async function updateSection(req, res) {
       'industry_focus_day',
       'industry_daywise_split',
       'weekly_industry_target',
+      'weekly_kpi_target',
     ];
 
     if (!validSections.includes(section)) {
