@@ -774,7 +774,7 @@ exports.convert = async (req, res) => {
 exports.getFilterOptions = async (req, res) => {
   try {
     // Predefined options (always shown regardless of DB data)
-    const predefinedStatuses = ['New', 'Contacted', 'Qualified', 'Proposal', 'Negotiation', 'Won', 'Lost'];
+    const predefinedStatuses = ['New', 'Contacted', 'Qualified', 'Proposal', 'Negotiation', 'Converted', 'Lost'];
     const predefinedSources = ['Google', 'Facebook', 'Instagram', 'LinkedIn', 'Referral', 'Cold Call', 'Website', 'WhatsApp', 'Event', 'Other'];
 
     // Get additional values from DB that may not be in predefined lists
