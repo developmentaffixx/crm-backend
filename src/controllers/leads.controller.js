@@ -391,7 +391,8 @@ exports.update = async (req, res) => {
     // Update social links (replace all)
     if (req.body.social_links !== undefined) {
       await db.query('DELETE FROM lead_social_links WHERE lead_id = ?', [req.params.id]);
-      const links = req.body.social_links.filter(sl => sl.platform && sl.url);
+      const linksArr = Array.isArray(req.body.social_links) ? req.body.social_links : [];
+      const links = linksArr.filter(sl => sl.platform && sl.url);
       if (links.length > 0) {
         const linkValues = links.map(sl => [req.params.id, sl.platform, sl.url]);
         await db.query('INSERT INTO lead_social_links (lead_id, platform, url) VALUES ?', [linkValues]);
