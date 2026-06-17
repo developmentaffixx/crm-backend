@@ -227,7 +227,7 @@ exports.create = async (req, res) => {
     purpose_of_services, phone, email, address, country, state, city, zip_code,
     temperature, source, status, current_marketing_status, assigned_to, social_links,
     resource, initial_followup, created_at,
-    lead_stage, lead_score, expected_revenue, next_action, interested_services
+    lead_stage, lead_score, expected_revenue, next_action, interested_services, brand_year
   } = req.body;
 
   try {
@@ -235,14 +235,14 @@ exports.create = async (req, res) => {
     const lead_id = await generateLeadId(null, created_at || null);
 
     const [result] = await db.query(
-      `INSERT INTO leads (lead_id, name, business_name, industry, service_required, budget_min, budget_max, no_budget_idea,
+      `INSERT INTO leads (lead_id, name, business_name, brand_year, industry, service_required, budget_min, budget_max, no_budget_idea,
         purpose_of_services, phone, email, address, country, state, city, zip_code,
         temperature, source, resource, status, current_marketing_status, assigned_to, created_by, created_at,
         lead_stage, lead_score, expected_revenue, next_action, interested_services)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         lead_id,
-        name, business_name || null, industry || null, service_required || null,
+        name, business_name || null, brand_year || null, industry || null, service_required || null,
         no_budget_idea ? null : (budget_min || null),
         no_budget_idea ? null : (budget_max || null),
         no_budget_idea ? 1 : 0,
@@ -309,7 +309,7 @@ exports.update = async (req, res) => {
     }
 
     const allowed = [
-      'name', 'business_name', 'industry', 'service_required', 'budget_min', 'budget_max', 'no_budget_idea',
+      'name', 'business_name', 'brand_year', 'industry', 'service_required', 'budget_min', 'budget_max', 'no_budget_idea',
       'purpose_of_services', 'phone', 'email', 'address', 'country', 'state', 'city', 'zip_code',
       'temperature', 'source', 'resource', 'status', 'current_marketing_status', 'assigned_to',
       'lead_stage', 'lead_score', 'expected_revenue', 'next_action', 'interested_services'

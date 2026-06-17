@@ -355,17 +355,27 @@ exports.getStats = async (req, res) => {
   try {
     const [rows] = await db.query(`
       SELECT
-        COUNT(*) AS total,
-        SUM(status = 'new') AS new_count,
-        SUM(status = 'shortlisted') AS shortlisted_count,
-        SUM(status = 'in_process') AS in_process_count,
-        SUM(status = 'selected') AS selected_count,
-        SUM(status = 'rejected') AS rejected_count,
-        SUM(status = 'on_hold') AS on_hold_count
+        CAST(COUNT(*) AS UNSIGNED) AS total,
+        CAST(SUM(status = 'new') AS UNSIGNED) AS new_count,
+        CAST(SUM(status = 'shortlisted') AS UNSIGNED) AS shortlisted_count,
+        CAST(SUM(status = 'in_process') AS UNSIGNED) AS in_process_count,
+        CAST(SUM(status = 'selected') AS UNSIGNED) AS selected_count,
+        CAST(SUM(status = 'rejected') AS UNSIGNED) AS rejected_count,
+        CAST(SUM(status = 'on_hold') AS UNSIGNED) AS on_hold_count
       FROM interview_candidates
       WHERE deleted = 0
     `);
-    return res.json(rows[0]);
+    const stats = rows[0];
+    // Ensure all counts are numbers (MySQL driver may return strings)
+    return res.json({
+      total: Number(stats.total || 0),
+      new_count: Number(stats.new_count || 0),
+      shortlisted_count: Number(stats.shortlisted_count || 0),
+      in_process_count: Number(stats.in_process_count || 0),
+      selected_count: Number(stats.selected_count || 0),
+      rejected_count: Number(stats.rejected_count || 0),
+      on_hold_count: Number(stats.on_hold_count || 0),
+    });
   } catch (err) {
     console.error('interview getStats error:', err);
     return res.status(500).json({ message: 'Server error' });
