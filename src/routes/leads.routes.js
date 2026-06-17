@@ -5,6 +5,7 @@ const { authenticate } = require('../middleware/auth');
 const leadsController = require('../controllers/leads.controller');
 const leadSummaryController = require('../controllers/leadSummary.controller');
 const leadSwotController = require('../controllers/leadSwot.controller');
+const leadSwotNotesController = require('../controllers/leadSwotNotes.controller');
 const googleSheetSyncController = require('../controllers/googleSheetSync.controller');
 
 // All lead routes require authentication
@@ -80,6 +81,13 @@ router.put(
 router.post('/:id/summary', param('id').isInt(), leadSummaryController.generateSummary);
 
 // ── SWOT (Talk) ───────────────────────────────────────────────────────────────
+
+// ── SWOT Notes (single paragraph) — must be before /:id/swot/:pointId ─────────
+// GET  /api/leads/:id/swot/notes — get notes paragraph
+router.get('/:id/swot/notes', param('id').isInt(), leadSwotNotesController.getNotes);
+
+// PUT  /api/leads/:id/swot/notes — save/update notes paragraph
+router.put('/:id/swot/notes', [param('id').isInt()], leadSwotNotesController.saveNotes);
 
 // GET  /api/leads/:id/swot — get all SWOT points
 router.get('/:id/swot', param('id').isInt(), leadSwotController.getSwot);
