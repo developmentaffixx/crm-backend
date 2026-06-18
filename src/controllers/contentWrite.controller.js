@@ -28,10 +28,14 @@ exports.list = async (req, res) => {
     const [rows] = await db.query(
       `SELECT cwr.*,
               l.business_name AS client_brand_name,
+              p.title AS project_title,
+              s.name AS service_name,
               CONCAT(u_creator.first_name, ' ', u_creator.last_name) AS created_by_name,
               CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
+       LEFT JOIN projects p ON p.id = cwr.project_id
+       LEFT JOIN services s ON s.id = cwr.service_id
        LEFT JOIN users u_creator ON u_creator.id = cwr.created_by
        LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
        WHERE ${where}
@@ -65,10 +69,14 @@ exports.getOne = async (req, res) => {
     const [rows] = await db.query(
       `SELECT cwr.*,
               l.business_name AS client_brand_name,
+              p.title AS project_title,
+              s.name AS service_name,
               CONCAT(u_creator.first_name, ' ', u_creator.last_name) AS created_by_name,
               CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
+       LEFT JOIN projects p ON p.id = cwr.project_id
+       LEFT JOIN services s ON s.id = cwr.service_id
        LEFT JOIN users u_creator ON u_creator.id = cwr.created_by
        LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
        WHERE cwr.id = ? AND cwr.deleted = 0`,
@@ -99,19 +107,28 @@ exports.create = async (req, res) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const {
-    client_brand_id, service_type, platform, content_type, deadline,
-    hook_opening_line, core_message, call_to_action, hashtags,
-    reference_links, visual_style_notes, brand_assets_link, special_instructions
+    client_brand_id, project_id, service_id, platform, content_type,
+    hook_opening_line, core_message, call_to_action,
+    caption_content, creative_suggestion, reference_links
   } = req.body;
 
   const toNull = (val) => (val === '' || val === undefined || val === null) ? null : val;
   const toInt = (val) => { const n = parseInt(val); return isNaN(n) ? null : n; };
 
   try {
+    // Get client_brand_id from project if project_id is provided
+    let resolvedClientBrandId = toInt(client_brand_id);
+    if (toInt(project_id)) {
+      const [projRows] = await db.query('SELECT client_id FROM projects WHERE id = ?', [toInt(project_id)]);
+      if (projRows.length > 0 && projRows[0].client_id) {
+        resolvedClientBrandId = projRows[0].client_id;
+      }
+    }
+
     // Generate content_id_code: CNT-CLIENT-###
     let clientCode = 'GEN';
-    if (toInt(client_brand_id)) {
-      const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [toInt(client_brand_id)]);
+    if (resolvedClientBrandId) {
+      const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [resolvedClientBrandId]);
       if (clientRows.length > 0 && clientRows[0].client_code) {
         clientCode = clientRows[0].client_code;
       }
@@ -129,24 +146,25 @@ exports.create = async (req, res) => {
 
     const [result] = await db.query(
       `INSERT INTO content_write_requests 
-        (content_id_code, client_brand_id, service_type, platform, content_type, deadline,
-         hook_opening_line, core_message, call_to_action, hashtags,
-         reference_links, visual_style_notes, brand_assets_link, special_instructions,
+        (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
+         hook_opening_line, core_message, call_to_action,
+         caption_content, creative_suggestion, reference_links,
          status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       [
         content_id_code,
-        toInt(client_brand_id), service_type, platform, content_type, deadline,
-        toNull(hook_opening_line), toNull(core_message), toNull(call_to_action), toNull(hashtags),
-        toNull(reference_links), toNull(visual_style_notes), toNull(brand_assets_link), toNull(special_instructions),
+        resolvedClientBrandId, toInt(project_id), toInt(service_id), platform, content_type,
+        toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
+        toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
         req.user.id
       ]
     );
 
     const [rows] = await db.query(
-      `SELECT cwr.*, l.business_name AS client_brand_name
+      `SELECT cwr.*, l.business_name AS client_brand_name, p.title AS project_title
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
+       LEFT JOIN projects p ON p.id = cwr.project_id
        WHERE cwr.id = ?`,
       [result.insertId]
     );
@@ -180,9 +198,9 @@ exports.update = async (req, res) => {
     }
 
     const allowed = [
-      'client_brand_id', 'service_type', 'platform', 'content_type', 'deadline',
-      'hook_opening_line', 'core_message', 'call_to_action', 'hashtags',
-      'reference_links', 'visual_style_notes', 'brand_assets_link', 'special_instructions'
+      'project_id', 'service_id', 'platform', 'content_type',
+      'hook_opening_line', 'core_message', 'call_to_action',
+      'caption_content', 'creative_suggestion', 'reference_links'
     ];
 
     const updates = {};
@@ -202,9 +220,10 @@ exports.update = async (req, res) => {
     await db.query(`UPDATE content_write_requests SET ${setClauses} WHERE id = ?`, values);
 
     const [updated] = await db.query(
-      `SELECT cwr.*, l.business_name AS client_brand_name
+      `SELECT cwr.*, l.business_name AS client_brand_name, p.title AS project_title
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
+       LEFT JOIN projects p ON p.id = cwr.project_id
        WHERE cwr.id = ?`,
       [req.params.id]
     );

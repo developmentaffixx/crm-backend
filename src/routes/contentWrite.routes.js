@@ -17,10 +17,9 @@ router.get('/:id', param('id').isInt(), contentWriteController.getOne);
 router.post(
   '/',
   [
-    body('service_type').notEmpty().withMessage('Service type is required'),
+    body('project_id').notEmpty().withMessage('Project is required'),
     body('platform').notEmpty().withMessage('Platform is required'),
     body('content_type').notEmpty().withMessage('Content type is required'),
-    body('deadline').notEmpty().withMessage('Deadline is required'),
   ],
   contentWriteController.create
 );
