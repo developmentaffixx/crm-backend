@@ -17,8 +17,10 @@ exports.clockIn = async (req, res) => {
     const [settings] = await db.query('SELECT * FROM attendance_settings WHERE id = 1');
     const { shift_start_time, grace_period_minutes } = settings[0];
 
-    const [timeResult] = await db.query('SELECT CURTIME() AS now_time');
-    const nowTime = timeResult[0].now_time;
+    // Use IST (UTC+5:30) for clock-in status comparison
+    // MySQL CURTIME() returns UTC which causes wrong status — use Node.js time instead
+    const nowIST = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const nowTime = `${String(nowIST.getUTCHours()).padStart(2, '0')}:${String(nowIST.getUTCMinutes()).padStart(2, '0')}:${String(nowIST.getUTCSeconds()).padStart(2, '0')}`;
 
     const toSeconds = (t) => {
       const parts = t.split(':');
