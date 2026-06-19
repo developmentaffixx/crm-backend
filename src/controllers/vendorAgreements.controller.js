@@ -231,7 +231,7 @@ exports.updateTemplate = async (req, res) => {
 // ─── GENERATE PDF from agreement data ─────────────────────────────────────────
 exports.generate = async (req, res) => {
   try {
-    const puppeteer = require('puppeteer');
+    const PDFDocument = require('pdfkit');
     const path = require('path');
     const fs = require('fs');
 
@@ -262,21 +262,6 @@ exports.generate = async (req, res) => {
     const companyName = company.company_name || '';
     const companyAddress = [company.address_line1, company.address_line2, company.city, company.state].filter(Boolean).join(', ');
 
-    // Convert letterhead to base64 data URI
-    const fileToDataUri = (filePath) => {
-      try {
-        const absPath = path.join(__dirname, '../../', filePath);
-        if (!fs.existsSync(absPath)) return '';
-        const buffer = fs.readFileSync(absPath);
-        const ext = path.extname(filePath).toLowerCase();
-        const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.webp': 'image/webp' };
-        const mime = mimeMap[ext] || 'image/png';
-        return `data:${mime};base64,${buffer.toString('base64')}`;
-      } catch { return ''; }
-    };
-
-    const letterheadUrl = company.letterhead_url ? fileToDataUri(company.letterhead_url) : '';
-
     // Format dates
     const fmtDate = (d) => {
       if (!d) return '';
@@ -286,7 +271,7 @@ exports.generate = async (req, res) => {
 
     const today = fmtDate(new Date());
 
-    // Parse services (supports [{name, fee}] and ["name"] formats)
+    // Parse services
     let services = [];
     if (agreement.services) {
       try {
@@ -315,14 +300,14 @@ exports.generate = async (req, res) => {
       '{{today}}': today,
     };
 
-    const applyReplacements = (html) => {
+    const applyReplacements = (text) => {
       for (const [key, value] of Object.entries(replacements)) {
-        html = html.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), value);
+        text = text.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), value);
       }
-      return html;
+      return text;
     };
 
-    // 1. Fetch and render the master template
+    // Fetch master template
     let masterTemplates = [];
     try {
       [masterTemplates] = await db.query(
@@ -334,12 +319,114 @@ exports.generate = async (req, res) => {
       return res.status(500).json({ message: 'Agreement templates not found. Please run the database migration.' });
     }
 
-    let combinedHtml = '';
-    if (masterTemplates.length) {
-      combinedHtml += applyReplacements(masterTemplates[0].content);
+    // ─── Build PDF with PDFKit ────────────────────────────────────────────────
+    const doc = new PDFDocument({ size: 'A4', margins: { top: 60, bottom: 60, left: 50, right: 50 } });
+
+    // Collect PDF into buffer
+    const chunks = [];
+    doc.on('data', chunk => chunks.push(chunk));
+
+    const pdfReady = new Promise((resolve, reject) => {
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+    });
+
+    // Add letterhead background if available
+    if (company.letterhead_url) {
+      try {
+        const letterheadPath = path.join(__dirname, '../../', company.letterhead_url);
+        if (fs.existsSync(letterheadPath)) {
+          doc.image(letterheadPath, 0, 0, { width: 595.28, height: 841.89 });
+          doc.y = 120; // Move content below letterhead header area
+        }
+      } catch {}
     }
 
-    // 2. Fetch and render each selected service template
+    // Helper functions for PDF content
+    const addTitle = (text) => {
+      doc.fontSize(16).font('Helvetica-Bold').text(text, { align: 'center' });
+      doc.moveDown(0.5);
+    };
+
+    const addSubtitle = (text) => {
+      doc.fontSize(10).font('Helvetica').fillColor('#555555').text(text, { align: 'center' });
+      doc.fillColor('#000000');
+      doc.moveDown(1);
+    };
+
+    const addHeading = (text) => {
+      doc.moveDown(0.5);
+      doc.fontSize(11).font('Helvetica-Bold').text(text);
+      doc.moveDown(0.3);
+    };
+
+    const addParagraph = (text) => {
+      doc.fontSize(10).font('Helvetica').text(text, { align: 'justify', lineGap: 3 });
+      doc.moveDown(0.3);
+    };
+
+    const addLabelValue = (label, value) => {
+      doc.fontSize(10).font('Helvetica-Bold').text(label, { continued: true });
+      doc.font('Helvetica').text(` ${value}`);
+    };
+
+    const addDivider = () => {
+      doc.moveDown(0.5);
+      doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#dddddd').stroke();
+      doc.moveDown(0.5);
+    };
+
+    const checkNewPage = () => {
+      if (doc.y > 720) doc.addPage();
+    };
+
+    // ─── Master Agreement Content ─────────────────────────────────────────────
+    addTitle('VENDOR SERVICE AGREEMENT');
+    addSubtitle('MASTER AGREEMENT');
+
+    addParagraph(`This Vendor Service Agreement ("Agreement") is entered into on ${fmtDate(agreement.start_date)} between:`);
+    doc.moveDown(0.3);
+
+    addLabelValue('Service Provider:', companyName);
+    addLabelValue('Address:', companyAddress);
+    doc.moveDown(0.3);
+    addLabelValue('Client:', agreement.client_name || '');
+    addLabelValue('Brand:', agreement.client_brand || '');
+
+    checkNewPage();
+    addHeading('1. Scope of Services');
+    addParagraph(`The Service Provider agrees to provide the following services: ${serviceNames}`);
+
+    checkNewPage();
+    addHeading('2. Term');
+    addParagraph(`This Agreement shall commence on ${fmtDate(agreement.start_date)} and shall continue until ${fmtDate(agreement.end_date)}, unless terminated earlier in accordance with the terms herein.`);
+
+    checkNewPage();
+    addHeading('3. Fees & Payment');
+    addLabelValue('Total Fee:', `INR ${replacements['{{total_fee}}']}`);
+    addLabelValue('Payment Terms:', replacements['{{payment_terms}}']);
+    addLabelValue('Advance Payment:', `INR ${replacements['{{advance_payment}}']}`);
+    addLabelValue('AMC (Annual Maintenance Charge):', `INR ${replacements['{{amc_amount}}']}`);
+
+    checkNewPage();
+    addHeading('4. Confidentiality');
+    addParagraph('Both parties agree to maintain confidentiality of all proprietary information shared during the course of this agreement.');
+
+    checkNewPage();
+    addHeading('5. Termination');
+    addParagraph('Either party may terminate this Agreement by providing 30 days written notice. In case of breach, the non-breaching party may terminate immediately.');
+
+    addDivider();
+
+    addLabelValue(`For ${companyName}`, '');
+    addParagraph('Authorized Signatory: _____________________');
+    addParagraph(`Date: ${today}`);
+    doc.moveDown(0.5);
+    addLabelValue(`For ${agreement.client_name || ''}`, '');
+    addParagraph('Authorized Signatory: _____________________');
+    addParagraph(`Date: ${today}`);
+
+    // ─── Service-specific pages ───────────────────────────────────────────────
     const SERVICE_KEY_MAP = {
       'Social Media Marketing': 'social_media_marketing',
       'Performance Marketing': 'performance_marketing',
@@ -349,109 +436,108 @@ exports.generate = async (req, res) => {
       'Website Development': 'website_development',
     };
 
-    for (const svc of services) {
-      const tplKey = SERVICE_KEY_MAP[svc.name];
-      if (!tplKey) continue;
-
-      const [svcTemplates] = await db.query(
-        'SELECT * FROM vendor_agreement_templates WHERE template_key = ?',
-        [tplKey]
-      );
-      if (svcTemplates.length) {
-        combinedHtml += '<div style="page-break-before: always;"></div>';
-        combinedHtml += '<div class="page-section">';
-        let svcHtml = applyReplacements(svcTemplates[0].content);
-        if (svc.fee) {
-          svcHtml = svcHtml.replace(/\{\{service_fee\}\}/g, Number(svc.fee).toLocaleString('en-IN'));
-        }
-        combinedHtml += svcHtml;
-        combinedHtml += '</div>';
-      }
-    }
-
-    if (!combinedHtml) {
-      return res.status(400).json({ message: 'No template content found. Please ensure agreement templates are configured.' });
-    }
-
-    // Build full HTML with letterhead background
-    const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  @page { margin: 0; }
-  body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 0; }
-  .letterhead-bg {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 210mm;
-    height: 297mm;
-    z-index: -1;
-  }
-  .letterhead-bg img { width: 100%; height: 100%; }
-  .content-wrapper { padding: 42mm 20mm 28mm 20mm; font-size: 12px; line-height: 1.7; color: #222; }
-  .page-section { padding-top: 32mm; }
-  h1 { font-size: 18px; font-weight: 700; text-align: center; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 1px; }
-  h2 { font-size: 13px; font-weight: 700; margin: 18px 0 8px; }
-  p { margin-bottom: 8px; text-align: justify; }
-  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 11px; }
-  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
-  th { background: #f5f5f5; font-weight: 600; }
-  hr { border: none; border-top: 1px solid #ddd; margin: 20px 0; }
-  ul, ol { padding-left: 20px; margin-bottom: 10px; }
-  li { margin-bottom: 4px; }
-</style></head><body>
-${letterheadUrl ? `<div class="letterhead-bg"><img src="${letterheadUrl}" /></div>` : ''}
-<div class="content-wrapper">
-  ${combinedHtml}
-</div>
-</body></html>`;
-
-    // Generate PDF with Puppeteer
-    const launchOptions = {
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--font-render-hinting=none'],
+    const SERVICE_DELIVERABLES = {
+      'Social Media Marketing': [
+        'Social media strategy development',
+        'Content creation and scheduling',
+        'Community management',
+        'Monthly analytics and reporting',
+        'Platform management (Instagram, Facebook, LinkedIn, Twitter)',
+      ],
+      'Performance Marketing': [
+        'Google Ads campaign management',
+        'Meta (Facebook/Instagram) Ads',
+        'Campaign strategy and optimization',
+        'A/B testing and conversion tracking',
+        'Monthly performance reports with ROI analysis',
+      ],
+      'SEO': [
+        'Technical SEO audit and fixes',
+        'On-page optimization',
+        'Off-page SEO and link building',
+        'Keyword research and strategy',
+        'Monthly ranking and traffic reports',
+      ],
+      'Personal Branding': [
+        'Personal brand strategy development',
+        'LinkedIn profile optimization and content',
+        'Thought leadership content creation',
+        'Public speaking and media coaching',
+        'Online reputation management',
+      ],
+      'Influencer Marketing': [
+        'Influencer identification and outreach',
+        'Campaign planning and execution',
+        'Content collaboration management',
+        'Performance tracking and reporting',
+        'Contract negotiation with influencers',
+      ],
+      'Website Development': [
+        'UI/UX design and prototyping',
+        'Frontend and backend development',
+        'Responsive design implementation',
+        'CMS integration',
+        'Testing, deployment, and handover',
+      ],
     };
 
-    // On Linux servers, check for system Chrome/Chromium if bundled one is missing
-    if (process.platform === 'linux') {
-      const possiblePaths = [
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium',
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-        '/snap/bin/chromium',
-      ];
-      let bundledPath = '';
-      try { bundledPath = await puppeteer.executablePath(); } catch {}
-      if (!bundledPath || !fs.existsSync(bundledPath)) {
-        const systemChrome = possiblePaths.find(p => fs.existsSync(p));
-        if (systemChrome) {
-          launchOptions.executablePath = systemChrome;
-        } else {
-          console.error('No Chrome/Chromium binary found. Bundled:', bundledPath);
-          return res.status(500).json({ message: 'PDF generation unavailable: Chrome not found on server. Run: sudo apt install chromium-browser' });
-        }
+    for (const svc of services) {
+      if (!SERVICE_KEY_MAP[svc.name]) continue;
+
+      doc.addPage();
+      addTitle(`${svc.name.toUpperCase()} SERVICE AGREEMENT`);
+
+      addParagraph(`This Agreement is entered into on ${fmtDate(agreement.start_date)} between:`);
+      doc.moveDown(0.3);
+      addLabelValue('Service Provider:', companyName);
+      addLabelValue('Client:', `${agreement.client_name || ''} (${agreement.client_brand || ''})`);
+
+      addHeading('1. Scope of Services');
+      addParagraph(`The Service Provider shall provide ${svc.name} services including:`);
+
+      const deliverables = SERVICE_DELIVERABLES[svc.name] || [];
+      deliverables.forEach(item => {
+        doc.fontSize(10).font('Helvetica').text(`  •  ${item}`, { indent: 10 });
+      });
+      doc.moveDown(0.5);
+
+      addHeading('2. Term');
+      addParagraph(`From ${fmtDate(agreement.start_date)} to ${fmtDate(agreement.end_date)}`);
+
+      addHeading('3. Fees');
+      addLabelValue('Total Fee:', `INR ${replacements['{{total_fee}}']}`);
+      addLabelValue('Payment Terms:', replacements['{{payment_terms}}']);
+      addLabelValue('Advance:', `INR ${replacements['{{advance_payment}}']}`);
+      addLabelValue('AMC:', `INR ${replacements['{{amc_amount}}']}`);
+
+      if (svc.name === 'Performance Marketing') {
+        doc.moveDown(0.3);
+        doc.fontSize(9).font('Helvetica-Oblique').text('Note: Ad spend budget is separate from service fees.');
+        doc.font('Helvetica');
       }
+      if (svc.name === 'Influencer Marketing') {
+        doc.moveDown(0.3);
+        doc.fontSize(9).font('Helvetica-Oblique').text('Note: Influencer fees/collaborations are billed separately.');
+        doc.font('Helvetica');
+      }
+      if (svc.name === 'Website Development') {
+        addHeading('4. Deliverables');
+        addParagraph('Complete website with source code, documentation, and 30-day post-launch support.');
+      }
+
+      addDivider();
+      addLabelValue(`For ${companyName}`, '');
+      addParagraph('Signature: _____________________');
+      addParagraph(`Date: ${today}`);
+      doc.moveDown(0.5);
+      addLabelValue(`For ${agreement.client_name || ''}`, '');
+      addParagraph('Signature: _____________________');
+      addParagraph(`Date: ${today}`);
     }
 
-    let browser;
-    try {
-      browser = await puppeteer.launch(launchOptions);
-    } catch (launchErr) {
-      console.error('Puppeteer launch failed:', launchErr.message);
-      return res.status(500).json({ message: 'PDF engine failed to start: ' + launchErr.message });
-    }
-
-    const page = await browser.newPage();
-    await page.setContent(fullHtml, { waitUntil: 'domcontentloaded' });
-
-    const pdfBuffer = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: { top: '0', right: '0', bottom: '0', left: '0' },
-    });
-
-    await browser.close();
+    // Finalize PDF
+    doc.end();
+    const pdfBuffer = await pdfReady;
 
     // Save PDF to uploads folder
     const tempDir = path.join(__dirname, '../../uploads/documents');
