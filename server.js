@@ -164,7 +164,11 @@ app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
 // ── Global error handler ──────────────────────────────────────────────────────
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);
-  res.status(500).json({ message: 'Internal server error' });
+  if (process.env.NODE_ENV !== 'production') {
+    res.status(500).json({ message: err.message, stack: err.stack });
+  } else {
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 server.listen(PORT, () => {

@@ -24,7 +24,7 @@ exports.dropdown = async (req, res) => {
     return res.json({ leads: rows });
   } catch (err) {
     console.error('Leads dropdown error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -153,7 +153,7 @@ exports.list = async (req, res) => {
     });
   } catch (err) {
     console.error('Leads list error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -211,7 +211,7 @@ exports.getOne = async (req, res) => {
     return res.json(lead);
   } catch (err) {
     console.error('Lead getOne error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -291,7 +291,7 @@ exports.create = async (req, res) => {
     return res.status(201).json(rows[0]);
   } catch (err) {
     console.error('Lead create error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -372,7 +372,7 @@ exports.update = async (req, res) => {
     return res.json(updated[0]);
   } catch (err) {
     console.error('Lead update error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -420,7 +420,7 @@ exports.updateStatus = async (req, res) => {
     return res.json(updated[0]);
   } catch (err) {
     console.error('Lead updateStatus error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -442,7 +442,7 @@ exports.remove = async (req, res) => {
     return res.json({ message: 'Lead deleted' });
   } catch (err) {
     console.error('Lead delete error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -552,7 +552,7 @@ exports.addFollowUp = async (req, res) => {
     return res.status(201).json(followUp[0]);
   } catch (err) {
     console.error('Follow-up create error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -601,7 +601,7 @@ exports.updateFollowUp = async (req, res) => {
     return res.json(updated[0]);
   } catch (err) {
     console.error('Follow-up update error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -621,7 +621,7 @@ exports.getFollowUps = async (req, res) => {
     return res.json(followUps);
   } catch (err) {
     console.error('Follow-ups list error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -660,7 +660,7 @@ exports.getFollowUpReminders = async (req, res) => {
     return res.json({ reminders, count: reminders.length });
   } catch (err) {
     console.error('Follow-up reminders error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -695,7 +695,7 @@ exports.getFollowUpCustomOptions = async (req, res) => {
     return res.json({ customTypes, customOutcomes });
   } catch (err) {
     console.error('Custom options error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -733,7 +733,7 @@ exports.convert = async (req, res) => {
     return res.json({ message: 'Lead converted to client successfully', lead: updated[0] });
   } catch (err) {
     console.error('Lead convert error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -779,6 +779,6 @@ exports.getFilterOptions = async (req, res) => {
     });
   } catch (err) {
     console.error('Lead filter options error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
