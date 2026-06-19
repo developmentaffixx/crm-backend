@@ -304,8 +304,9 @@ exports.update = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Lead not found' });
 
     const lead = rows[0];
-    if (!req.user.is_admin && lead.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Only the creator or admin can edit this lead' });
+    // Fix 3: Allow admin, creator, or assigned person to edit
+    if (!req.user.is_admin && lead.created_by !== req.user.id && lead.assigned_to !== req.user.id) {
+      return res.status(403).json({ message: 'Only the creator, assigned person, or admin can edit this lead' });
     }
 
     const allowed = [
@@ -327,45 +328,11 @@ exports.update = async (req, res) => {
       }
     });
 
-    // Handle created_at change — regenerate lead_id based on new date
-    if (req.body.created_at) {
-      const newDate = new Date(req.body.created_at);
-      const existingDate = new Date(lead.created_at);
-      // Only regenerate lead_id if the date actually changed (different month or day)
-      if (newDate.toISOString().split('T')[0] !== existingDate.toISOString().split('T')[0]) {
-        const newLeadId = await generateLeadId(null, req.body.created_at);
-        updates.lead_id = newLeadId;
-        updates.created_at = newDate;
+    // Fix 1 & 4: created_at and lead_id are read-only after creation — ignore any incoming value
+    // (removing the old date-change / lead_id regeneration block that was causing the 500 crash)
 
-        // Recalculate the old financial year's sequence counter
-        const oldFyKey = getFinancialYearKey(existingDate);
-        const oldFyStartYy = String(parseInt('20' + oldFyKey.slice(0, 2))).slice(-2);
-
-        // Count how many leads still exist in the old FY (excluding current lead)
-        // FY Apr YYYY – Mar YYYY+1: lead_id starts with LD-YY where YY is fyStart or fyEnd year
-        const [countRows] = await db.query(
-          `SELECT COUNT(*) AS cnt FROM leads
-           WHERE deleted = 0 AND id != ?
-           AND (
-             lead_id LIKE ? OR lead_id LIKE ?
-           )`,
-          [
-            req.params.id,
-            `LD-${oldFyStartYy}%`,                          // e.g. LD-26...
-            `LD-${String(parseInt(oldFyStartYy) + 1).padStart(2,'0')}0[1-3]%`  // e.g. LD-27 Jan–Mar
-          ]
-        );
-        const oldFyCount = countRows[0].cnt;
-        // Update the sequence counter for old financial year
-        await db.query(
-          'UPDATE lead_id_sequence SET last_seq = ? WHERE ym_key = ?',
-          [oldFyCount, oldFyKey]
-        );
-      }
-    }
-
-    // Handle no_budget_idea logic
-    if (updates.no_budget_idea) {
+    // Fix 2: no_budget_idea must be strictly checked (string "0" is truthy in JS)
+    if (updates.no_budget_idea == 1) {
       updates.budget_min = null;
       updates.budget_max = null;
     }
