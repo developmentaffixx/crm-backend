@@ -305,7 +305,8 @@ exports.update = async (req, res) => {
 
     const lead = rows[0];
     // Fix 3: Allow admin, creator, or assigned person to edit
-    if (!req.user.is_admin && lead.created_by !== req.user.id && lead.assigned_to !== req.user.id) {
+    // Using == (loose) to handle int vs string type mismatch from JWT token
+    if (!req.user.is_admin && lead.created_by != req.user.id && lead.assigned_to != req.user.id) {
       return res.status(403).json({ message: 'Only the creator, assigned person, or admin can edit this lead' });
     }
 
