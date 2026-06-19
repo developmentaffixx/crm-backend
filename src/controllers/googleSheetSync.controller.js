@@ -118,6 +118,8 @@ function normalizeHeader(header) {
  */
 exports.syncFromGoogleSheet = async (req, res) => {
   const { spreadsheetId, sheetName } = req.body;
+  // assigned_to is always the user who clicked Sync — no manual selection needed
+  const syncUserId = req.user.id;
 
   if (!spreadsheetId) {
     return res.status(400).json({ message: 'Spreadsheet ID is required' });
@@ -205,8 +207,8 @@ exports.syncFromGoogleSheet = async (req, res) => {
 
         await db.query(
           `INSERT INTO leads (lead_id, name, business_name, industry, service_required, phone, email,
-            address, temperature, source, resource, status, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+            address, temperature, source, resource, status, assigned_to, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
           [
             lead_id,
             lead.name,
@@ -220,6 +222,7 @@ exports.syncFromGoogleSheet = async (req, res) => {
             lead.source || null,
             lead.resource || null,
             lead.status || 'New',
+            syncUserId,  // always assigned to whoever clicked Sync
             req.user.id,
           ]
         );
