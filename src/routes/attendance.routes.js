@@ -15,6 +15,8 @@ router.get('/history', ctrl.getHistory);
 router.get('/check-running-timers', ctrl.checkRunningTimers);
 router.get('/check-auto-clockout', ctrl.checkAutoClockOut);
 router.post('/correct-clockout', ctrl.correctClockOut);
+router.get('/pending-resolution', ctrl.getPendingResolution);
+router.post('/resolve-pending', ctrl.resolvePending);
 router.get('/my-week', ctrl.getMyWeek);
 router.get('/my-month', ctrl.getMyMonth);
 router.get('/my-month-balance', ctrl.getMyMonthBalance);
@@ -32,5 +34,8 @@ router.get('/admin/timesheet/day', requireAdmin, ctrl.adminTimesheetDay);
 router.get('/admin/week-report', requireAdmin, ctrl.adminWeekReport);
 router.get('/admin/month-balance-report', requireAdmin, ctrl.adminMonthBalanceReport);
 router.get('/admin/plans/:userId/:date', requireAdmin, ctrl.adminGetPlans);
+router.get('/admin/pending-resolution/:userId', requireAdmin, ctrl.adminGetPendingResolution);
+router.post('/admin/resolve-pending/:userId', requireAdmin, ctrl.adminResolvePending);
+router.get('/admin/all-pending', requireAdmin, ctrl.adminGetAllPending);
 
 module.exports = router;

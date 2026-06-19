@@ -6,6 +6,46 @@ exports.clockIn = async (req, res) => {
     const userId = req.user.id;
     const { plans, late_reason } = req.body;
 
+    // ── Block clock-in if user has unresolved past-day attendance or orphaned timers ──
+    const [unclosedAttendance] = await db.query(
+      `SELECT id, date, clock_in FROM attendance 
+       WHERE user_id = ? AND clock_out IS NULL AND date < CURDATE()`,
+      [userId]
+    );
+    const [orphanedTaskTimers] = await db.query(
+      `SELECT tat.id, tat.task_id, tat.started_at, t.title
+       FROM task_active_timers tat
+       JOIN tasks t ON t.id = tat.task_id
+       WHERE tat.user_id = ? AND DATE(tat.started_at) < CURDATE()`,
+      [userId]
+    );
+    const [orphanedTicketTimers] = await db.query(
+      `SELECT tt.id, tt.ticket_id, tt.started_at, tk.title
+       FROM ticket_active_timers tt
+       JOIN tickets tk ON tk.id = tt.ticket_id
+       WHERE tt.user_id = ? AND DATE(tt.started_at) < CURDATE()`,
+      [userId]
+    );
+    const [orphanedMeetingTimers] = await db.query(
+      `SELECT mat.id, mat.meeting_id, mat.started_at, m.title
+       FROM meeting_active_timers mat
+       JOIN meetings m ON m.id = mat.meeting_id
+       WHERE mat.user_id = ? AND DATE(mat.started_at) < CURDATE()`,
+      [userId]
+    );
+
+    if (unclosedAttendance.length > 0 || orphanedTaskTimers.length > 0 || orphanedTicketTimers.length > 0 || orphanedMeetingTimers.length > 0) {
+      return res.status(400).json({
+        message: 'You have unresolved past-day attendance or timers. Please resolve them before clocking in.',
+        pending: true,
+        unclosed_attendance: unclosedAttendance,
+        orphaned_task_timers: orphanedTaskTimers,
+        orphaned_ticket_timers: orphanedTicketTimers,
+        orphaned_meeting_timers: orphanedMeetingTimers,
+      });
+    }
+    // ──────────────────────────────────────────────────────────────────────────
+
     const [existing] = await db.query(
       'SELECT id FROM attendance WHERE user_id = ? AND date = CURDATE()',
       [userId]
@@ -1283,6 +1323,327 @@ exports.correctClockOut = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+/**
+ * GET /api/attendance/pending-resolution
+ * Returns unresolved past-day attendance + orphaned timers for the logged-in user
+ */
+exports.getPendingResolution = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const pending = await getPendingResolutionData(userId);
+    return res.json(pending);
+  } catch (err) {
+    console.error('Get pending resolution error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/attendance/admin/pending-resolution/:userId
+ * Admin: Returns unresolved past-day attendance + orphaned timers for any user
+ */
+exports.adminGetPendingResolution = async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const pending = await getPendingResolutionData(userId);
+    return res.json(pending);
+  } catch (err) {
+    console.error('Admin get pending resolution error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/attendance/resolve-pending
+ * User resolves their own pending past-day issues
+ * Body: { attendance_id, clock_out_time, timers: [{ type, timer_id, stop_time }] }
+ */
+exports.resolvePending = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { attendance_id, clock_out_time, timers } = req.body;
+
+    if (!attendance_id || !clock_out_time) {
+      return res.status(400).json({ message: 'attendance_id and clock_out_time are required' });
+    }
+
+    await resolveUserPending(userId, attendance_id, clock_out_time, timers || []);
+    return res.json({ message: 'Pending issues resolved successfully' });
+  } catch (err) {
+    console.error('Resolve pending error:', err);
+    return res.status(500).json({ message: err.message || 'Server error' });
+  }
+};
+
+/**
+ * POST /api/attendance/admin/resolve-pending/:userId
+ * Admin resolves pending past-day issues on behalf of a user
+ * Body: { attendance_id, clock_out_time, timers: [{ type, timer_id, stop_time }] }
+ */
+exports.adminResolvePending = async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const { attendance_id, clock_out_time, timers } = req.body;
+
+    if (!attendance_id || !clock_out_time) {
+      return res.status(400).json({ message: 'attendance_id and clock_out_time are required' });
+    }
+
+    await resolveUserPending(userId, attendance_id, clock_out_time, timers || []);
+    return res.json({ message: 'Pending issues resolved successfully by admin' });
+  } catch (err) {
+    console.error('Admin resolve pending error:', err);
+    return res.status(500).json({ message: err.message || 'Server error' });
+  }
+};
+
+/**
+ * GET /api/attendance/admin/all-pending
+ * Admin: Returns all users with unresolved pending issues
+ */
+exports.adminGetAllPending = async (req, res) => {
+  try {
+    const [unclosed] = await db.query(
+      `SELECT a.id AS attendance_id, a.user_id, a.date, a.clock_in,
+              u.first_name, u.last_name, u.department
+       FROM attendance a
+       JOIN users u ON u.id = a.user_id
+       WHERE a.clock_out IS NULL AND a.date < CURDATE() AND u.is_active = 1 AND u.deleted = 0
+       ORDER BY a.date DESC`
+    );
+
+    const [orphanedTasks] = await db.query(
+      `SELECT tat.user_id, COUNT(*) AS count
+       FROM task_active_timers tat
+       WHERE DATE(tat.started_at) < CURDATE()
+       GROUP BY tat.user_id`
+    );
+
+    const [orphanedTickets] = await db.query(
+      `SELECT tt.user_id, COUNT(*) AS count
+       FROM ticket_active_timers tt
+       WHERE DATE(tt.started_at) < CURDATE()
+       GROUP BY tt.user_id`
+    );
+
+    const [orphanedMeetings] = await db.query(
+      `SELECT mat.user_id, COUNT(*) AS count
+       FROM meeting_active_timers mat
+       WHERE DATE(mat.started_at) < CURDATE()
+       GROUP BY mat.user_id`
+    );
+
+    // Build user map
+    const userMap = {};
+    for (const record of unclosed) {
+      if (!userMap[record.user_id]) {
+        userMap[record.user_id] = {
+          user_id: record.user_id,
+          name: `${record.first_name} ${record.last_name}`,
+          department: record.department,
+          unclosed_attendance: [],
+          orphaned_task_count: 0,
+          orphaned_ticket_count: 0,
+          orphaned_meeting_count: 0,
+        };
+      }
+      userMap[record.user_id].unclosed_attendance.push({
+        attendance_id: record.attendance_id,
+        date: record.date,
+        clock_in: record.clock_in,
+      });
+    }
+
+    for (const row of orphanedTasks) {
+      if (!userMap[row.user_id]) {
+        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0 };
+      }
+      userMap[row.user_id].orphaned_task_count = row.count;
+    }
+    for (const row of orphanedTickets) {
+      if (!userMap[row.user_id]) {
+        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0 };
+      }
+      userMap[row.user_id].orphaned_ticket_count = row.count;
+    }
+    for (const row of orphanedMeetings) {
+      if (!userMap[row.user_id]) {
+        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0 };
+      }
+      userMap[row.user_id].orphaned_meeting_count = row.count;
+    }
+
+    return res.json({ users_with_pending: Object.values(userMap) });
+  } catch (err) {
+    console.error('Admin get all pending error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── Helper: Get pending resolution data for a user ─────────────────────────
+async function getPendingResolutionData(userId) {
+  const [unclosedAttendance] = await db.query(
+    `SELECT id, date, clock_in FROM attendance 
+     WHERE user_id = ? AND clock_out IS NULL AND date < CURDATE()
+     ORDER BY date DESC`,
+    [userId]
+  );
+
+  const [orphanedTaskTimers] = await db.query(
+    `SELECT tat.id, tat.task_id, tat.started_at, t.title
+     FROM task_active_timers tat
+     JOIN tasks t ON t.id = tat.task_id
+     WHERE tat.user_id = ? AND DATE(tat.started_at) < CURDATE()`,
+    [userId]
+  );
+
+  const [orphanedTicketTimers] = await db.query(
+    `SELECT tt.id, tt.ticket_id, tt.started_at, tk.title
+     FROM ticket_active_timers tt
+     JOIN tickets tk ON tk.id = tt.ticket_id
+     WHERE tt.user_id = ? AND DATE(tt.started_at) < CURDATE()`,
+    [userId]
+  );
+
+  const [orphanedMeetingTimers] = await db.query(
+    `SELECT mat.id, mat.meeting_id, mat.started_at, m.title
+     FROM meeting_active_timers mat
+     JOIN meetings m ON m.id = mat.meeting_id
+     WHERE mat.user_id = ? AND DATE(mat.started_at) < CURDATE()`,
+    [userId]
+  );
+
+  const hasPending = unclosedAttendance.length > 0 || orphanedTaskTimers.length > 0 || orphanedTicketTimers.length > 0 || orphanedMeetingTimers.length > 0;
+
+  return {
+    has_pending: hasPending,
+    unclosed_attendance: unclosedAttendance,
+    orphaned_task_timers: orphanedTaskTimers,
+    orphaned_ticket_timers: orphanedTicketTimers,
+    orphaned_meeting_timers: orphanedMeetingTimers,
+  };
+}
+
+// ─── Helper: Resolve pending for a user ─────────────────────────────────────
+async function resolveUserPending(userId, attendanceId, clockOutTime, timers) {
+  // Verify the attendance record belongs to this user and is unclosed
+  const [records] = await db.query(
+    'SELECT * FROM attendance WHERE id = ? AND user_id = ? AND clock_out IS NULL',
+    [attendanceId, userId]
+  );
+
+  if (records.length === 0) {
+    throw new Error('Attendance record not found or already closed');
+  }
+
+  const record = records[0];
+  const attendanceDate = new Date(record.date).toISOString().split('T')[0];
+
+  // Build the clock-out datetime
+  const clockOutDateTime = new Date(`${attendanceDate}T${clockOutTime}:00`);
+  const clockInTime = new Date(record.clock_in);
+
+  if (clockOutDateTime <= clockInTime) {
+    throw new Error('Clock-out time must be after clock-in time');
+  }
+
+  // Process each orphaned timer
+  for (const timer of timers) {
+    if (!timer.type || !timer.timer_id || !timer.stop_time) {
+      throw new Error('Each timer requires type, timer_id, and stop_time');
+    }
+
+    const stopDateTime = new Date(`${attendanceDate}T${timer.stop_time}:00`);
+
+    if (timer.type === 'task') {
+      const [taskTimer] = await db.query(
+        'SELECT * FROM task_active_timers WHERE id = ? AND user_id = ?',
+        [timer.timer_id, userId]
+      );
+      if (taskTimer.length === 0) continue;
+
+      const t = taskTimer[0];
+      const startedAt = new Date(t.started_at);
+      const duration = Math.max(1, Math.floor((stopDateTime - startedAt) / 1000));
+
+      await db.query(
+        `INSERT INTO task_time_logs (task_id, user_id, started_at, ended_at, duration, note)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [t.task_id, userId, t.started_at, stopDateTime, duration, 'Manually resolved (forgot to stop)']
+      );
+      await db.query(
+        'UPDATE tasks SET time_spent = time_spent + ?, timer_started_at = NULL WHERE id = ?',
+        [duration, t.task_id]
+      );
+      await db.query('DELETE FROM task_active_timers WHERE id = ?', [t.id]);
+
+    } else if (timer.type === 'ticket') {
+      const [ticketTimer] = await db.query(
+        'SELECT * FROM ticket_active_timers WHERE id = ? AND user_id = ?',
+        [timer.timer_id, userId]
+      );
+      if (ticketTimer.length === 0) continue;
+
+      const t = ticketTimer[0];
+      const startedAt = new Date(t.started_at);
+      const duration = Math.max(1, Math.floor((stopDateTime - startedAt) / 1000));
+      const minutes = Math.ceil(duration / 60);
+
+      await db.query(
+        `INSERT INTO ticket_time_logs (ticket_id, user_id, minutes, description, started_at, ended_at, duration, log_date, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [t.ticket_id, userId, minutes, 'Manually resolved (forgot to stop)', t.started_at, stopDateTime, duration, attendanceDate, stopDateTime]
+      );
+      await db.query('DELETE FROM ticket_active_timers WHERE id = ?', [t.id]);
+
+    } else if (timer.type === 'meeting') {
+      const [meetingTimer] = await db.query(
+        'SELECT * FROM meeting_active_timers WHERE id = ? AND user_id = ?',
+        [timer.timer_id, userId]
+      );
+      if (meetingTimer.length === 0) continue;
+
+      const t = meetingTimer[0];
+      const startedAt = new Date(t.started_at);
+      const duration = Math.max(1, Math.floor((stopDateTime - startedAt) / 1000));
+
+      await db.query(
+        `INSERT INTO meeting_time_logs (meeting_id, user_id, started_at, ended_at, duration, note)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [t.meeting_id, userId, t.started_at, stopDateTime, duration, 'Manually resolved (forgot to stop)']
+      );
+      await db.query('DELETE FROM meeting_active_timers WHERE id = ?', [t.id]);
+    }
+  }
+
+  // End any active AFS sessions from that day
+  const [activeAfs] = await db.query(
+    'SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL AND DATE(start_time) = ?',
+    [userId, attendanceDate]
+  );
+  for (const afs of activeAfs) {
+    const afsDuration = Math.floor((clockOutDateTime - new Date(afs.start_time)) / 1000);
+    await db.query(
+      'UPDATE afs_logs SET end_time = ?, duration_seconds = ? WHERE id = ?',
+      [clockOutDateTime, afsDuration, afs.id]
+    );
+    await db.query(
+      'UPDATE attendance SET total_afs_seconds = total_afs_seconds + ? WHERE id = ?',
+      [afsDuration, attendanceId]
+    );
+  }
+
+  // Calculate total served seconds and close attendance
+  const totalServedSeconds = Math.floor((clockOutDateTime - clockInTime) / 1000);
+
+  await db.query(
+    `UPDATE attendance 
+     SET clock_out = ?, corrected_clock_out = ?, total_served_seconds = ?, correction_submitted_at = NOW()
+     WHERE id = ?`,
+    [clockOutDateTime, clockOutDateTime, totalServedSeconds, attendanceId]
+  );
+}
 
 /**
  * GET /api/attendance/my-month-balance
