@@ -289,8 +289,13 @@ exports.generate = async (req, res) => {
     // Parse services (supports [{name, fee}] and ["name"] formats)
     let services = [];
     if (agreement.services) {
-      const parsed = JSON.parse(agreement.services);
-      services = parsed.map(s => typeof s === 'string' ? { name: s, fee: '' } : s);
+      try {
+        const parsed = JSON.parse(agreement.services);
+        services = Array.isArray(parsed) ? parsed.map(s => typeof s === 'string' ? { name: s, fee: '' } : s) : [];
+      } catch (e) {
+        console.error('Failed to parse services JSON:', e.message);
+        services = [];
+      }
     }
     const serviceNames = services.map(s => s.name).join(', ');
 
@@ -303,10 +308,10 @@ exports.generate = async (req, res) => {
       '{{services}}': serviceNames,
       '{{start_date}}': fmtDate(agreement.start_date),
       '{{end_date}}': fmtDate(agreement.end_date),
-      '{{total_fee}}': Number(agreement.total_fee).toLocaleString('en-IN'),
+      '{{total_fee}}': agreement.total_fee ? Number(agreement.total_fee).toLocaleString('en-IN') : '0',
       '{{payment_terms}}': agreement.payment_terms || '',
-      '{{advance_payment}}': Number(agreement.advance_payment).toLocaleString('en-IN'),
-      '{{amc_amount}}': Number(agreement.amc_amount).toLocaleString('en-IN'),
+      '{{advance_payment}}': agreement.advance_payment ? Number(agreement.advance_payment).toLocaleString('en-IN') : '0',
+      '{{amc_amount}}': agreement.amc_amount ? Number(agreement.amc_amount).toLocaleString('en-IN') : '0',
       '{{today}}': today,
     };
 
@@ -318,10 +323,17 @@ exports.generate = async (req, res) => {
     };
 
     // 1. Fetch and render the master template
-    const [masterTemplates] = await db.query(
-      'SELECT * FROM vendor_agreement_templates WHERE template_key = ?',
-      ['master']
-    );
+    let masterTemplates = [];
+    try {
+      [masterTemplates] = await db.query(
+        'SELECT * FROM vendor_agreement_templates WHERE template_key = ?',
+        ['master']
+      );
+    } catch (dbErr) {
+      console.error('vendor_agreement_templates query failed:', dbErr.message);
+      return res.status(500).json({ message: 'Agreement templates not found. Please run the database migration.' });
+    }
+
     let combinedHtml = '';
     if (masterTemplates.length) {
       combinedHtml += applyReplacements(masterTemplates[0].content);
@@ -350,11 +362,15 @@ exports.generate = async (req, res) => {
         combinedHtml += '<div class="page-section">';
         let svcHtml = applyReplacements(svcTemplates[0].content);
         if (svc.fee) {
-          svcHtml = svcHtml.replace(/{{service_fee}}/g, Number(svc.fee).toLocaleString('en-IN'));
+          svcHtml = svcHtml.replace(/\{\{service_fee\}\}/g, Number(svc.fee).toLocaleString('en-IN'));
         }
         combinedHtml += svcHtml;
         combinedHtml += '</div>';
       }
+    }
+
+    if (!combinedHtml) {
+      return res.status(400).json({ message: 'No template content found. Please ensure agreement templates are configured.' });
     }
 
     // Build full HTML with letterhead background
@@ -391,10 +407,41 @@ ${letterheadUrl ? `<div class="letterhead-bg"><img src="${letterheadUrl}" /></di
 </body></html>`;
 
     // Generate PDF with Puppeteer
-    const browser = await puppeteer.launch({
+    const launchOptions = {
       headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--font-render-hinting=none'],
+    };
+
+    // On Linux servers, check for system Chrome/Chromium if bundled one is missing
+    if (process.platform === 'linux') {
+      const possiblePaths = [
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/snap/bin/chromium',
+      ];
+      let bundledPath = '';
+      try { bundledPath = await puppeteer.executablePath(); } catch {}
+      if (!bundledPath || !fs.existsSync(bundledPath)) {
+        const systemChrome = possiblePaths.find(p => fs.existsSync(p));
+        if (systemChrome) {
+          launchOptions.executablePath = systemChrome;
+        } else {
+          console.error('No Chrome/Chromium binary found. Bundled:', bundledPath);
+          return res.status(500).json({ message: 'PDF generation unavailable: Chrome not found on server. Run: sudo apt install chromium-browser' });
+        }
+      }
+    }
+
+    let browser;
+    try {
+      browser = await puppeteer.launch(launchOptions);
+    } catch (launchErr) {
+      console.error('Puppeteer launch failed:', launchErr.message);
+      return res.status(500).json({ message: 'PDF engine failed to start: ' + launchErr.message });
+    }
+
     const page = await browser.newPage();
     await page.setContent(fullHtml, { waitUntil: 'domcontentloaded' });
 
@@ -414,12 +461,14 @@ ${letterheadUrl ? `<div class="letterhead-bg"><img src="${letterheadUrl}" /></di
     const filepath = path.join(tempDir, filename);
     fs.writeFileSync(filepath, pdfBuffer);
 
-    // Return the URL to access the PDF
-    const pdfUrl = `/uploads/documents/${filename}`;
+    // Return the full URL to access the PDF
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const pdfUrl = `${baseUrl}/uploads/documents/${filename}`;
     return res.json({ url: pdfUrl });
 
   } catch (err) {
-    console.error('Client agreement generate error:', err);
-    return res.status(500).json({ message: 'Failed to generate PDF' });
+    console.error('Client agreement generate error:', err.message || err);
+    console.error('Stack:', err.stack);
+    return res.status(500).json({ message: 'Failed to generate PDF', error: err.message });
   }
 };
