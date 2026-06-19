@@ -331,16 +331,53 @@ exports.generate = async (req, res) => {
       doc.on('error', reject);
     });
 
-    // Add letterhead background if available
+    // Add letterhead background if available (fetched from Cloudinary URL)
+    let letterheadBuffer = null;
     if (company.letterhead_url) {
       try {
-        const letterheadPath = path.join(__dirname, '../../', company.letterhead_url);
-        if (fs.existsSync(letterheadPath)) {
-          doc.image(letterheadPath, 0, 0, { width: 595.28, height: 841.89 });
-          doc.y = 120; // Move content below letterhead header area
+        const letterheadUrl = company.letterhead_url;
+        // Check if it's a URL (Cloudinary) or local path
+        if (letterheadUrl.startsWith('http')) {
+          const https = require('https');
+          const http = require('http');
+          letterheadBuffer = await new Promise((resolve, reject) => {
+            const client = letterheadUrl.startsWith('https') ? https : http;
+            client.get(letterheadUrl, (resp) => {
+              const chunks = [];
+              resp.on('data', chunk => chunks.push(chunk));
+              resp.on('end', () => resolve(Buffer.concat(chunks)));
+              resp.on('error', reject);
+            }).on('error', reject);
+          });
+        } else {
+          const letterheadPath = path.join(__dirname, '../../', letterheadUrl);
+          if (fs.existsSync(letterheadPath)) {
+            letterheadBuffer = fs.readFileSync(letterheadPath);
+          }
         }
-      } catch {}
+      } catch (imgErr) {
+        console.error('Failed to load letterhead image:', imgErr.message);
+      }
     }
+
+    // Function to add letterhead as full-page background on the current page
+    const addLetterheadBg = () => {
+      if (letterheadBuffer) {
+        try {
+          doc.image(letterheadBuffer, 0, 0, { width: 595.28, height: 841.89 });
+        } catch {}
+      }
+    };
+
+    // Add letterhead on first page
+    addLetterheadBg();
+    doc.y = 120; // Start content below letterhead header area
+
+    // Listen for new pages to add letterhead background
+    doc.on('pageAdded', () => {
+      addLetterheadBg();
+      doc.y = 120;
+    });
 
     // Helper functions for PDF content
     const addTitle = (text) => {

@@ -1,31 +1,14 @@
-const puppeteer = require('puppeteer');
 const db = require('../config/db');
 const path = require('path');
 const fs = require('fs');
 
 /**
- * Convert a local file path to a base64 data URI
- */
-function fileToDataUri(filePath) {
-  try {
-    const absPath = path.join(__dirname, '../../', filePath);
-    if (!fs.existsSync(absPath)) return '';
-    const buffer = fs.readFileSync(absPath);
-    const ext = path.extname(filePath).toLowerCase();
-    const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.svg': 'image/svg+xml', '.webp': 'image/webp' };
-    const mime = mimeMap[ext] || 'image/png';
-    return `data:${mime};base64,${buffer.toString('base64')}`;
-  } catch {
-    return '';
-  }
-}
-
-/**
  * POST /api/settings/document-templates/generate
- * Generates a PDF, saves to temp folder, returns the download URL
+ * Generates a PDF using PDFKit (no Chrome/Puppeteer needed), saves to temp folder, returns the download URL
  */
 exports.generate = async (req, res) => {
   try {
+    const PDFDocument = require('pdfkit');
     const { template_key, data } = req.body;
     if (!template_key) return res.status(400).json({ message: 'template_key is required' });
 
@@ -42,24 +25,11 @@ exports.generate = async (req, res) => {
     const companyName = company.company_name || 'AffixxMedia';
     const companyAddress = [company.address_line1, company.address_line2, company.city, company.state].filter(Boolean).join(', ');
 
-    // Convert letterhead to base64 data URI
-    const letterheadUrl = company.letterhead_url ? fileToDataUri(company.letterhead_url) : '';
-
     // Format today's date as dd-mm-yyyy
     const d = new Date();
     const today = `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
 
-    // Helper: style NOC answer values with color based on value
-    const nocVal = (val) => {
-      if (!val || val === '—') return '<span style="color:#999">—</span>';
-      const positive = ['Yes', 'Returned', 'Cleared', 'Good'];
-      const negative = ['No', 'Pending', 'Damaged'];
-      if (positive.includes(val)) return `<strong style="color:#16a34a">${val}</strong>`;
-      if (negative.includes(val)) return `<strong style="color:#dc2626">${val}</strong>`;
-      return `<strong>${val}</strong>`;
-    };
-
-    // Replace placeholders
+    // Replace placeholders in template content
     let content = templates[0].content;
     const replacements = {
       '{{employee_name}}': data?.employee_name || '',
@@ -76,86 +46,172 @@ exports.generate = async (req, res) => {
       '{{separation_type}}': data?.separation_type || '',
       '{{today}}': today,
       // Exit NOC — Knowledge Transfer
-      '{{kt_project_handover}}': nocVal(data?.kt_project_handover),
-      '{{kt_credentials_shared}}': nocVal(data?.kt_credentials_shared),
-      '{{kt_pending_tasks}}': nocVal(data?.kt_pending_tasks),
-      '{{kt_client_communication}}': nocVal(data?.kt_client_communication),
+      '{{kt_project_handover}}': data?.kt_project_handover || '—',
+      '{{kt_credentials_shared}}': data?.kt_credentials_shared || '—',
+      '{{kt_pending_tasks}}': data?.kt_pending_tasks || '—',
+      '{{kt_client_communication}}': data?.kt_client_communication || '—',
       // Exit NOC — Asset Return
-      '{{asset_laptop_status}}': nocVal(data?.asset_laptop_status),
-      '{{asset_laptop_condition}}': nocVal(data?.asset_laptop_condition),
-      '{{asset_phone_status}}': nocVal(data?.asset_phone_status),
-      '{{asset_phone_condition}}': nocVal(data?.asset_phone_condition),
-      '{{asset_idcard_status}}': nocVal(data?.asset_idcard_status),
-      '{{asset_idcard_condition}}': nocVal(data?.asset_idcard_condition),
-      '{{asset_charger_status}}': nocVal(data?.asset_charger_status),
-      '{{asset_charger_condition}}': nocVal(data?.asset_charger_condition),
+      '{{asset_laptop_status}}': data?.asset_laptop_status || '—',
+      '{{asset_laptop_condition}}': data?.asset_laptop_condition || '—',
+      '{{asset_phone_status}}': data?.asset_phone_status || '—',
+      '{{asset_phone_condition}}': data?.asset_phone_condition || '—',
+      '{{asset_idcard_status}}': data?.asset_idcard_status || '—',
+      '{{asset_idcard_condition}}': data?.asset_idcard_condition || '—',
+      '{{asset_charger_status}}': data?.asset_charger_status || '—',
+      '{{asset_charger_condition}}': data?.asset_charger_condition || '—',
       // Exit NOC — Department Clearance
-      '{{clear_reporting_manager}}': nocVal(data?.clear_reporting_manager),
-      '{{clear_hr}}': nocVal(data?.clear_hr),
-      '{{clear_accounts}}': nocVal(data?.clear_accounts),
-      '{{clear_it}}': nocVal(data?.clear_it),
+      '{{clear_reporting_manager}}': data?.clear_reporting_manager || '—',
+      '{{clear_hr}}': data?.clear_hr || '—',
+      '{{clear_accounts}}': data?.clear_accounts || '—',
+      '{{clear_it}}': data?.clear_it || '—',
     };
 
     Object.entries(replacements).forEach(([key, val]) => {
       content = content.replaceAll(key, val);
     });
 
-    // Full HTML page (no logo — letterhead only as background)
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 0; }
-  .letterhead-bg {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 210mm;
-    height: 297mm;
-    z-index: -1;
-  }
-  .letterhead-bg img { width: 100%; height: 100%; }
-  .content-wrapper {
-    padding: 42mm 20mm 28mm 20mm;
-    font-size: 12px;
-    line-height: 1.7;
-    color: #222;
-    /* Ensure page breaks respect bottom padding */
-    box-decoration-break: clone;
-    -webkit-box-decoration-break: clone;
-  }
-  h1 { font-size: 18px; font-weight: 700; text-align: center; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 1px; }
-  h2 { font-size: 13px; font-weight: 700; margin: 18px 0 8px; }
-  p { margin-bottom: 8px; text-align: justify; }
-  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 11px; }
-  th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
-  th { background: #f5f5f5; font-weight: 600; }
-  hr { border: none; border-top: 1px solid #ddd; margin: 20px 0; }
-  ul, ol { padding-left: 20px; margin-bottom: 10px; }
-  li { margin-bottom: 4px; }
-</style></head><body>
-${letterheadUrl ? `<div class="letterhead-bg"><img src="${letterheadUrl}" /></div>` : ''}
-<div class="content-wrapper">
-  ${content}
-</div>
-</body></html>`;
+    // ─── Download letterhead image (from Cloudinary URL or local path) ─────────
+    let letterheadBuffer = null;
+    if (company.letterhead_url) {
+      try {
+        const letterheadUrl = company.letterhead_url;
+        if (letterheadUrl.startsWith('http')) {
+          const https = require('https');
+          const http = require('http');
+          letterheadBuffer = await new Promise((resolve, reject) => {
+            const client = letterheadUrl.startsWith('https') ? https : http;
+            client.get(letterheadUrl, (resp) => {
+              const chunks = [];
+              resp.on('data', chunk => chunks.push(chunk));
+              resp.on('end', () => resolve(Buffer.concat(chunks)));
+              resp.on('error', reject);
+            }).on('error', reject);
+          });
+        } else {
+          const letterheadPath = path.join(__dirname, '../../', letterheadUrl);
+          if (fs.existsSync(letterheadPath)) {
+            letterheadBuffer = fs.readFileSync(letterheadPath);
+          }
+        }
+      } catch (imgErr) {
+        console.error('Failed to load letterhead image:', imgErr.message);
+      }
+    }
 
-    // Generate PDF with Puppeteer
-    const browser = await puppeteer.launch({
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    // ─── Build PDF with PDFKit ────────────────────────────────────────────────
+    const doc = new PDFDocument({ size: 'A4', margins: { top: 60, bottom: 60, left: 50, right: 50 } });
 
-    const pdfBuffer = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: { top: '0', right: '0', bottom: '0', left: '0' },
+    const chunks = [];
+    doc.on('data', chunk => chunks.push(chunk));
+
+    const pdfReady = new Promise((resolve, reject) => {
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
     });
 
-    await browser.close();
+    // Function to add letterhead as full-page background
+    const addLetterheadBg = () => {
+      if (letterheadBuffer) {
+        try {
+          doc.image(letterheadBuffer, 0, 0, { width: 595.28, height: 841.89 });
+        } catch {}
+      }
+    };
 
-    // Save PDF to temp folder
+    // Add letterhead on first page
+    addLetterheadBg();
+    doc.y = 120;
+
+    // Listen for new pages to add letterhead background
+    doc.on('pageAdded', () => {
+      addLetterheadBg();
+      doc.y = 120;
+    });
+
+    // ─── Parse HTML content and render to PDF ─────────────────────────────────
+    // Strip HTML tags and render as structured text
+    const stripTags = (html) => html.replace(/<[^>]+>/g, '');
+    
+    // Simple HTML-to-PDF renderer
+    const lines = content.split(/(<h1[^>]*>.*?<\/h1>|<h2[^>]*>.*?<\/h2>|<p[^>]*>.*?<\/p>|<li[^>]*>.*?<\/li>|<hr\s*\/?>|<br\s*\/?>|<table[\s\S]*?<\/table>|<strong[^>]*>.*?<\/strong>)/gi);
+    
+    // Process content block by block
+    const blocks = content.split(/<\/?(h1|h2|p|li|hr|br|table|tr|td|th|ul|ol|div|strong|em|span)[^>]*>/gi);
+    
+    // Better approach: split into meaningful sections
+    const sections = content.split(/(?=<h[12])|(?=<p)|(?=<table)|(?=<hr)|(?=<ul)|(?=<ol)/gi);
+
+    for (const section of sections) {
+      if (!section.trim()) continue;
+
+      const checkNewPage = () => { if (doc.y > 720) doc.addPage(); };
+      checkNewPage();
+
+      if (section.match(/^<h1/i)) {
+        const text = stripTags(section).trim();
+        if (text) {
+          doc.moveDown(0.5);
+          doc.fontSize(16).font('Helvetica-Bold').text(text, { align: 'center' });
+          doc.moveDown(0.5);
+        }
+      } else if (section.match(/^<h2/i)) {
+        const text = stripTags(section).trim();
+        if (text) {
+          doc.moveDown(0.5);
+          doc.fontSize(11).font('Helvetica-Bold').text(text);
+          doc.moveDown(0.3);
+        }
+      } else if (section.match(/^<hr/i)) {
+        doc.moveDown(0.5);
+        doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#dddddd').stroke();
+        doc.moveDown(0.5);
+      } else if (section.match(/^<table/i)) {
+        // Parse table rows
+        const rowMatches = section.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+        for (const row of rowMatches) {
+          checkNewPage();
+          const cells = (row.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || []).map(c => stripTags(c).trim());
+          if (cells.length >= 2) {
+            const isHeader = row.includes('<th');
+            doc.fontSize(9).font(isHeader ? 'Helvetica-Bold' : 'Helvetica');
+            const colWidth = 495 / cells.length;
+            const startX = 50;
+            const startY = doc.y;
+            cells.forEach((cell, i) => {
+              doc.text(cell, startX + (i * colWidth), startY, { width: colWidth - 5, align: 'left' });
+            });
+            doc.y = startY + 18;
+          }
+        }
+        doc.moveDown(0.5);
+      } else if (section.match(/^<[uo]l/i)) {
+        const items = (section.match(/<li[\s\S]*?<\/li>/gi) || []).map(li => stripTags(li).trim());
+        items.forEach(item => {
+          checkNewPage();
+          doc.fontSize(10).font('Helvetica').text(`  •  ${item}`, { indent: 10 });
+        });
+        doc.moveDown(0.3);
+      } else if (section.match(/^<p/i)) {
+        const text = stripTags(section).trim();
+        if (text) {
+          doc.fontSize(10).font('Helvetica').text(text, { align: 'justify', lineGap: 3 });
+          doc.moveDown(0.3);
+        }
+      } else {
+        // Plain text fallback
+        const text = stripTags(section).trim();
+        if (text) {
+          doc.fontSize(10).font('Helvetica').text(text, { lineGap: 3 });
+          doc.moveDown(0.2);
+        }
+      }
+    }
+
+    // Finalize PDF
+    doc.end();
+    const pdfBuffer = await pdfReady;
+
+    // Save PDF to uploads folder
     const tempDir = path.join(__dirname, '../../uploads/documents');
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
@@ -163,12 +219,14 @@ ${letterheadUrl ? `<div class="letterhead-bg"><img src="${letterheadUrl}" /></di
     const filepath = path.join(tempDir, filename);
     fs.writeFileSync(filepath, pdfBuffer);
 
-    // Return the URL to access the PDF
-    const pdfUrl = `/uploads/documents/${filename}`;
+    // Return the full URL to access the PDF
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const pdfUrl = `${baseUrl}/uploads/documents/${filename}`;
     return res.json({ url: pdfUrl });
 
   } catch (err) {
-    console.error('PDF generation error:', err);
-    return res.status(500).json({ message: 'Failed to generate PDF' });
+    console.error('PDF generation error:', err.message || err);
+    console.error('Stack:', err.stack);
+    return res.status(500).json({ message: 'Failed to generate PDF', error: err.message });
   }
 };
