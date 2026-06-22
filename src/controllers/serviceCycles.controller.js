@@ -307,16 +307,6 @@ exports.updateCycle = async (req, res) => {
     if (status !== undefined) {
       updates.push('status = ?');
       values.push(status);
-
-      // Pause: record when paused
-      if (status === 'paused' && currentCycle.status === 'active') {
-        updates.push('paused_at = NOW()');
-      }
-
-      // Resume: record when resumed
-      if (status === 'active' && currentCycle.status === 'paused') {
-        updates.push('resumed_at = NOW()');
-      }
     }
 
     if (updates.length === 0) {
