@@ -354,7 +354,7 @@ exports.updateCycle = async (req, res) => {
     return res.json(updated[0]);
   } catch (err) {
     console.error('Update cycle error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: err.message || String(err) });
   }
 };
 
