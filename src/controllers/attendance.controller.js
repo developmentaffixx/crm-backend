@@ -60,23 +60,30 @@ exports.clockIn = async (req, res) => {
     // Use IST (UTC+5:30) for clock-in status comparison
     // MySQL CURTIME() returns UTC which causes wrong status — use Node.js time instead
     const nowIST = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-    const nowTime = `${String(nowIST.getUTCHours()).padStart(2, '0')}:${String(nowIST.getUTCMinutes()).padStart(2, '0')}:${String(nowIST.getUTCSeconds()).padStart(2, '0')}`;
+    const nowHours = nowIST.getUTCHours();
+    const nowMinutes = nowIST.getUTCMinutes();
 
-    const toSeconds = (t) => {
-      const parts = t.split(':');
-      return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2] || 0);
-    };
+    // Convert shift_start_time to hours and minutes
+    const shiftParts = shift_start_time.split(':');
+    const shiftHours = parseInt(shiftParts[0]);
+    const shiftMinutes = parseInt(shiftParts[1]);
 
-    const nowSec = toSeconds(nowTime);
-    const shiftSec = toSeconds(shift_start_time);
-    const graceSec = shiftSec + grace_period_minutes * 60;
+    // On Time: up to 09:00:59 (hour < 9, or hour == 9 and minute == 0)
+    // Grace: 09:01:00 to 09:10:59 (hour == 9, minutes 1 to grace_period_minutes)
+    // Late: 09:11:00 onwards
+    const nowTotalMinutes = nowHours * 60 + nowMinutes;
+    const shiftTotalMinutes = shiftHours * 60 + shiftMinutes;
+    const graceEndMinutes = shiftTotalMinutes + grace_period_minutes; // 9*60 + 0 + 10 = 550
 
     let clock_in_status;
-    if (nowSec <= shiftSec) {
+    if (nowTotalMinutes <= shiftTotalMinutes) {
+      // e.g. 09:00:xx or earlier → on_time
       clock_in_status = 'on_time';
-    } else if (nowSec <= graceSec) {
+    } else if (nowTotalMinutes <= graceEndMinutes) {
+      // e.g. 09:01:xx to 09:10:xx → grace
       clock_in_status = 'grace';
     } else {
+      // e.g. 09:11:xx onwards → late
       clock_in_status = 'late';
       if (!late_reason) {
         return res.status(400).json({ message: 'Late reason is required when clocking in late' });

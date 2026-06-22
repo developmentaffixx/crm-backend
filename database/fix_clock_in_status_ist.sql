@@ -2,10 +2,10 @@
 -- Fix clock_in_status for all past attendance records
 -- Recalculates based on actual clock_in time in IST (UTC+5:30)
 --
--- Rules:
---   <= 09:00 AM IST  → on_time
---   09:01 - 09:10 AM IST → grace
---   > 09:10 AM IST   → late
+-- Rules (minute-based, seconds ignored):
+--   <= 09:00:59 IST (minute 0 or less)  → on_time
+--   09:01:00 - 09:10:59 IST (minutes 1-10) → grace
+--   >= 09:11:00 IST (minute 11+)        → late
 -- ============================================================
 
 USE crm_task_module;
@@ -17,10 +17,12 @@ SELECT
   date,
   clock_in,
   TIME(CONVERT_TZ(clock_in, '+00:00', '+05:30')) AS clock_in_ist,
+  HOUR(CONVERT_TZ(clock_in, '+00:00', '+05:30')) AS ist_hour,
+  MINUTE(CONVERT_TZ(clock_in, '+00:00', '+05:30')) AS ist_minute,
   clock_in_status AS old_status,
   CASE
-    WHEN TIME(CONVERT_TZ(clock_in, '+00:00', '+05:30')) <= '09:00:00' THEN 'on_time'
-    WHEN TIME(CONVERT_TZ(clock_in, '+00:00', '+05:30')) <= '09:10:00' THEN 'grace'
+    WHEN (HOUR(CONVERT_TZ(clock_in, '+00:00', '+05:30')) * 60 + MINUTE(CONVERT_TZ(clock_in, '+00:00', '+05:30'))) <= (9 * 60 + 0) THEN 'on_time'
+    WHEN (HOUR(CONVERT_TZ(clock_in, '+00:00', '+05:30')) * 60 + MINUTE(CONVERT_TZ(clock_in, '+00:00', '+05:30'))) <= (9 * 60 + 10) THEN 'grace'
     ELSE 'late'
   END AS new_status
 FROM attendance
@@ -32,8 +34,8 @@ ORDER BY date DESC;
 
 UPDATE attendance
 SET clock_in_status = CASE
-  WHEN TIME(CONVERT_TZ(clock_in, '+00:00', '+05:30')) <= '09:00:00' THEN 'on_time'
-  WHEN TIME(CONVERT_TZ(clock_in, '+00:00', '+05:30')) <= '09:10:00' THEN 'grace'
+  WHEN (HOUR(CONVERT_TZ(clock_in, '+00:00', '+05:30')) * 60 + MINUTE(CONVERT_TZ(clock_in, '+00:00', '+05:30'))) <= (9 * 60 + 0) THEN 'on_time'
+  WHEN (HOUR(CONVERT_TZ(clock_in, '+00:00', '+05:30')) * 60 + MINUTE(CONVERT_TZ(clock_in, '+00:00', '+05:30'))) <= (9 * 60 + 10) THEN 'grace'
   ELSE 'late'
 END;
 
