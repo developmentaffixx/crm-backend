@@ -296,40 +296,43 @@ exports.updateCycle = async (req, res) => {
     }
 
     const currentCycle = existing[0];
-    const updates = {};
-    if (notes !== undefined) updates.notes = notes;
+    const updates = [];
+    const values = [];
+
+    if (notes !== undefined) {
+      updates.push('notes = ?');
+      values.push(notes);
+    }
 
     if (status !== undefined) {
-      updates.status = status;
+      updates.push('status = ?');
+      values.push(status);
 
       // Pause: record when paused
       if (status === 'paused' && currentCycle.status === 'active') {
-        updates.paused_at = new Date();
+        updates.push('paused_at = NOW()');
       }
 
-      // Resume: record when resumed, set back to active
+      // Resume: record when resumed
       if (status === 'active' && currentCycle.status === 'paused') {
-        updates.resumed_at = new Date();
+        updates.push('resumed_at = NOW()');
       }
     }
 
-    if (Object.keys(updates).length === 0) {
+    if (updates.length === 0) {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
-    const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
     await db.query(
-      `UPDATE service_cycles SET ${setClauses} WHERE id = ?`,
-      [...Object.values(updates), cycleId]
+      `UPDATE service_cycles SET ${updates.join(', ')} WHERE id = ?`,
+      [...values, cycleId]
     );
 
     // If marking as completed, auto-generate next cycle
     if (status === 'completed') {
-      // Get project start_date for date calculation
       const [proj] = await db.query('SELECT start_date FROM projects WHERE id = ?', [projectId]);
       let startDate = proj.length > 0 ? proj[0].start_date : null;
 
-      // If this cycle belongs to a project_service, use that start_date
       const psId = currentCycle.project_service_id || null;
       if (psId) {
         const [ps] = await db.query('SELECT start_date FROM project_services WHERE id = ?', [psId]);
@@ -340,7 +343,6 @@ exports.updateCycle = async (req, res) => {
         try {
           await generateNextCycleForProject(projectId, startDate, req.user.id, psId);
         } catch (genErr) {
-          // If next cycle already exists (edge case), just ignore
           if (genErr.code !== 'ER_DUP_ENTRY') {
             console.error('Auto-generate next cycle error:', genErr);
           }

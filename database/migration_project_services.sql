@@ -20,18 +20,24 @@ CREATE TABLE IF NOT EXISTS project_services (
   created_by      INT UNSIGNED DEFAULT NULL,
   created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  CONSTRAINT fk_ps_project  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-  CONSTRAINT fk_ps_service  FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
-  CONSTRAINT fk_ps_created  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_projsvc_project  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  CONSTRAINT fk_projsvc_service  FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE,
+  CONSTRAINT fk_projsvc_created  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
   UNIQUE KEY uq_project_service (project_id, service_id)
 ) ENGINE=InnoDB;
 
 -- ------------------------------------------------------------
 -- Add project_service_id to service_cycles (nullable for backward compat)
 -- Existing cycles that already have project_id will still work
+-- NOTE: Run this manually if it fails. Check if column already exists first.
 -- ------------------------------------------------------------
+-- For MySQL 8.0+ (does not support IF NOT EXISTS on ADD COLUMN natively):
+-- First check: SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'service_cycles' AND COLUMN_NAME = 'project_service_id';
+-- If empty, then run:
 ALTER TABLE service_cycles
-  ADD COLUMN IF NOT EXISTS project_service_id INT UNSIGNED DEFAULT NULL AFTER project_id,
+  ADD COLUMN project_service_id INT UNSIGNED DEFAULT NULL AFTER project_id;
+
+ALTER TABLE service_cycles
   ADD CONSTRAINT fk_sc_project_service FOREIGN KEY (project_service_id) REFERENCES project_services(id) ON DELETE CASCADE;
 
 -- ------------------------------------------------------------
