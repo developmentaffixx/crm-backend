@@ -49,6 +49,7 @@ const recurringExpensesRoutes = require('./src/routes/recurringExpenses.routes')
 const proposalPlansRoutes      = require('./src/routes/proposalPlans.routes');
 const proposalEngineRoutes     = require('./src/routes/proposalEngine.routes');
 const serviceCyclesRoutes      = require('./src/routes/serviceCycles.routes');
+const projectServicesRoutes    = require('./src/routes/projectServices.routes');
 const withdrawalsRoutes        = require('./src/routes/withdrawals.routes');
 const salesPlanRoutes          = require('./src/routes/salesPlan.routes');
 const plansRoutes              = require('./src/routes/plans.routes');
@@ -131,6 +132,7 @@ app.use('/api/recurring-expenses',    recurringExpensesRoutes);
 app.use('/api/proposal-plans',        proposalPlansRoutes);
 app.use('/api/proposal-engine',       proposalEngineRoutes);
 app.use('/api/projects',              serviceCyclesRoutes);
+app.use('/api/projects',              projectServicesRoutes);
 app.use('/api/withdrawals',           withdrawalsRoutes);
 app.use('/api/sales-plan',            salesPlanRoutes);
 app.use('/api/plans',                 plansRoutes);

@@ -12,16 +12,21 @@ const CYCLE_SECTIONS = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: Generate ONE next cycle for a project
+// Helper: Generate ONE next cycle for a project service (or legacy project)
 // ─────────────────────────────────────────────────────────────────────────────
-async function generateNextCycleForProject(projectId, startDate, userId) {
+async function generateNextCycleForProject(projectId, startDate, userId, projectServiceId = null) {
   const start = new Date(startDate);
 
-  // Get existing max cycle number
-  const [existing] = await db.query(
-    'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_id = ?',
-    [projectId]
-  );
+  // Get existing max cycle number (scoped to project_service_id if available)
+  let maxQuery, maxParams;
+  if (projectServiceId) {
+    maxQuery = 'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_service_id = ?';
+    maxParams = [projectServiceId];
+  } else {
+    maxQuery = 'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_id = ?';
+    maxParams = [projectId];
+  }
+  const [existing] = await db.query(maxQuery, maxParams);
   const nextCycleNum = (existing[0].max_num || 0) + 1;
 
   // Calculate start date for this cycle
@@ -35,9 +40,9 @@ async function generateNextCycleForProject(projectId, startDate, userId) {
   const title = `Cycle ${String(nextCycleNum).padStart(2, '0')}`;
 
   const [result] = await db.query(
-    `INSERT INTO service_cycles (project_id, cycle_number, title, start_date, end_date, status, created_by)
-     VALUES (?, ?, ?, ?, ?, 'active', ?)`,
-    [projectId, nextCycleNum, title, formatDate(cycleStart), formatDate(cycleEnd), userId]
+    `INSERT INTO service_cycles (project_id, project_service_id, cycle_number, title, start_date, end_date, status, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
+    [projectId, projectServiceId, nextCycleNum, title, formatDate(cycleStart), formatDate(cycleEnd), userId]
   );
 
   const cycleId = result.insertId;
@@ -58,10 +63,20 @@ function formatDate(date) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/projects/:projectId/cycles — list all cycles for a project
+// Also supports ?project_service_id=X to filter by service
 // ─────────────────────────────────────────────────────────────────────────────
 exports.listCycles = async (req, res) => {
   try {
     const projectId = req.params.projectId;
+    const { project_service_id } = req.query;
+
+    let whereClause = 'sc.project_id = ?';
+    const params = [projectId];
+
+    if (project_service_id) {
+      whereClause = 'sc.project_service_id = ?';
+      params[0] = project_service_id;
+    }
 
     const [cycles] = await db.query(
       `SELECT sc.*,
@@ -71,9 +86,9 @@ exports.listCycles = async (req, res) => {
               (SELECT COUNT(*) FROM cycle_sections cs WHERE cs.cycle_id = sc.id) AS total_sections
        FROM service_cycles sc
        LEFT JOIN users u ON u.id = sc.created_by
-       WHERE sc.project_id = ?
+       WHERE ${whereClause}
        ORDER BY sc.cycle_number ASC`,
-      [projectId]
+      params
     );
 
     return res.json(cycles);
@@ -85,10 +100,12 @@ exports.listCycles = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/projects/:projectId/cycles/generate — generate first cycle
+// Supports ?project_service_id=X to generate for a specific service
 // ─────────────────────────────────────────────────────────────────────────────
 exports.generateCycles = async (req, res) => {
   try {
     const projectId = req.params.projectId;
+    const { project_service_id } = req.body;
 
     // Get project start_date
     const [project] = await db.query(
@@ -100,20 +117,40 @@ exports.generateCycles = async (req, res) => {
       return res.status(404).json({ message: 'Project not found' });
     }
 
-    if (!project[0].start_date) {
-      return res.status(400).json({ message: 'Project must have a start date to generate cycles' });
+    // Determine the start date — use project_service start_date if available
+    let startDate = project[0].start_date;
+    let psId = project_service_id || null;
+
+    if (psId) {
+      const [ps] = await db.query(
+        'SELECT id, start_date FROM project_services WHERE id = ? AND project_id = ?',
+        [psId, projectId]
+      );
+      if (ps.length === 0) {
+        return res.status(404).json({ message: 'Project service not found' });
+      }
+      if (ps[0].start_date) startDate = ps[0].start_date;
     }
 
-    // Check if any cycle already exists
-    const [existing] = await db.query(
-      'SELECT id FROM service_cycles WHERE project_id = ? LIMIT 1',
-      [projectId]
-    );
+    if (!startDate) {
+      return res.status(400).json({ message: 'A start date is required to generate cycles. Set it on the project or service.' });
+    }
+
+    // Check if any cycle already exists for this scope
+    let existingQuery, existingParams;
+    if (psId) {
+      existingQuery = 'SELECT id FROM service_cycles WHERE project_service_id = ? LIMIT 1';
+      existingParams = [psId];
+    } else {
+      existingQuery = 'SELECT id FROM service_cycles WHERE project_id = ? AND project_service_id IS NULL LIMIT 1';
+      existingParams = [projectId];
+    }
+    const [existing] = await db.query(existingQuery, existingParams);
     if (existing.length > 0) {
       return res.status(409).json({ message: 'Cycle already exists. Complete current cycle to generate next.' });
     }
 
-    const cycle = await generateNextCycleForProject(projectId, project[0].start_date, req.user.id);
+    const cycle = await generateNextCycleForProject(projectId, startDate, req.user.id, psId);
 
     return res.status(201).json({ message: 'Cycle 01 generated', cycle });
   } catch (err) {
@@ -127,6 +164,7 @@ exports.generateCycles = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/projects/:projectId/cycles/:cycleId — get cycle detail with sections
+// Also returns tasks, tickets, content posts, shoots filtered by cycle date range
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getCycleDetail = async (req, res) => {
   try {
@@ -157,9 +195,9 @@ exports.getCycleDetail = async (req, res) => {
     );
     cycle.sections = sections;
 
-    // Get linked tasks
-    const [tasks] = await db.query(
-      `SELECT t.id, t.title, t.status, t.priority, t.deadline,
+    // Get explicitly linked tasks (cycle_tasks)
+    const [linkedTasks] = await db.query(
+      `SELECT t.id, t.title, t.status, t.priority, t.deadline, t.start_date,
               CONCAT(ua.first_name, ' ', ua.last_name) AS assigned_to_name
        FROM cycle_tasks ct
        JOIN tasks t ON t.id = ct.task_id AND t.deleted = 0
@@ -168,7 +206,71 @@ exports.getCycleDetail = async (req, res) => {
        ORDER BY t.created_at DESC`,
       [cycleId]
     );
-    cycle.tasks = tasks;
+
+    // Get tasks by date range (deadline falls within cycle period) — from project_tasks
+    const [dateRangeTasks] = await db.query(
+      `SELECT DISTINCT t.id, t.title, t.status, t.priority, t.deadline, t.start_date,
+              CONCAT(ua.first_name, ' ', ua.last_name) AS assigned_to_name
+       FROM project_tasks pt
+       JOIN tasks t ON t.id = pt.task_id AND t.deleted = 0
+       LEFT JOIN users ua ON ua.id = t.assigned_to
+       WHERE pt.project_id = ?
+         AND t.deadline >= ? AND t.deadline <= ?
+         AND t.id NOT IN (SELECT task_id FROM cycle_tasks WHERE cycle_id = ?)
+       ORDER BY t.deadline ASC`,
+      [projectId, cycle.start_date, cycle.end_date, cycleId]
+    );
+
+    cycle.tasks = [...linkedTasks, ...dateRangeTasks];
+
+    // Get tickets by date range (due_date or created_at within cycle period)
+    const [tickets] = await db.query(
+      `SELECT tk.id, tk.title, tk.status, tk.priority, tk.ticket_type, tk.due_date,
+              CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name
+       FROM tickets tk
+       LEFT JOIN users u ON u.id = tk.assigned_to
+       WHERE tk.project_id = ? AND tk.deleted = 0
+         AND (
+           (tk.due_date >= ? AND tk.due_date <= ?)
+           OR (tk.due_date IS NULL AND tk.created_at >= ? AND tk.created_at <= ?)
+         )
+       ORDER BY COALESCE(tk.due_date, tk.created_at) ASC`,
+      [projectId, cycle.start_date, cycle.end_date, cycle.start_date, cycle.end_date + ' 23:59:59']
+    );
+    cycle.tickets = tickets;
+
+    // Get content calendar posts by date range (posting_date within cycle period)
+    // Content plans are linked to client, so we need the project's client_id
+    const [projData] = await db.query('SELECT client_id FROM projects WHERE id = ?', [projectId]);
+    const clientId = projData[0]?.client_id;
+
+    if (clientId) {
+      const [contentPosts] = await db.query(
+        `SELECT ccp.id, ccp.topic, ccp.format, ccp.platform, ccp.posting_date, ccp.status, ccp.ad_target
+         FROM content_calendar_posts ccp
+         JOIN content_calendar_plans ccpl ON ccpl.id = ccp.plan_id AND ccpl.deleted = 0
+         WHERE ccpl.client_id = ?
+           AND ccp.posting_date >= ? AND ccp.posting_date <= ?
+         ORDER BY ccp.posting_date ASC`,
+        [clientId, cycle.start_date, cycle.end_date]
+      );
+      cycle.content_posts = contentPosts;
+
+      // Get shoots by date range (shoot_date within cycle period)
+      const [shoots] = await db.query(
+        `SELECT s.id, s.project_campaign_name, s.shoot_date, s.start_time, s.end_time,
+                s.location_type, s.city, s.status, s.shoot_status
+         FROM shoots s
+         WHERE s.client_brand_id = ? AND s.deleted = 0
+           AND s.shoot_date >= ? AND s.shoot_date <= ?
+         ORDER BY s.shoot_date ASC`,
+        [clientId, cycle.start_date, cycle.end_date]
+      );
+      cycle.shoots = shoots;
+    } else {
+      cycle.content_posts = [];
+      cycle.shoots = [];
+    }
 
     return res.json(cycle);
   } catch (err) {
@@ -225,9 +327,18 @@ exports.updateCycle = async (req, res) => {
     if (status === 'completed') {
       // Get project start_date for date calculation
       const [proj] = await db.query('SELECT start_date FROM projects WHERE id = ?', [projectId]);
-      if (proj.length > 0 && proj[0].start_date) {
+      let startDate = proj.length > 0 ? proj[0].start_date : null;
+
+      // If this cycle belongs to a project_service, use that start_date
+      const psId = currentCycle.project_service_id || null;
+      if (psId) {
+        const [ps] = await db.query('SELECT start_date FROM project_services WHERE id = ?', [psId]);
+        if (ps.length > 0 && ps[0].start_date) startDate = ps[0].start_date;
+      }
+
+      if (startDate) {
         try {
-          await generateNextCycleForProject(projectId, proj[0].start_date, req.user.id);
+          await generateNextCycleForProject(projectId, startDate, req.user.id, psId);
         } catch (genErr) {
           // If next cycle already exists (edge case), just ignore
           if (genErr.code !== 'ER_DUP_ENTRY') {
@@ -338,11 +449,12 @@ exports.removeCycleTask = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/projects/:projectId/cycles/generate-next — auto-generate next cycle
-// Called when current cycle is completed (also triggered automatically)
+// Supports body: { project_service_id }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.generateNextCycle = async (req, res) => {
   try {
     const projectId = req.params.projectId;
+    const { project_service_id } = req.body;
 
     // Get project start_date
     const [project] = await db.query(
@@ -352,15 +464,36 @@ exports.generateNextCycle = async (req, res) => {
     if (project.length === 0) {
       return res.status(404).json({ message: 'Project not found' });
     }
-    if (!project[0].start_date) {
-      return res.status(400).json({ message: 'Project must have a start date' });
+
+    let startDate = project[0].start_date;
+    let psId = project_service_id || null;
+
+    if (psId) {
+      const [ps] = await db.query(
+        'SELECT id, start_date FROM project_services WHERE id = ? AND project_id = ?',
+        [psId, projectId]
+      );
+      if (ps.length === 0) {
+        return res.status(404).json({ message: 'Project service not found' });
+      }
+      if (ps[0].start_date) startDate = ps[0].start_date;
+    }
+
+    if (!startDate) {
+      return res.status(400).json({ message: 'A start date is required' });
     }
 
     // Check if there's an active or paused cycle (can't generate next if current isn't completed)
-    const [activeCycles] = await db.query(
-      `SELECT id, status FROM service_cycles WHERE project_id = ? AND status IN ('active', 'paused') LIMIT 1`,
-      [projectId]
-    );
+    let activeQuery, activeParams;
+    if (psId) {
+      activeQuery = `SELECT id, status FROM service_cycles WHERE project_service_id = ? AND status IN ('active', 'paused') LIMIT 1`;
+      activeParams = [psId];
+    } else {
+      activeQuery = `SELECT id, status FROM service_cycles WHERE project_id = ? AND project_service_id IS NULL AND status IN ('active', 'paused') LIMIT 1`;
+      activeParams = [projectId];
+    }
+
+    const [activeCycles] = await db.query(activeQuery, activeParams);
     if (activeCycles.length > 0) {
       const msg = activeCycles[0].status === 'paused'
         ? 'Current cycle is paused. Resume and complete it before generating the next one.'
@@ -368,7 +501,7 @@ exports.generateNextCycle = async (req, res) => {
       return res.status(400).json({ message: msg });
     }
 
-    const cycle = await generateNextCycleForProject(projectId, project[0].start_date, req.user.id);
+    const cycle = await generateNextCycleForProject(projectId, startDate, req.user.id, psId);
     return res.status(201).json({ message: 'Next cycle generated', cycle });
   } catch (err) {
     console.error('Generate next cycle error:', err);
