@@ -63,4 +63,30 @@ router.delete(
   cyclesController.removeCycleTask
 );
 
+// ── Approvals ──
+router.post(
+  '/:projectId/cycles/:cycleId/approvals',
+  [param('projectId').isInt(), param('cycleId').isInt()],
+  cyclesController.addApproval
+);
+
+router.put(
+  '/:projectId/cycles/:cycleId/approvals/:approvalId',
+  [param('projectId').isInt(), param('cycleId').isInt(), param('approvalId').isInt()],
+  cyclesController.updateApproval
+);
+
+router.delete(
+  '/:projectId/cycles/:cycleId/approvals/:approvalId',
+  [param('projectId').isInt(), param('cycleId').isInt(), param('approvalId').isInt()],
+  cyclesController.deleteApproval
+);
+
+// ── Feedback ──
+router.put(
+  '/:projectId/cycles/:cycleId/feedback',
+  [param('projectId').isInt(), param('cycleId').isInt()],
+  cyclesController.saveFeedback
+);
+
 module.exports = router;

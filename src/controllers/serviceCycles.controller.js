@@ -256,6 +256,19 @@ exports.getCycleDetail = async (req, res) => {
       );
       cycle.content_posts = contentPosts;
 
+      // Get ads by date range (start_date within cycle period)
+      const [ads] = await db.query(
+        `SELECT cca.id, cca.creative_name, cca.campaign_objective, cca.platform,
+                cca.ad_status, cca.budget, cca.start_date, cca.end_date, cca.target_audience
+         FROM content_calendar_ads cca
+         JOIN content_calendar_plans ccpl ON ccpl.id = cca.plan_id AND ccpl.deleted = 0
+         WHERE ccpl.client_id = ?
+           AND cca.start_date >= ? AND cca.start_date <= ?
+         ORDER BY cca.start_date ASC`,
+        [clientId, cycle.start_date, cycle.end_date]
+      );
+      cycle.ads = ads;
+
       // Get shoots by date range (shoot_date within cycle period)
       const [shoots] = await db.query(
         `SELECT s.id, s.project_campaign_name, s.shoot_date, s.start_time, s.end_time,
@@ -269,8 +282,23 @@ exports.getCycleDetail = async (req, res) => {
       cycle.shoots = shoots;
     } else {
       cycle.content_posts = [];
+      cycle.ads = [];
       cycle.shoots = [];
     }
+
+    // Get cycle approvals
+    const [approvals] = await db.query(
+      `SELECT ca.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+       FROM cycle_approvals ca
+       LEFT JOIN users u ON u.id = ca.created_by
+       WHERE ca.cycle_id = ?
+       ORDER BY ca.created_at DESC`,
+      [cycleId]
+    );
+    cycle.approvals = approvals;
+
+    // Feedback is stored in service_cycles.notes
+    cycle.feedback = cycle.notes || '';
 
     return res.json(cycle);
   } catch (err) {
@@ -498,5 +526,120 @@ exports.generateNextCycle = async (req, res) => {
   } catch (err) {
     console.error('Generate next cycle error:', err);
     return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/projects/:projectId/cycles/:cycleId/approvals — add client approval item
+// ─────────────────────────────────────────────────────────────────────────────
+exports.addApproval = async (req, res) => {
+  try {
+    const { cycleId } = req.params;
+    const { title } = req.body;
+
+    if (!title || !title.trim()) {
+      return res.status(400).json({ message: 'Title is required' });
+    }
+
+    const [result] = await db.query(
+      'INSERT INTO cycle_approvals (cycle_id, title, created_by) VALUES (?, ?, ?)',
+      [cycleId, title.trim(), req.user.id]
+    );
+
+    const [row] = await db.query(
+      `SELECT ca.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+       FROM cycle_approvals ca LEFT JOIN users u ON u.id = ca.created_by WHERE ca.id = ?`,
+      [result.insertId]
+    );
+
+    return res.status(201).json(row[0]);
+  } catch (err) {
+    console.error('Add approval error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/projects/:projectId/cycles/:cycleId/approvals/:approvalId — update approval status
+// ─────────────────────────────────────────────────────────────────────────────
+exports.updateApproval = async (req, res) => {
+  try {
+    const { approvalId } = req.params;
+    const { status, notes } = req.body;
+
+    const validStatuses = ['pending', 'approved', 'rejected'];
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    const updates = [];
+    const values = [];
+    if (status) {
+      updates.push('status = ?');
+      values.push(status);
+      if (status === 'approved') {
+        updates.push('approved_at = NOW()');
+      } else {
+        updates.push('approved_at = NULL');
+      }
+    }
+    if (notes !== undefined) {
+      updates.push('notes = ?');
+      values.push(notes);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' });
+    }
+
+    await db.query(
+      `UPDATE cycle_approvals SET ${updates.join(', ')} WHERE id = ?`,
+      [...values, approvalId]
+    );
+
+    const [row] = await db.query(
+      `SELECT ca.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+       FROM cycle_approvals ca LEFT JOIN users u ON u.id = ca.created_by WHERE ca.id = ?`,
+      [approvalId]
+    );
+
+    return res.json(row[0]);
+  } catch (err) {
+    console.error('Update approval error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/projects/:projectId/cycles/:cycleId/approvals/:approvalId — delete approval
+// ─────────────────────────────────────────────────────────────────────────────
+exports.deleteApproval = async (req, res) => {
+  try {
+    const { approvalId } = req.params;
+    await db.query('DELETE FROM cycle_approvals WHERE id = ?', [approvalId]);
+    return res.json({ message: 'Approval deleted' });
+  } catch (err) {
+    console.error('Delete approval error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/projects/:projectId/cycles/:cycleId/feedback — save cycle feedback
+// ─────────────────────────────────────────────────────────────────────────────
+exports.saveFeedback = async (req, res) => {
+  try {
+    const { projectId, cycleId } = req.params;
+    const { feedback } = req.body;
+
+    await db.query(
+      'UPDATE service_cycles SET notes = ? WHERE id = ? AND project_id = ?',
+      [feedback || '', cycleId, projectId]
+    );
+
+    return res.json({ message: 'Feedback saved' });
+  } catch (err) {
+    console.error('Save feedback error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
   }
 };
