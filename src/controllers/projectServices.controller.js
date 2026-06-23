@@ -190,3 +190,229 @@ exports.getOne = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/projects/:projectId/services/:serviceId/pause — pause a service
+// ─────────────────────────────────────────────────────────────────────────────
+exports.pauseService = async (req, res) => {
+  try {
+    const { projectId, serviceId } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ message: 'Reason is required to pause a service' });
+    }
+
+    const [existing] = await db.query(
+      'SELECT * FROM project_services WHERE id = ? AND project_id = ?',
+      [serviceId, projectId]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Project service not found' });
+    }
+    if (existing[0].status !== 'active') {
+      return res.status(400).json({ message: 'Only active services can be paused' });
+    }
+
+    // Update service status
+    await db.query(
+      'UPDATE project_services SET status = ?, notes = ? WHERE id = ?',
+      ['paused', reason.trim(), serviceId]
+    );
+
+    // Pause the active cycle if any
+    await db.query(
+      `UPDATE service_cycles SET status = 'paused' WHERE project_service_id = ? AND status = 'active'`,
+      [serviceId]
+    );
+
+    // Log the action
+    await db.query(
+      `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
+      [projectId, `Service paused: ${reason.trim()}`, req.user.id]
+    );
+
+    return res.json({ message: 'Service paused successfully' });
+  } catch (err) {
+    console.error('Pause service error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/projects/:projectId/services/:serviceId/complete — complete a service
+// ─────────────────────────────────────────────────────────────────────────────
+exports.completeService = async (req, res) => {
+  try {
+    const { projectId, serviceId } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ message: 'Reason is required to complete a service' });
+    }
+
+    const [existing] = await db.query(
+      'SELECT * FROM project_services WHERE id = ? AND project_id = ?',
+      [serviceId, projectId]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Project service not found' });
+    }
+    if (existing[0].status === 'completed') {
+      return res.status(400).json({ message: 'Service is already completed' });
+    }
+
+    // Update service status
+    await db.query(
+      'UPDATE project_services SET status = ?, notes = ? WHERE id = ?',
+      ['completed', reason.trim(), serviceId]
+    );
+
+    // Complete the active/paused cycle if any
+    await db.query(
+      `UPDATE service_cycles SET status = 'completed' WHERE project_service_id = ? AND status IN ('active', 'paused')`,
+      [serviceId]
+    );
+
+    // Log the action
+    await db.query(
+      `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'milestone', ?, ?)`,
+      [projectId, `Service completed: ${reason.trim()}`, req.user.id]
+    );
+
+    return res.json({ message: 'Service completed successfully' });
+  } catch (err) {
+    console.error('Complete service error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/projects/:projectId/services/:serviceId/cancel — cancel a service
+// ─────────────────────────────────────────────────────────────────────────────
+exports.cancelService = async (req, res) => {
+  try {
+    const { projectId, serviceId } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ message: 'Reason is required to cancel a service' });
+    }
+
+    const [existing] = await db.query(
+      'SELECT * FROM project_services WHERE id = ? AND project_id = ?',
+      [serviceId, projectId]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Project service not found' });
+    }
+    if (existing[0].status === 'cancelled') {
+      return res.status(400).json({ message: 'Service is already cancelled' });
+    }
+
+    // Update service status
+    await db.query(
+      'UPDATE project_services SET status = ?, notes = ? WHERE id = ?',
+      ['cancelled', reason.trim(), serviceId]
+    );
+
+    // Skip the active/paused cycle if any
+    await db.query(
+      `UPDATE service_cycles SET status = 'skipped' WHERE project_service_id = ? AND status IN ('active', 'paused')`,
+      [serviceId]
+    );
+
+    // Log the action
+    await db.query(
+      `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'issue', ?, ?)`,
+      [projectId, `Service cancelled: ${reason.trim()}`, req.user.id]
+    );
+
+    return res.json({ message: 'Service cancelled successfully' });
+  } catch (err) {
+    console.error('Cancel service error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/projects/:projectId/services/:serviceId/new-cycle — create new cycle (reactivates service)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.createNewCycle = async (req, res) => {
+  try {
+    const { projectId, serviceId } = req.params;
+
+    const [existing] = await db.query(
+      'SELECT * FROM project_services WHERE id = ? AND project_id = ?',
+      [serviceId, projectId]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Project service not found' });
+    }
+
+    // Check no active cycle already exists
+    const [activeCycles] = await db.query(
+      `SELECT id FROM service_cycles WHERE project_service_id = ? AND status = 'active' LIMIT 1`,
+      [serviceId]
+    );
+    if (activeCycles.length > 0) {
+      return res.status(400).json({ message: 'An active cycle already exists for this service' });
+    }
+
+    // Determine start date for new cycle
+    const startDate = existing[0].start_date || new Date().toISOString().split('T')[0];
+
+    // Get max cycle number
+    const [maxRow] = await db.query(
+      'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_service_id = ?',
+      [serviceId]
+    );
+    const nextCycleNum = (maxRow[0].max_num || 0) + 1;
+
+    // New cycle starts from today, ends 30 days later
+    const today = new Date();
+    const cycleEnd = new Date(today);
+    cycleEnd.setDate(cycleEnd.getDate() + 30);
+
+    const title = `Cycle ${String(nextCycleNum).padStart(2, '0')}`;
+    const startStr = today.toISOString().split('T')[0];
+    const endStr = cycleEnd.toISOString().split('T')[0];
+
+    const [result] = await db.query(
+      `INSERT INTO service_cycles (project_id, project_service_id, cycle_number, title, start_date, end_date, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
+      [projectId, serviceId, nextCycleNum, title, startStr, endStr, req.user.id]
+    );
+
+    // Create 7 standard sections
+    const cycleId = result.insertId;
+    const sections = [
+      ['planning', 'Planning', 1],
+      ['research', 'Research', 2],
+      ['tasks', 'Tasks', 3],
+      ['approvals', 'Approvals', 4],
+      ['execution', 'Execution', 5],
+      ['reporting', 'Reporting', 6],
+      ['feedback', 'Feedback', 7],
+    ];
+    const sectionValues = sections.map(s => [cycleId, s[0], s[1], s[2]]);
+    await db.query(
+      'INSERT INTO cycle_sections (cycle_id, section_key, title, sort_order) VALUES ?',
+      [sectionValues]
+    );
+
+    // Reactivate the service
+    await db.query('UPDATE project_services SET status = ? WHERE id = ?', ['active', serviceId]);
+
+    // Log
+    await db.query(
+      `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
+      [projectId, `New cycle started: ${title}`, req.user.id]
+    );
+
+    return res.status(201).json({ message: `${title} created, service reactivated`, cycleId });
+  } catch (err) {
+    console.error('Create new cycle error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};

@@ -45,4 +45,32 @@ router.delete(
   controller.remove
 );
 
+// POST /api/projects/:projectId/services/:serviceId/pause — pause service
+router.post(
+  '/:projectId/services/:serviceId/pause',
+  [param('projectId').isInt(), param('serviceId').isInt()],
+  controller.pauseService
+);
+
+// POST /api/projects/:projectId/services/:serviceId/complete — complete service
+router.post(
+  '/:projectId/services/:serviceId/complete',
+  [param('projectId').isInt(), param('serviceId').isInt()],
+  controller.completeService
+);
+
+// POST /api/projects/:projectId/services/:serviceId/cancel — cancel service
+router.post(
+  '/:projectId/services/:serviceId/cancel',
+  [param('projectId').isInt(), param('serviceId').isInt()],
+  controller.cancelService
+);
+
+// POST /api/projects/:projectId/services/:serviceId/new-cycle — create new cycle (reactivates)
+router.post(
+  '/:projectId/services/:serviceId/new-cycle',
+  [param('projectId').isInt(), param('serviceId').isInt()],
+  controller.createNewCycle
+);
+
 module.exports = router;
