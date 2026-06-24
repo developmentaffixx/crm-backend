@@ -28,7 +28,7 @@ exports.list = async (req, res) => {
     const allowedSortColumns = { client_code: 'l.client_code', name: 'l.name', business_name: 'l.business_name' };
     const order = allowedSortColumns[sortBy]
       ? `${allowedSortColumns[sortBy]} ${sortOrder === 'asc' ? 'ASC' : 'DESC'}`
-      : 'l.updated_at DESC';
+      : 'l.converted_at DESC, l.updated_at DESC';
 
     const [rows] = await db.query(
       `SELECT l.*,

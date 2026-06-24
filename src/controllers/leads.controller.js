@@ -410,7 +410,7 @@ exports.updateStatus = async (req, res) => {
     // If status is being set to 'Won', generate client_code (same as convert endpoint)
     if (status === 'Won' && !lead.client_code) {
       const client_code = await generateClientCode();
-      await db.query('UPDATE leads SET status = ?, client_code = ? WHERE id = ?', [status, client_code, req.params.id]);
+      await db.query('UPDATE leads SET status = ?, client_code = ?, converted_at = NOW() WHERE id = ?', [status, client_code, req.params.id]);
     } else {
       await db.query('UPDATE leads SET status = ? WHERE id = ?', [status, req.params.id]);
     }
@@ -726,7 +726,7 @@ exports.convert = async (req, res) => {
       [req.params.id, lead.status, 'Won', req.user.id]
     );
 
-    await db.query("UPDATE leads SET status = 'Won', client_code = ? WHERE id = ?", [client_code, req.params.id]);
+    await db.query("UPDATE leads SET status = 'Won', client_code = ?, converted_at = NOW() WHERE id = ?", [client_code, req.params.id]);
 
     const [updated] = await db.query('SELECT * FROM leads WHERE id = ?', [req.params.id]);
     res.emitSocket('leads:updated', updated[0]);

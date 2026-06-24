@@ -48,4 +48,7 @@ router.post('/:id/upload-qr', param('id').isInt(), upload.single('qr'), invoices
 // POST /api/invoices/:id/send-email — send invoice to client via email
 router.post('/:id/send-email', param('id').isInt(), invoicesController.sendEmail);
 
+// POST /api/invoices/:id/send-reminder — send payment reminder to client
+router.post('/:id/send-reminder', param('id').isInt(), invoicesController.sendReminder);
+
 module.exports = router;
