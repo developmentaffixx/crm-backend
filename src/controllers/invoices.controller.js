@@ -1,6 +1,74 @@
 const db = require('../config/db');
 const { uploadToCloudinary } = require('../config/cloudinary');
 const { sendRawEmail } = require('../services/email.service');
+const htmlPdf = require('html-pdf-node');
+const { buildInvoiceHtml } = require('../helpers/invoicePdfHtml');
+const path = require('path');
+const fs = require('fs');
+
+// ─── Helper: Get logo as base64 for PDF ───────────────────────────────────────
+let logoBase64Cache = null;
+function getLogoBase64() {
+  if (logoBase64Cache) return logoBase64Cache;
+  try {
+    const logoPath = path.join(__dirname, '../../frontend-logo.png');
+    if (fs.existsSync(logoPath)) {
+      const data = fs.readFileSync(logoPath);
+      logoBase64Cache = `data:image/png;base64,${data.toString('base64')}`;
+    }
+  } catch (e) { /* no logo available */ }
+  return logoBase64Cache || null;
+}
+
+// ─── Helper: Generate PDF buffer from invoice ─────────────────────────────────
+async function generateInvoicePdf(invoiceId) {
+  // Fetch invoice
+  const [rows] = await db.query(
+    `SELECT i.*,
+            l.name AS lead_name,
+            l.business_name AS lead_business,
+            l.email AS lead_email,
+            l.phone AS lead_phone,
+            l.address AS lead_address,
+            l.city AS lead_city,
+            l.state AS lead_state,
+            l.zip_code AS lead_zip,
+            l.country AS lead_country
+     FROM invoices i
+     LEFT JOIN leads l ON l.id = i.lead_id
+     WHERE i.id = ? AND i.deleted = 0`,
+    [invoiceId]
+  );
+  if (rows.length === 0) return null;
+  const invoice = rows[0];
+
+  // Fetch items
+  const [items] = await db.query(
+    `SELECT ii.*, s.name AS service_name
+     FROM invoice_items ii
+     LEFT JOIN services s ON s.id = ii.service_id
+     WHERE ii.invoice_id = ?
+     ORDER BY ii.sort_order ASC`,
+    [invoice.id]
+  );
+
+  // Get company settings
+  const [compRows] = await db.query('SELECT * FROM company_settings WHERE id = 1');
+  const comp = compRows[0] || {};
+
+  const logoBase64 = getLogoBase64();
+  const html = buildInvoiceHtml(invoice, comp, items, logoBase64);
+
+  const file = { content: html };
+  const options = {
+    format: 'A4',
+    margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' },
+    printBackground: true,
+  };
+
+  const pdfBuffer = await htmlPdf.generatePdf(file, options);
+  return { pdfBuffer, invoice, comp };
+}
 
 // ─── Helper: Generate invoice number ──────────────────────────────────────────
 // Format: INV-YYMM-CLIENTCODE-### (e.g. INV-2504-AFXCL001-001)
@@ -406,196 +474,102 @@ exports.uploadQR = async (req, res) => {
 // ─── POST /api/invoices/:id/send-email ────────────────────────────────────────
 exports.sendEmail = async (req, res) => {
   try {
-    // Get invoice with client details
-    const [rows] = await db.query(
-      `SELECT i.*,
-              l.name AS lead_name,
-              l.business_name AS lead_business,
-              l.email AS lead_email,
-              l.phone AS lead_phone,
-              l.address AS lead_address,
-              l.city AS lead_city,
-              l.state AS lead_state,
-              l.zip_code AS lead_zip,
-              l.country AS lead_country
-       FROM invoices i
-       LEFT JOIN leads l ON l.id = i.lead_id
-       WHERE i.id = ? AND i.deleted = 0`,
-      [req.params.id]
-    );
+    const result = await generateInvoicePdf(req.params.id);
+    if (!result) return res.status(404).json({ message: 'Invoice not found' });
 
-    if (rows.length === 0) return res.status(404).json({ message: 'Invoice not found' });
+    const { pdfBuffer, invoice, comp } = result;
 
-    const invoice = rows[0];
     if (!invoice.lead_email) {
       return res.status(400).json({ message: 'Client does not have an email address' });
     }
 
-    // Get invoice items
-    const [items] = await db.query(
-      `SELECT ii.*, s.name AS service_name
-       FROM invoice_items ii
-       LEFT JOIN services s ON s.id = ii.service_id
-       WHERE ii.invoice_id = ?`,
-      [invoice.id]
-    );
+    const dueDate = invoice.due_date
+      ? new Date(invoice.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' })
+      : '—';
 
-    // Get company settings
-    const [compRows] = await db.query('SELECT * FROM company_settings WHERE id = 1');
-    const comp = compRows[0] || {};
-
-    const companyAddr = [comp.address_line1, comp.address_line2, comp.city, comp.state, comp.zip_code].filter(Boolean).join(', ');
-    const clientAddr = [invoice.lead_address, invoice.lead_city, invoice.lead_state, invoice.lead_zip, invoice.lead_country].filter(Boolean).join(', ');
-
-    const billDate = invoice.bill_date ? new Date(invoice.bill_date).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
-    const dueDate = invoice.due_date ? new Date(invoice.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
-
-    // Build items HTML
-    const itemsHtml = items.map((item, idx) => `
-      <tr style="border-bottom:1px solid #e8e2dc;">
-        <td style="padding:10px 8px;font-size:12px;color:#4a4340;">
-          ${item.service_name || item.description || '—'}
-          ${item.service_name && item.description ? `<div style="font-size:10px;color:#9a8e82;margin-top:2px;">${item.description}</div>` : ''}
-        </td>
-        <td style="padding:10px 8px;text-align:center;font-size:12px;color:#6b5e50;">${item.hsn_code || '—'}</td>
-        <td style="padding:10px 8px;text-align:center;font-size:12px;color:#6b5e50;">${Number(item.quantity)}</td>
-        <td style="padding:10px 8px;text-align:right;font-size:12px;color:#6b5e50;">₹${Number(item.rate).toLocaleString('en-IN')}</td>
-        <td style="padding:10px 8px;text-align:right;font-size:12px;font-weight:600;color:#4a4340;">₹${Number(item.amount).toLocaleString('en-IN')}</td>
-      </tr>
-    `).join('');
-
-    const discountRow = parseFloat(invoice.discount) > 0 ? `
-      <tr style="border-bottom:1px solid #e8e2dc;">
-        <td colspan="3" style="padding:8px;"></td>
-        <td style="padding:8px;text-align:right;font-size:12px;font-weight:600;color:#6b5e50;">Discount</td>
-        <td style="padding:8px;text-align:right;font-size:12px;color:#6b5e50;">- ₹${Number(invoice.discount).toLocaleString('en-IN')}</td>
-      </tr>` : '';
-
-    const termsLines = invoice.note
-      ? invoice.note.split('\n').map(l => `<p style="margin:2px 0;font-size:11px;color:#9a8e82;">${l}</p>`).join('')
-      : '';
-
-    // Build email HTML
+    // Simple email body with PDF attached
     const emailHtml = `
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
 <body style="font-family:'Times New Roman',Times,serif;margin:0;padding:20px;background:#f5f1eb;">
-<div style="max-width:650px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,0.08);">
-
-  <!-- Header -->
-  <div style="background:#4a4340;color:#fff;padding:28px;text-align:center;">
-    <h1 style="margin:0;font-size:20px;font-weight:300;letter-spacing:3px;text-transform:uppercase;">Invoice</h1>
-    <p style="margin:8px 0 0;font-size:12px;opacity:0.7;">${comp.company_name || 'Company'}</p>
+<div style="max-width:550px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,0.08);">
+  <div style="background:#4a4340;color:#fff;padding:24px;text-align:center;">
+    <h1 style="margin:0;font-size:18px;font-weight:300;letter-spacing:3px;text-transform:uppercase;">Invoice</h1>
+    <p style="margin:6px 0 0;font-size:12px;opacity:0.7;">${comp.company_name || 'Company'}</p>
   </div>
-
-  <!-- Body -->
-  <div style="padding:28px;">
-    <p style="font-size:14px;color:#4a4340;margin:0 0 8px;">Dear <strong>${invoice.lead_name || 'Client'}</strong>,</p>
-    <p style="font-size:13px;color:#6b5e50;margin:0 0 24px;line-height:1.6;">Please find your invoice details below.</p>
-
-    <!-- Invoice Meta -->
-    <div style="background:#f5f1eb;border-radius:8px;padding:16px;margin-bottom:20px;">
+  <div style="padding:24px;">
+    <p style="font-size:14px;color:#4a4340;margin:0 0 12px;">Dear <strong>${invoice.lead_name || 'Client'}</strong>,</p>
+    <p style="font-size:13px;color:#6b5e50;margin:0 0 20px;line-height:1.6;">Please find your invoice attached as a PDF.</p>
+    <div style="background:#f5f1eb;border-radius:8px;padding:14px 16px;margin-bottom:16px;">
       <table style="width:100%;border-collapse:collapse;">
         <tr>
-          <td style="padding:6px 0;font-size:12px;color:#9a8e82;">Invoice No.</td>
-          <td style="padding:6px 0;font-size:13px;font-weight:700;color:#4a4340;text-align:right;">${invoice.invoice_number}</td>
+          <td style="padding:4px 0;font-size:12px;color:#9a8e82;">Invoice No.</td>
+          <td style="padding:4px 0;font-size:13px;font-weight:700;color:#4a4340;text-align:right;">${invoice.invoice_number}</td>
         </tr>
         <tr>
-          <td style="padding:6px 0;font-size:12px;color:#9a8e82;">Bill Date</td>
-          <td style="padding:6px 0;font-size:13px;color:#4a4340;text-align:right;">${billDate}</td>
+          <td style="padding:4px 0;font-size:12px;color:#9a8e82;">Due Date</td>
+          <td style="padding:4px 0;font-size:13px;color:#4a4340;text-align:right;">${dueDate}</td>
         </tr>
         <tr>
-          <td style="padding:6px 0;font-size:12px;color:#9a8e82;">Due Date</td>
-          <td style="padding:6px 0;font-size:13px;font-weight:600;color:${invoice.status === 'Overdue' ? '#dc2626' : '#4a4340'};text-align:right;">${dueDate}</td>
+          <td style="padding:4px 0;font-size:12px;color:#9a8e82;">Total Amount</td>
+          <td style="padding:4px 0;font-size:14px;font-weight:700;color:#4a4340;text-align:right;">₹${Number(invoice.total_amount).toLocaleString('en-IN')}</td>
         </tr>
-        <tr>
-          <td style="padding:6px 0;font-size:12px;color:#9a8e82;">Status</td>
-          <td style="padding:6px 0;font-size:13px;font-weight:600;color:${invoice.status === 'Paid' ? '#16a34a' : invoice.status === 'Overdue' ? '#dc2626' : '#6b5e50'};text-align:right;">${invoice.status}</td>
-        </tr>
+        ${parseFloat(invoice.balance_amount) > 0 ? `
+        <tr style="border-top:1px solid #e0d9d0;">
+          <td style="padding:6px 0;font-size:12px;color:#dc2626;font-weight:600;">Balance Due</td>
+          <td style="padding:6px 0;font-size:14px;font-weight:700;color:#dc2626;text-align:right;">₹${Number(invoice.balance_amount).toLocaleString('en-IN')}</td>
+        </tr>` : `
+        <tr style="border-top:1px solid #e0d9d0;">
+          <td colspan="2" style="padding:6px 0;font-size:13px;color:#16a34a;font-weight:600;text-align:center;">Fully Paid — Thank you!</td>
+        </tr>`}
       </table>
     </div>
-
-    <!-- Items Table -->
-    <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
-      <thead>
-        <tr style="border-bottom:1.5px solid #b8a994;">
-          <th style="padding:10px 8px;font-size:11px;text-align:left;color:#4a4340;font-weight:700;">Description</th>
-          <th style="padding:10px 8px;font-size:11px;text-align:center;color:#4a4340;font-weight:700;width:60px;">HSN</th>
-          <th style="padding:10px 8px;font-size:11px;text-align:center;color:#4a4340;font-weight:700;width:40px;">Qty</th>
-          <th style="padding:10px 8px;font-size:11px;text-align:right;color:#4a4340;font-weight:700;width:80px;">Rate</th>
-          <th style="padding:10px 8px;font-size:11px;text-align:right;color:#4a4340;font-weight:700;width:90px;">Amount</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${itemsHtml}
-        ${discountRow}
-      </tbody>
-    </table>
-
-    <!-- Total -->
-    <div style="display:flex;justify-content:flex-end;margin-bottom:16px;">
-      <div style="background:#f7f3ee;border-radius:6px;padding:12px 16px;min-width:200px;">
-        <table style="width:100%;border-collapse:collapse;">
-          <tr>
-            <td style="padding:4px 0;font-size:12px;color:#6b5e50;">Sub-total</td>
-            <td style="padding:4px 0;font-size:12px;color:#6b5e50;text-align:right;">₹${Number(invoice.subtotal).toLocaleString('en-IN')}</td>
-          </tr>
-          <tr style="border-top:1px solid #e0d9d0;">
-            <td style="padding:8px 0 4px;font-size:14px;font-weight:700;color:#4a4340;">Total</td>
-            <td style="padding:8px 0 4px;font-size:14px;font-weight:700;color:#4a4340;text-align:right;">₹${Number(invoice.total_amount).toLocaleString('en-IN')}</td>
-          </tr>
-        </table>
-      </div>
-    </div>
-
-    ${parseFloat(invoice.balance_amount) > 0 ? `
-    <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:14px 16px;margin-bottom:16px;">
-      <p style="margin:0;font-size:13px;color:#dc2626;font-weight:600;">Balance Due: ₹${Number(invoice.balance_amount).toLocaleString('en-IN')}</p>
-    </div>` : `
-    <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 16px;margin-bottom:16px;">
-      <p style="margin:0;font-size:13px;color:#16a34a;font-weight:600;">Fully Paid — Thank you!</p>
-    </div>`}
-
-    <!-- Bank Details -->
-    ${(invoice.bank_name || invoice.account_number) ? `
-    <div style="background:#fafafa;border:1px solid #e8e2dc;border-radius:8px;padding:14px 16px;margin-bottom:16px;">
-      <p style="margin:0 0 6px;font-size:11px;font-weight:700;color:#b8a994;text-transform:uppercase;letter-spacing:0.5px;">Bank Details</p>
-      <p style="margin:0;font-size:12px;color:#4a4340;line-height:1.8;">
-        ${invoice.bank_name ? `Bank: <strong>${invoice.bank_name}</strong><br>` : ''}
-        ${invoice.account_number ? `A/c No: <strong>${invoice.account_number}</strong><br>` : ''}
-        ${invoice.ifsc_code ? `IFSC: <strong>${invoice.ifsc_code}</strong><br>` : ''}
-        ${invoice.branch ? `Branch: ${invoice.branch}` : ''}
-      </p>
-    </div>` : ''}
-
-    <!-- Terms -->
-    ${termsLines ? `
-    <div style="margin-top:16px;padding-top:14px;border-top:1px solid #e8e2dc;">
-      <p style="margin:0 0 6px;font-size:11px;font-weight:700;color:#b8a994;text-transform:uppercase;letter-spacing:0.5px;">Terms & Conditions</p>
-      ${termsLines}
-    </div>` : ''}
+    <p style="font-size:11px;color:#9a8e82;margin:0;">Please find the detailed invoice attached as a PDF document.</p>
   </div>
-
-  <!-- Footer -->
-  <div style="background:#f5f1eb;padding:16px 28px;text-align:center;border-top:1px solid #e8e2dc;">
-    <p style="margin:0;font-size:11px;color:#b8a994;">Entity belongs to Scale Forge Private Limited</p>
+  <div style="background:#f5f1eb;padding:14px 24px;text-align:center;border-top:1px solid #e8e2dc;">
+    <p style="margin:0;font-size:10px;color:#b8a994;">Entity belongs to Scale Forge Private Limited</p>
   </div>
 </div>
 </body>
 </html>`;
 
-    // Send the email
+    // Send email with PDF attachment
     await sendRawEmail({
       to: invoice.lead_email,
       subject: `Invoice ${invoice.invoice_number} from ${comp.company_name || 'CRM'}`,
       html: emailHtml,
+      attachments: [
+        {
+          filename: `${invoice.invoice_number}.pdf`,
+          content: pdfBuffer,
+          contentType: 'application/pdf',
+        }
+      ],
     });
 
     return res.json({ message: 'Invoice emailed successfully' });
   } catch (err) {
     console.error('Send invoice email error:', err);
     return res.status(500).json({ message: err.message || 'Failed to send email' });
+  }
+};
+
+// ─── GET /api/invoices/:id/download-pdf — Download invoice as PDF ─────────────
+exports.downloadPdf = async (req, res) => {
+  try {
+    const result = await generateInvoicePdf(req.params.id);
+    if (!result) return res.status(404).json({ message: 'Invoice not found' });
+
+    const { pdfBuffer, invoice } = result;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${invoice.invoice_number}.pdf"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    return res.send(pdfBuffer);
+  } catch (err) {
+    console.error('Download PDF error:', err);
+    return res.status(500).json({ message: err.message || 'Failed to generate PDF' });
   }
 };
 

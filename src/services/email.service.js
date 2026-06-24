@@ -67,13 +67,13 @@ async function sendTemplateEmail(slug, toEmail, vars = {}) {
 }
 
 /**
- * Send a raw email (used for test send).
+ * Send a raw email (used for test send, invoice emails, etc.).
  */
-async function sendRawEmail({ to, subject, html }) {
+async function sendRawEmail({ to, subject, html, attachments }) {
   const result = await getTransporter();
   if (!result) throw new Error('Email is disabled or not configured');
   const { transporter, from } = result;
-  await transporter.sendMail({ from, to, subject, html });
+  await transporter.sendMail({ from, to, subject, html, attachments });
 }
 
 /**
