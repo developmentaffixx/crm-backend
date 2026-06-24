@@ -1,7 +1,6 @@
 const db = require('../config/db');
 const { uploadToCloudinary } = require('../config/cloudinary');
 const { sendRawEmail } = require('../services/email.service');
-const { buildInvoiceHtml } = require('../helpers/invoicePdfHtml');
 
 // ─── Helper: Generate invoice number ──────────────────────────────────────────
 // Format: INV-YYMM-CLIENTCODE-### (e.g. INV-2504-AFXCL001-001)
@@ -407,18 +406,11 @@ exports.uploadQR = async (req, res) => {
 // ─── POST /api/invoices/:id/send-email ────────────────────────────────────────
 exports.sendEmail = async (req, res) => {
   try {
-    // Fetch invoice
+    // Fetch invoice with client details
     const [rows] = await db.query(
       `SELECT i.*,
               l.name AS lead_name,
-              l.business_name AS lead_business,
-              l.email AS lead_email,
-              l.phone AS lead_phone,
-              l.address AS lead_address,
-              l.city AS lead_city,
-              l.state AS lead_state,
-              l.zip_code AS lead_zip,
-              l.country AS lead_country
+              l.email AS lead_email
        FROM invoices i
        LEFT JOIN leads l ON l.id = i.lead_id
        WHERE i.id = ? AND i.deleted = 0`,
@@ -431,28 +423,77 @@ exports.sendEmail = async (req, res) => {
       return res.status(400).json({ message: 'Client does not have an email address' });
     }
 
-    // Fetch items
-    const [items] = await db.query(
-      `SELECT ii.*, s.name AS service_name
-       FROM invoice_items ii
-       LEFT JOIN services s ON s.id = ii.service_id
-       WHERE ii.invoice_id = ?
-       ORDER BY ii.sort_order ASC`,
-      [invoice.id]
-    );
+    if (!req.file) {
+      return res.status(400).json({ message: 'PDF file is required' });
+    }
 
     // Get company settings
     const [compRows] = await db.query('SELECT * FROM company_settings WHERE id = 1');
     const comp = compRows[0] || {};
 
-    // Build the invoice HTML (same as the new UI) for inline email
-    const emailHtml = buildInvoiceHtml(invoice, comp, items, null);
+    const dueDate = invoice.due_date
+      ? new Date(invoice.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' })
+      : '—';
 
-    // Send email with inline invoice HTML
+    // Simple email body
+    const emailHtml = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family:'Times New Roman',Times,serif;margin:0;padding:20px;background:#f5f1eb;">
+<div style="max-width:550px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,0.08);">
+  <div style="background:#4a4340;color:#fff;padding:24px;text-align:center;">
+    <h1 style="margin:0;font-size:18px;font-weight:300;letter-spacing:3px;text-transform:uppercase;">Invoice</h1>
+    <p style="margin:6px 0 0;font-size:12px;opacity:0.7;">${comp.company_name || 'Company'}</p>
+  </div>
+  <div style="padding:24px;">
+    <p style="font-size:14px;color:#4a4340;margin:0 0 12px;">Dear <strong>${invoice.lead_name || 'Client'}</strong>,</p>
+    <p style="font-size:13px;color:#6b5e50;margin:0 0 20px;line-height:1.6;">Please find your invoice attached.</p>
+    <div style="background:#f5f1eb;border-radius:8px;padding:14px 16px;margin-bottom:16px;">
+      <table style="width:100%;border-collapse:collapse;">
+        <tr>
+          <td style="padding:4px 0;font-size:12px;color:#9a8e82;">Invoice No.</td>
+          <td style="padding:4px 0;font-size:13px;font-weight:700;color:#4a4340;text-align:right;">${invoice.invoice_number}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;font-size:12px;color:#9a8e82;">Due Date</td>
+          <td style="padding:4px 0;font-size:13px;color:#4a4340;text-align:right;">${dueDate}</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;font-size:12px;color:#9a8e82;">Total Amount</td>
+          <td style="padding:4px 0;font-size:14px;font-weight:700;color:#4a4340;text-align:right;">₹${Number(invoice.total_amount).toLocaleString('en-IN')}</td>
+        </tr>
+        ${parseFloat(invoice.balance_amount) > 0 ? `
+        <tr style="border-top:1px solid #e0d9d0;">
+          <td style="padding:6px 0;font-size:12px;color:#dc2626;font-weight:600;">Balance Due</td>
+          <td style="padding:6px 0;font-size:14px;font-weight:700;color:#dc2626;text-align:right;">₹${Number(invoice.balance_amount).toLocaleString('en-IN')}</td>
+        </tr>` : `
+        <tr style="border-top:1px solid #e0d9d0;">
+          <td colspan="2" style="padding:6px 0;font-size:13px;color:#16a34a;font-weight:600;text-align:center;">Fully Paid — Thank you!</td>
+        </tr>`}
+      </table>
+    </div>
+    <p style="font-size:11px;color:#9a8e82;margin:0;">The detailed invoice is attached as a PDF.</p>
+  </div>
+  <div style="background:#f5f1eb;padding:14px 24px;text-align:center;border-top:1px solid #e8e2dc;">
+    <p style="margin:0;font-size:10px;color:#b8a994;">Entity belongs to Scale Forge Private Limited</p>
+  </div>
+</div>
+</body>
+</html>`;
+
+    // Send email with the uploaded PDF attached
     await sendRawEmail({
       to: invoice.lead_email,
       subject: `Invoice ${invoice.invoice_number} from ${comp.company_name || 'CRM'}`,
       html: emailHtml,
+      attachments: [
+        {
+          filename: `${invoice.invoice_number}.pdf`,
+          content: req.file.buffer,
+          contentType: 'application/pdf',
+        }
+      ],
     });
 
     return res.json({ message: 'Invoice emailed successfully' });
