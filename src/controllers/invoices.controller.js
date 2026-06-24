@@ -440,7 +440,7 @@ exports.sendEmail = async (req, res) => {
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
-<body style="font-family:'Times New Roman',Times,serif;margin:0;padding:20px;background:#f5f1eb;">
+<body style="font-family:'Times New Roman',Times,serif;margin:0;padding:20px;background:#ffffff;">
 <div style="max-width:550px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,0.08);">
   <div style="background:#4a4340;color:#fff;padding:24px;text-align:center;">
     <h1 style="margin:0;font-size:18px;font-weight:300;letter-spacing:3px;text-transform:uppercase;">Invoice</h1>
@@ -475,7 +475,7 @@ exports.sendEmail = async (req, res) => {
     </div>
     <p style="font-size:11px;color:#9a8e82;margin:0;">The detailed invoice is attached as a PDF.</p>
   </div>
-  <div style="background:#f5f1eb;padding:14px 24px;text-align:center;border-top:1px solid #e8e2dc;">
+  <div style="padding:14px 24px;text-align:center;border-top:1px solid #e8e2dc;">
     <p style="margin:0;font-size:10px;color:#b8a994;">Entity belongs to Scale Forge Private Limited</p>
   </div>
 </div>
