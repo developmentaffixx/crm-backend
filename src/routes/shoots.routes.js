@@ -18,8 +18,7 @@ router.post(
   [
     body('project_campaign_name').notEmpty().withMessage('Project/Campaign name is required'),
     body('shoot_date').notEmpty().withMessage('Shoot date is required'),
-    body('start_time').notEmpty().withMessage('Start time is required'),
-    body('end_time').notEmpty().withMessage('End time is required'),
+    body('reporting_time').notEmpty().withMessage('Reporting time is required'),
     body('location_type').notEmpty().withMessage('Location type is required'),
   ],
   shootsController.create

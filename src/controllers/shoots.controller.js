@@ -21,8 +21,9 @@ exports.list = async (req, res) => {
     }
 
     if (!req.user.is_admin) {
-      where += ' AND s.created_by = ?';
-      params.push(req.user.id);
+      // Show shoots where user is creator, photographer, videographer, or shoot manager
+      where += ` AND (s.created_by = ? OR s.shoot_manager_id = ? OR JSON_CONTAINS(s.photographers, CAST(? AS JSON)) OR JSON_CONTAINS(s.videographers, CAST(? AS JSON)))`;
+      params.push(req.user.id, req.user.id, req.user.id, req.user.id);
     }
 
     const [rows] = await db.query(
@@ -80,8 +81,14 @@ exports.getOne = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Shoot not found' });
 
     const shoot = rows[0];
+    // Access: admin, creator, assigned team members
     if (!req.user.is_admin && shoot.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+      const photographers = shoot.photographers ? (typeof shoot.photographers === 'string' ? JSON.parse(shoot.photographers) : shoot.photographers) : [];
+      const videographers = shoot.videographers ? (typeof shoot.videographers === 'string' ? JSON.parse(shoot.videographers) : shoot.videographers) : [];
+      const isAssigned = shoot.shoot_manager_id === req.user.id || photographers.includes(req.user.id) || videographers.includes(req.user.id);
+      if (!isAssigned) {
+        return res.status(403).json({ message: 'Access denied' });
+      }
     }
 
     // Parse JSON fields
@@ -123,7 +130,7 @@ exports.create = async (req, res) => {
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const {
-    client_brand_id, project_campaign_name, shoot_date, start_time, end_time,
+    client_brand_id, project_campaign_name, shoot_date, reporting_time,
     location_type, exact_address, city, maps_link,
     photographers, videographers, shoot_manager_id
   } = req.body;
@@ -156,14 +163,14 @@ exports.create = async (req, res) => {
 
     const [result] = await db.query(
       `INSERT INTO shoots 
-        (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, start_time, end_time,
+        (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
          location_type, exact_address, city, maps_link,
          photographers, videographers, shoot_manager_id,
          status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
       [
         shoot_id_code,
-        toInt(client_brand_id), project_campaign_name, shoot_date, start_time, end_time,
+        toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
         location_type, toNull(exact_address), toNull(city), toNull(maps_link),
         photographers ? JSON.stringify(photographers) : null,
         videographers ? JSON.stringify(videographers) : null,
@@ -212,11 +219,10 @@ exports.update = async (req, res) => {
     }
 
     const allowed = [
-      'client_brand_id', 'project_campaign_name', 'shoot_date', 'start_time', 'end_time',
+      'client_brand_id', 'project_campaign_name', 'shoot_date', 'reporting_time',
       'location_type', 'exact_address', 'city', 'maps_link',
       'photographers', 'videographers', 'shoot_manager_id',
-      'photos_clicked', 'video_clips', 'reels_shot', 'equipment_used',
-      'shoot_status', 'reshoot_reason'
+      'post_start_time', 'post_end_time', 'post_duration_minutes'
     ];
 
     const updates = {};
@@ -234,9 +240,18 @@ exports.update = async (req, res) => {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
-    // If member marks shoot_status as completed/partially_completed and current status is 'approved',
-    // move to pending_completion for admin sign-off
-    if (req.body.shoot_status && ['completed', 'partially_completed'].includes(req.body.shoot_status) && shoot.status === 'approved') {
+    // Auto-calculate post_duration_minutes if both post times are provided
+    if (req.body.post_start_time && req.body.post_end_time) {
+      const [sh, sm] = req.body.post_start_time.split(':').map(Number);
+      const [eh, em] = req.body.post_end_time.split(':').map(Number);
+      const startMins = sh * 60 + sm;
+      const endMins = eh * 60 + em;
+      updates.post_duration_minutes = endMins >= startMins ? endMins - startMins : (24 * 60 - startMins) + endMins;
+    }
+
+    // If member submits post-duration data and current status is 'approved',
+    // move to pending_completion for admin sign-off (close request)
+    if (req.body.post_start_time && req.body.post_end_time && shoot.status === 'approved') {
       updates.status = 'pending_completion';
     }
 
@@ -294,7 +309,7 @@ exports.approve = async (req, res) => {
         [newStatus, req.user.id, remarks || null, req.params.id]
       );
     }
-    // Stage 2: pending_completion
+    // Stage 2: pending_completion (close request approval)
     else if (shoot.status === 'pending_completion') {
       if (action === 'approve') {
         await db.query(
