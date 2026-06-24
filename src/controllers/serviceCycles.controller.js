@@ -15,8 +15,6 @@ const CYCLE_SECTIONS = [
 // Helper: Generate ONE next cycle for a project service (or legacy project)
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateNextCycleForProject(projectId, startDate, userId, projectServiceId = null) {
-  const start = new Date(startDate);
-
   // Get existing max cycle number (scoped to project_service_id if available)
   let maxQuery, maxParams;
   if (projectServiceId) {
@@ -29,13 +27,10 @@ async function generateNextCycleForProject(projectId, startDate, userId, project
   const [existing] = await db.query(maxQuery, maxParams);
   const nextCycleNum = (existing[0].max_num || 0) + 1;
 
-  // Calculate start date for this cycle
-  const cycleStart = new Date(start);
-  cycleStart.setMonth(cycleStart.getMonth() + (nextCycleNum - 1));
-
+  // Cycle always starts from TODAY, ends 30 days later
+  const cycleStart = new Date();
   const cycleEnd = new Date(cycleStart);
-  cycleEnd.setMonth(cycleEnd.getMonth() + 1);
-  cycleEnd.setDate(cycleEnd.getDate() - 1);
+  cycleEnd.setDate(cycleEnd.getDate() + 30);
 
   const title = `Cycle ${String(nextCycleNum).padStart(2, '0')}`;
 
