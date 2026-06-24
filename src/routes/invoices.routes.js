@@ -5,7 +5,7 @@ const { param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const invoicesController = require('../controllers/invoices.controller');
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
 // All invoice routes require authentication
 router.use(authenticate);
