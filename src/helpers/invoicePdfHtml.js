@@ -168,7 +168,7 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
     <!-- Company Info -->
     <div style="text-align:center;margin-bottom:24px;">
       <p style="font-size:14px;font-weight:600;color:#4a4340;margin:0;">${comp.company_name || 'Your Business'}</p>
-      <div style="font-size:12px;color:#6b5e50;margin-top:4px;line-height:1.6;">
+      <div style="font-size:12px;color:#9a8e82;font-weight:400;margin-top:4px;line-height:1.6;">
         ${companyContact ? `<p style="margin:0;">${companyContact}</p>` : ''}
         ${companyAddr ? `<p style="margin:0;">${companyAddr}</p>` : ''}
       </div>
@@ -256,7 +256,7 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
       <!-- Signature -->
       <div class="footer-col" style="display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-height:120px;">
         <div style="border-top:1px solid #b8a994;padding-top:5px;text-align:center;width:80%;">
-          <p style="font-size:11px;color:#9a8e82;">Authorised Signatory</p>
+          <p style="font-size:11px;color:#9a8e82;">For Affixx Media</p>
         </div>
       </div>
     </div>
