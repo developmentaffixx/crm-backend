@@ -2,6 +2,7 @@ USE crm_task_module;
 
 -- ============================================================
 -- Fix Client Codes: Remove Starvault from clients page, reassign AFXCL005 to Swagath boutique store
+-- Also fix related invoices
 -- Date: 2026-06-25
 -- ============================================================
 
@@ -15,3 +16,15 @@ WHERE client_code = 'AFXCL005' AND name = 'Starvault';
 UPDATE leads
 SET client_code = 'AFXCL005'
 WHERE client_code = 'AFXCL006' AND name = 'Swagath boutique store';
+
+-- Step 3: Soft-delete Starvault's invoice (INV-2606-AFXCL005-005)
+UPDATE invoices
+SET deleted = 1
+WHERE invoice_number = 'INV-2606-AFXCL005-005';
+
+-- Step 4: Update Swagath boutique store's invoice number from AFXCL006 to AFXCL005
+-- Also update lead_id to point to Swagath's lead record
+UPDATE invoices
+SET invoice_number = 'INV-2606-AFXCL005-005',
+    lead_id = (SELECT id FROM leads WHERE name = 'Swagath boutique store' AND client_code = 'AFXCL005' LIMIT 1)
+WHERE invoice_number = 'INV-2606-AFXCL006-006';

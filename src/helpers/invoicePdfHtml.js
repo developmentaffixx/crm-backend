@@ -225,7 +225,7 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
 
     <!-- Totals -->
     <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
-      <div style="width:200px;">
+      <div style="width:220px;">
         <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;color:#6b5e50;border-bottom:1px solid #e8e2dc;">
           <span style="font-weight:600;">Sub-total</span>
           <span>₹${formatINR(invoice.subtotal)}</span>
@@ -235,6 +235,15 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
           <span>Total</span>
           <span>₹${formatINR(invoice.total_amount)}</span>
         </div>
+        ${parseFloat(invoice.paid_amount) > 0 ? `
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;color:#16a34a;border-bottom:1px solid #e8e2dc;margin-top:4px;">
+          <span style="font-weight:600;">Paid Amount</span>
+          <span>₹${formatINR(invoice.paid_amount)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;font-weight:700;color:#dc2626;margin-top:2px;">
+          <span>Balance Due</span>
+          <span>₹${formatINR(invoice.balance_amount)}</span>
+        </div>` : ''}
       </div>
     </div>
 
