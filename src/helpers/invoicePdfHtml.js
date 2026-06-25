@@ -56,20 +56,20 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
   // Items rows
   const itemsHtml = items.map((item) => `
     <tr style="border-bottom:1px solid #e8e2dc;">
-      <td style="padding:10px 8px;font-size:10.5px;color:#4a4340;text-align:left;">
+      <td style="padding:10px 8px;font-size:13px;color:#4a4340;text-align:left;">
         ${item.service_name || item.description || '—'}
-        ${item.service_name && item.description ? `<div style="font-size:9px;color:#9a8e82;margin-top:2px;">${item.description}</div>` : ''}
+        ${item.service_name && item.description ? `<div style="font-size:11px;color:#9a8e82;margin-top:2px;">${item.description}</div>` : ''}
       </td>
-      <td style="padding:10px 8px;text-align:center;font-size:10.5px;color:#6b5e50;">${item.hsn_code || '—'}</td>
-      <td style="padding:10px 8px;text-align:center;font-size:10.5px;color:#6b5e50;">${Number(item.quantity)}</td>
-      <td style="padding:10px 8px;text-align:right;font-size:10.5px;color:#6b5e50;">₹${formatINR(item.rate)}</td>
-      <td style="padding:10px 8px;text-align:right;font-size:10.5px;font-weight:600;color:#4a4340;">₹${formatINR(item.amount)}</td>
+      <td style="padding:10px 8px;text-align:center;font-size:13px;color:#6b5e50;">${item.hsn_code || '—'}</td>
+      <td style="padding:10px 8px;text-align:center;font-size:13px;color:#6b5e50;">${Number(item.quantity)}</td>
+      <td style="padding:10px 8px;text-align:right;font-size:13px;color:#6b5e50;">₹${formatINR(item.rate)}</td>
+      <td style="padding:10px 8px;text-align:right;font-size:13px;font-weight:600;color:#4a4340;">₹${formatINR(item.amount)}</td>
     </tr>
   `).join('');
 
   // Discount row in totals
   const discountHtml = parseFloat(invoice.discount) > 0 ? `
-    <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:10.5px;color:#6b5e50;border-bottom:1px solid #e8e2dc;">
+    <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;color:#6b5e50;border-bottom:1px solid #e8e2dc;">
       <span>Discount</span>
       <span>- ₹${formatINR(invoice.discount)}</span>
     </div>` : '';
@@ -91,8 +91,8 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
 
   // Terms
   const termsHtml = invoice.note
-    ? `<p style="font-size:9px;white-space:pre-line;line-height:1.6;color:#9a8e82;margin:0;">${invoice.note}</p>`
-    : `<div style="font-size:9px;color:#9a8e82;line-height:1.8;">
+    ? `<p style="font-size:11px;white-space:pre-line;line-height:1.6;color:#9a8e82;margin:0;">${invoice.note}</p>`
+    : `<div style="font-size:11px;color:#9a8e82;line-height:1.8;">
         <p style="margin:0;">• All payments made are non-refundable.</p>
         <p style="margin:0;">• Additional works will be charged separately.</p>
         <p style="margin:0;">• Delayed payments may affect project timelines.</p>
@@ -102,8 +102,8 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
   // Bank details
   const bankHtml = (invoice.bank_name || invoice.account_number) ? `
     <div>
-      <p style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#b8a994;margin-bottom:8px;">Bank Details</p>
-      <div style="font-size:9px;color:#6b5e50;line-height:1.8;">
+      <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#b8a994;margin-bottom:8px;">Bank Details</p>
+      <div style="font-size:11px;color:#6b5e50;line-height:1.8;">
         ${invoice.bank_name ? `<p style="margin:0;">Bank name: <strong>${invoice.bank_name}</strong></p>` : ''}
         ${invoice.account_number ? `<p style="margin:0;">Account No: <strong>${invoice.account_number}</strong></p>` : ''}
         ${invoice.ifsc_code ? `<p style="margin:0;">IFSC: <strong>${invoice.ifsc_code}</strong></p>` : ''}
@@ -114,9 +114,9 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
   // QR code
   const qrHtml = (invoice.qr_code_url || comp.upi_qr_url) ? `
     <div style="display:flex;flex-direction:column;align-items:center;">
-      <p style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#b8a994;margin-bottom:8px;">Scan & Pay</p>
+      <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#b8a994;margin-bottom:8px;">Scan & Pay</p>
       <img src="${invoice.qr_code_url || comp.upi_qr_url}" style="width:52px;height:52px;object-fit:cover;border:1.5px solid #b8a994;padding:2px;border-radius:3px;" />
-      <p style="font-size:7.5px;font-family:monospace;color:#6b5e50;margin-top:4px;">UPI: ${invoice.upi_id || comp.upi_id || ''}</p>
+      <p style="font-size:10px;font-family:monospace;color:#6b5e50;margin-top:4px;">UPI: ${invoice.upi_id || comp.upi_id || ''}</p>
     </div>` : '';
 
   return `<!DOCTYPE html>
@@ -126,7 +126,7 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
 <title>${invoice.invoice_number}</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box;}
-  body{font-family:'Times New Roman',Times,serif;font-size:11px;color:#4a4340;background:#fff;margin:0;padding:0;}
+  body{font-family:'Times New Roman',Times,serif;font-size:13px;color:#4a4340;background:#fff;margin:0;padding:0;}
   .page{position:relative;width:210mm;min-height:297mm;padding:60px 50px 40px 70px;overflow:hidden;background:#fff;}
   /* Arch background */
   .arch-bg{position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:95%;height:97%;border-top-left-radius:45%;border-top-right-radius:45%;background:#f5f1eb;pointer-events:none;z-index:0;}
@@ -135,10 +135,10 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
   .status-stamp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-20deg);font-size:48px;font-weight:900;text-transform:uppercase;letter-spacing:4px;padding:10px 24px;border:4px solid;border-radius:12px;opacity:0.08;pointer-events:none;white-space:nowrap;z-index:10;}
   /* Items table */
   table.items{width:100%;border-collapse:collapse;margin-bottom:16px;}
-  table.items th{padding:10px 8px;text-align:left;font-size:10px;font-weight:700;color:#4a4340;border-bottom:1.5px solid #b8a994;}
+  table.items th{padding:10px 8px;text-align:left;font-size:12px;font-weight:700;color:#4a4340;border-bottom:1.5px solid #b8a994;}
   table.items th.c{text-align:center;}
   table.items th.r{text-align:right;}
-  table.items td{padding:10px 8px;font-size:10.5px;color:#4a4340;}
+  table.items td{padding:10px 8px;font-size:13px;color:#4a4340;}
   /* Footer grid */
   .footer-grid{display:flex;border-top:1px solid #e0d9d0;margin-top:24px;padding-top:20px;}
   .footer-col{flex:1;padding:0 16px;}
@@ -167,21 +167,21 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
 
     <!-- Company Info -->
     <div style="text-align:center;margin-bottom:24px;">
-      <p style="font-size:11px;font-weight:600;color:#4a4340;margin:0;">${comp.company_name || 'Your Business'}</p>
-      <div style="font-size:10px;color:#6b5e50;margin-top:4px;line-height:1.6;">
+      <p style="font-size:14px;font-weight:600;color:#4a4340;margin:0;">${comp.company_name || 'Your Business'}</p>
+      <div style="font-size:12px;color:#6b5e50;margin-top:4px;line-height:1.6;">
         ${companyContact ? `<p style="margin:0;">${companyContact}</p>` : ''}
         ${companyAddr ? `<p style="margin:0;">${companyAddr}</p>` : ''}
       </div>
-      ${comp.gstin ? `<p style="font-size:10px;font-weight:600;color:#4a4340;margin-top:4px;">GSTIN: ${comp.gstin}</p>` : ''}
+      ${comp.gstin ? `<p style="font-size:12px;font-weight:600;color:#4a4340;margin-top:4px;">GSTIN: ${comp.gstin}</p>` : ''}
     </div>
 
     <!-- Issued To + Invoice Meta -->
     <div style="display:flex;margin-bottom:24px;">
       <!-- Left: Issued To -->
       <div style="flex:1;padding-right:16px;border-right:1px solid #e0d9d0;">
-        <p style="font-size:9px;text-transform:uppercase;letter-spacing:2px;font-weight:600;color:#b8a994;margin-bottom:8px;">Issued To:</p>
-        <p style="font-size:11px;font-weight:600;color:#4a4340;margin:0;">${invoice.lead_name || '—'}</p>
-        <div style="font-size:10px;color:#6b5e50;margin-top:4px;line-height:1.6;">
+        <p style="font-size:11px;text-transform:uppercase;letter-spacing:2px;font-weight:600;color:#b8a994;margin-bottom:8px;">Issued To:</p>
+        <p style="font-size:14px;font-weight:600;color:#4a4340;margin:0;">${invoice.lead_name || '—'}</p>
+        <div style="font-size:12px;color:#6b5e50;margin-top:4px;line-height:1.6;">
           ${invoice.lead_business ? `<p style="margin:0;">${invoice.lead_business}</p>` : ''}
           ${invoice.lead_phone ? `<p style="margin:0;">${invoice.lead_phone}</p>` : ''}
           ${invoice.lead_email ? `<p style="margin:0;">${invoice.lead_email}</p>` : ''}
@@ -190,17 +190,17 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
       </div>
       <!-- Right: Invoice details -->
       <div style="flex:1;padding-left:16px;">
-        <table style="font-size:10.5px;color:#6b5e50;">
+        <table style="font-size:13px;color:#6b5e50;">
           <tr>
-            <td style="font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;padding-right:12px;padding:2px 12px 2px 0;">Invoice Nr:</td>
+            <td style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;padding-right:12px;padding:2px 12px 2px 0;">Invoice Nr:</td>
             <td style="font-weight:700;padding:2px 0;">${invoice.invoice_number}</td>
           </tr>
           <tr>
-            <td style="font-size:9px;padding-right:12px;padding:2px 12px 2px 0;">Date:</td>
+            <td style="font-size:11px;padding-right:12px;padding:2px 12px 2px 0;">Date:</td>
             <td style="padding:2px 0;">${billDate}</td>
           </tr>
           <tr>
-            <td style="font-size:9px;padding-right:12px;padding:2px 12px 2px 0;">Due date:</td>
+            <td style="font-size:11px;padding-right:12px;padding:2px 12px 2px 0;">Due date:</td>
             <td style="padding:2px 0;">${dueDate}</td>
           </tr>
         </table>
@@ -226,12 +226,12 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
     <!-- Totals -->
     <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
       <div style="width:200px;">
-        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:10.5px;color:#6b5e50;border-bottom:1px solid #e8e2dc;">
+        <div style="display:flex;justify-content:space-between;padding:6px 0;font-size:13px;color:#6b5e50;border-bottom:1px solid #e8e2dc;">
           <span style="font-weight:600;">Sub-total</span>
           <span>₹${formatINR(invoice.subtotal)}</span>
         </div>
         ${discountHtml}
-        <div style="display:flex;justify-content:space-between;padding:8px 10px;font-size:11.5px;font-weight:700;color:#4a4340;background:#f7f3ee;border-radius:4px;margin-top:4px;">
+        <div style="display:flex;justify-content:space-between;padding:8px 10px;font-size:14px;font-weight:700;color:#4a4340;background:#f7f3ee;border-radius:4px;margin-top:4px;">
           <span>Total</span>
           <span>₹${formatINR(invoice.total_amount)}</span>
         </div>
@@ -239,13 +239,13 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
     </div>
 
     <!-- Amount in Words -->
-    <p style="font-size:10px;font-style:italic;color:#9a8e82;margin-bottom:8px;">${amountWords}</p>
+    <p style="font-size:12px;font-style:italic;color:#9a8e82;margin-bottom:8px;">${amountWords}</p>
 
     <!-- Footer: Terms | Bank/QR | Signature -->
     <div class="footer-grid">
       <!-- Terms -->
       <div class="footer-col">
-        <p style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#b8a994;margin-bottom:8px;">Terms & Conditions</p>
+        <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#b8a994;margin-bottom:8px;">Terms & Conditions</p>
         ${termsHtml}
       </div>
       <!-- Bank + QR -->
@@ -255,17 +255,17 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
       </div>
       <!-- Signature -->
       <div class="footer-col" style="display:flex;flex-direction:column;align-items:center;justify-content:space-between;min-height:120px;">
-        <p style="font-size:9px;font-weight:600;color:#6b5e50;text-align:center;">For ${comp.company_name || 'Company'}</p>
+        <p style="font-size:11px;font-weight:600;color:#6b5e50;text-align:center;">For ${comp.company_name || 'Company'}</p>
         <div style="height:40px;"></div>
         <div style="border-top:1px solid #b8a994;padding-top:5px;text-align:center;width:80%;">
-          <p style="font-size:8.5px;color:#9a8e82;">Authorised Signatory</p>
+          <p style="font-size:11px;color:#9a8e82;">Authorised Signatory</p>
         </div>
       </div>
     </div>
 
     <!-- Page Footer -->
     <div style="text-align:center;margin-top:16px;padding-top:8px;">
-      <p style="font-size:8.5px;font-weight:500;color:#b8a994;">Entity belongs to Scale Forge Private Limited</p>
+      <p style="font-size:11px;font-weight:500;color:#b8a994;">Entity belongs to Scale Forge Private Limited</p>
     </div>
 
   </div><!-- end content -->
