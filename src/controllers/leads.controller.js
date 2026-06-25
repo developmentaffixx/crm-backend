@@ -667,9 +667,9 @@ exports.getFollowUpReminders = async (req, res) => {
 // ─── Helper: Generate Client Code (AFXCL###) ─────────────────────────────────
 async function generateClientCode() {
   const [rows] = await db.query(
-    `SELECT COUNT(*) AS cnt FROM leads WHERE client_code IS NOT NULL`
+    `SELECT MAX(CAST(SUBSTRING(client_code, 6) AS UNSIGNED)) AS max_seq FROM leads WHERE client_code IS NOT NULL AND client_code LIKE 'AFXCL%'`
   );
-  const seq = String((rows[0]?.cnt || 0) + 1).padStart(3, '0');
+  const seq = String((rows[0]?.max_seq || 0) + 1).padStart(3, '0');
   return `AFXCL${seq}`;
 }
 
