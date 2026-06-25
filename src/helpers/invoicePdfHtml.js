@@ -108,6 +108,7 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
         ${invoice.account_number ? `<p style="margin:0;">Account No: <strong>${invoice.account_number}</strong></p>` : ''}
         ${invoice.ifsc_code ? `<p style="margin:0;">IFSC: <strong>${invoice.ifsc_code}</strong></p>` : ''}
         ${invoice.branch ? `<p style="margin:0;">Branch: ${invoice.branch}</p>` : ''}
+        ${(invoice.upi_id || comp.upi_id) ? `<p style="margin:0;">UPI: <strong>${invoice.upi_id || comp.upi_id}</strong></p>` : ''}
       </div>
     </div>` : '';
 
@@ -116,7 +117,6 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
     <div style="display:flex;flex-direction:column;align-items:center;">
       <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#b8a994;margin-bottom:8px;">Scan & Pay</p>
       <img src="${invoice.qr_code_url || comp.upi_qr_url}" style="width:52px;height:52px;object-fit:cover;border:1.5px solid #b8a994;padding:2px;border-radius:3px;" />
-      <p style="font-size:10px;font-family:monospace;color:#6b5e50;margin-top:4px;">UPI: ${invoice.upi_id || comp.upi_id || ''}</p>
     </div>` : '';
 
   return `<!DOCTYPE html>
@@ -254,9 +254,7 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
         ${qrHtml}
       </div>
       <!-- Signature -->
-      <div class="footer-col" style="display:flex;flex-direction:column;align-items:center;justify-content:space-between;min-height:120px;">
-        <p style="font-size:11px;font-weight:600;color:#6b5e50;text-align:center;">For ${comp.company_name || 'Company'}</p>
-        <div style="height:40px;"></div>
+      <div class="footer-col" style="display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-height:120px;">
         <div style="border-top:1px solid #b8a994;padding-top:5px;text-align:center;width:80%;">
           <p style="font-size:11px;color:#9a8e82;">Authorised Signatory</p>
         </div>
