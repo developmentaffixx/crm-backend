@@ -1890,20 +1890,14 @@ exports.adminTimesheet = async (req, res) => {
       [user_id, startStr, endStr]
     );
 
-    // Meeting time
+    // Meeting time — use actual timer logs (meeting_time_logs), not scheduled meeting times
     const [meetingTime] = await db.query(
-      `SELECT m.meeting_date AS log_date,
-              SUM(TIMESTAMPDIFF(MINUTE, m.start_time, m.end_time)) AS total_minutes
-       FROM (
-         SELECT DISTINCT m2.id, m2.meeting_date, m2.start_time, m2.end_time
-         FROM meetings m2
-         LEFT JOIN meeting_members mm2 ON mm2.meeting_id = m2.id
-         WHERE (m2.created_by = ? OR mm2.user_id = ?)
-         AND m2.status = 'completed' AND m2.deleted = 0
-         AND m2.meeting_date BETWEEN ? AND ?
-       ) m
-       GROUP BY m.meeting_date`,
-      [user_id, user_id, startStr, endStr]
+      `SELECT DATE(ml.started_at) AS log_date, SUM(ml.duration) AS total_seconds
+       FROM meeting_time_logs ml
+       WHERE ml.user_id = ? AND DATE(ml.started_at) BETWEEN ? AND ?
+       AND ml.ended_at IS NOT NULL AND ml.duration > 0
+       GROUP BY DATE(ml.started_at)`,
+      [user_id, startStr, endStr]
     );
 
     // Summary
@@ -1911,8 +1905,8 @@ exports.adminTimesheet = async (req, res) => {
     const totalAfs = attendance.reduce((sum, a) => sum + (Number(a.total_afs_seconds) || 0), 0);
     const totalTaskSeconds = taskTime.reduce((sum, t) => sum + (Number(t.total_seconds) || 0), 0);
     const totalTicketMinutes = ticketTime.reduce((sum, t) => sum + (Number(t.total_minutes) || 0), 0);
-    const totalMeetingMinutes = meetingTime.reduce((sum, m) => sum + (Number(m.total_minutes) || 0), 0);
-    const productiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + (totalMeetingMinutes * 60);
+    const totalMeetingSeconds = meetingTime.reduce((sum, m) => sum + (Number(m.total_seconds) || 0), 0);
+    const productiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + totalMeetingSeconds;
     const idleSeconds = Math.max(0, totalServed - productiveSeconds - totalAfs);
 
     return res.json({
@@ -1928,7 +1922,7 @@ exports.adminTimesheet = async (req, res) => {
         idle_seconds: idleSeconds,
         total_task_seconds: totalTaskSeconds,
         total_ticket_minutes: totalTicketMinutes,
-        total_meeting_minutes: totalMeetingMinutes,
+        total_meeting_seconds: totalMeetingSeconds,
         days_present: attendance.length,
       },
     });
