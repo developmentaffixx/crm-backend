@@ -387,18 +387,16 @@ exports.getMyWeek = async (req, res) => {
       [userId, week_start, endDate]
     );
     const [meetingTimeResult] = await db.query(
-      `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
-       FROM meetings m
-       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
-       WHERE (m.created_by = ? OR mm.user_id = ?) 
-       AND m.status = 'completed' AND m.deleted = 0
-       AND m.meeting_date BETWEEN ? AND ?`,
-      [userId, userId, week_start, endDate]
+      `SELECT COALESCE(SUM(duration), 0) AS total 
+       FROM meeting_time_logs
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       AND ended_at IS NOT NULL AND duration > 0`,
+      [userId, week_start, endDate]
     );
 
     const taskHours = (parseInt(taskTimeResult[0].total) || 0) / 3600;
     const ticketHours = (parseInt(ticketTimeResult[0].total) || 0) / 60;
-    const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 60;
+    const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 3600;
     const completed = taskHours + ticketHours + meetingHours;
 
     const required = totalExpected * 60; // Convert hours to minutes for frontend
@@ -983,7 +981,7 @@ exports.adminWeekReport = async (req, res) => {
       // Calculate productive hours (tasks + tickets + meetings)
       const [taskTimeResult] = await db.query(
         `SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs 
-         WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?`,
+         WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0`,
         [user.id, week_start, endDate]
       );
       const [ticketTimeResult] = await db.query(
@@ -992,18 +990,16 @@ exports.adminWeekReport = async (req, res) => {
         [user.id, week_start, endDate]
       );
       const [meetingTimeResult] = await db.query(
-        `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
-         FROM meetings m
-         LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
-         WHERE (m.created_by = ? OR mm.user_id = ?) 
-         AND m.status = 'completed' AND m.deleted = 0
-         AND m.meeting_date BETWEEN ? AND ?`,
-        [user.id, user.id, week_start, endDate]
+        `SELECT COALESCE(SUM(duration), 0) AS total 
+         FROM meeting_time_logs
+         WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+         AND ended_at IS NOT NULL AND duration > 0`,
+        [user.id, week_start, endDate]
       );
 
       const taskHours = taskTimeResult[0].total / 3600;
       const ticketHours = ticketTimeResult[0].total / 60;
-      const meetingHours = meetingTimeResult[0].total / 60;
+      const meetingHours = meetingTimeResult[0].total / 3600;
       const completed = taskHours + ticketHours + meetingHours;
 
       const deficit = Math.max(0, totalExpected - completed);
@@ -1680,18 +1676,16 @@ exports.getMyMonthBalance = async (req, res) => {
       [userId, monthStart, today]
     );
     const [meetingTimeResult] = await db.query(
-      `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
-       FROM meetings m
-       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
-       WHERE (m.created_by = ? OR mm.user_id = ?) 
-       AND m.status = 'completed' AND m.deleted = 0
-       AND m.meeting_date BETWEEN ? AND ?`,
-      [userId, userId, monthStart, today]
+      `SELECT COALESCE(SUM(duration), 0) AS total 
+       FROM meeting_time_logs
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       AND ended_at IS NOT NULL AND duration > 0`,
+      [userId, monthStart, today]
     );
 
     const taskHours = (parseInt(taskTimeResult[0].total) || 0) / 3600;
     const ticketHours = (parseInt(ticketTimeResult[0].total) || 0) / 60;
-    const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 60;
+    const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 3600;
     const completedHours = taskHours + ticketHours + meetingHours;
 
     // Balance = completed - required (positive = surplus, negative = deficit)
@@ -1717,14 +1711,12 @@ exports.getMyMonthBalance = async (req, res) => {
       [userId, monthStart, today]
     );
     const [dailyMeetings] = await db.query(
-      `SELECT m.meeting_date AS date, COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total
-       FROM meetings m
-       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
-       WHERE (m.created_by = ? OR mm.user_id = ?)
-       AND m.status = 'completed' AND m.deleted = 0
-       AND m.meeting_date BETWEEN ? AND ?
-       GROUP BY m.meeting_date`,
-      [userId, userId, monthStart, today]
+      `SELECT DATE(started_at) AS date, COALESCE(SUM(duration), 0) AS total
+       FROM meeting_time_logs
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       AND ended_at IS NOT NULL AND duration > 0
+       GROUP BY DATE(started_at)`,
+      [userId, monthStart, today]
     );
 
     // Build daily map
@@ -1733,7 +1725,7 @@ exports.getMyMonthBalance = async (req, res) => {
     const ticketMap = {};
     dailyTickets.forEach(r => { ticketMap[new Date(r.date).toISOString().split('T')[0]] = (parseInt(r.total) || 0) / 60; });
     const meetingMap = {};
-    dailyMeetings.forEach(r => { meetingMap[new Date(r.date).toISOString().split('T')[0]] = (parseInt(r.total) || 0) / 60; });
+    dailyMeetings.forEach(r => { meetingMap[new Date(r.date).toISOString().split('T')[0]] = (parseInt(r.total) || 0) / 3600; });
 
     let runningBalance = 0;
     const daily_balance = dailyBreakdown.map(day => {
@@ -1804,18 +1796,16 @@ exports.adminMonthBalanceReport = async (req, res) => {
         [user.id, monthStart, today]
       );
       const [meetingTimeResult] = await db.query(
-        `SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0) AS total 
-         FROM meetings m
-         LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
-         WHERE (m.created_by = ? OR mm.user_id = ?) 
-         AND m.status = 'completed' AND m.deleted = 0
-         AND m.meeting_date BETWEEN ? AND ?`,
-        [user.id, user.id, monthStart, today]
+        `SELECT COALESCE(SUM(duration), 0) AS total 
+         FROM meeting_time_logs
+         WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+         AND ended_at IS NOT NULL AND duration > 0`,
+        [user.id, monthStart, today]
       );
 
       const taskHours = (parseInt(taskTimeResult[0].total) || 0) / 3600;
       const ticketHours = (parseInt(ticketTimeResult[0].total) || 0) / 60;
-      const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 60;
+      const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 3600;
       const completedHours = taskHours + ticketHours + meetingHours;
 
       const balanceHours = completedHours - totalExpected;
