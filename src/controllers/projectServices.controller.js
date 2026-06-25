@@ -12,6 +12,7 @@ exports.list = async (req, res) => {
       `SELECT ps.*,
               s.name AS service_name,
               s.icon AS service_icon,
+              s.service_type,
               CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
               (SELECT COUNT(*) FROM service_cycles sc WHERE sc.project_service_id = ps.id) AS cycle_count,
               (SELECT MAX(sc.cycle_number) FROM service_cycles sc WHERE sc.project_service_id = ps.id) AS latest_cycle_number,
@@ -167,6 +168,7 @@ exports.getOne = async (req, res) => {
       `SELECT ps.*,
               s.name AS service_name,
               s.icon AS service_icon,
+              s.service_type,
               CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
               p.title AS project_title,
               p.client_id,
@@ -343,11 +345,25 @@ exports.createNewCycle = async (req, res) => {
     const { projectId, serviceId } = req.params;
 
     const [existing] = await db.query(
-      'SELECT * FROM project_services WHERE id = ? AND project_id = ?',
+      `SELECT ps.*, s.service_type
+       FROM project_services ps
+       JOIN services s ON s.id = ps.service_id
+       WHERE ps.id = ? AND ps.project_id = ?`,
       [serviceId, projectId]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: 'Project service not found' });
+    }
+
+    // Block new cycle creation for one-time services that already have a cycle
+    if (existing[0].service_type === 'one_time') {
+      const [existingCycles] = await db.query(
+        `SELECT id FROM service_cycles WHERE project_service_id = ? LIMIT 1`,
+        [serviceId]
+      );
+      if (existingCycles.length > 0) {
+        return res.status(400).json({ message: 'This is a one-time service. It does not support multiple cycles.' });
+      }
     }
 
     // Check no active cycle already exists

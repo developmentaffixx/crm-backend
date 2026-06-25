@@ -341,18 +341,29 @@ exports.updateCycle = async (req, res) => {
       [...values, cycleId]
     );
 
-    // If marking as completed, auto-generate next cycle
+    // If marking as completed, auto-generate next cycle (only for recurring services)
     if (status === 'completed') {
       const [proj] = await db.query('SELECT start_date FROM projects WHERE id = ?', [projectId]);
       let startDate = proj.length > 0 ? proj[0].start_date : null;
 
       const psId = currentCycle.project_service_id || null;
+      let isRecurring = true;
+
       if (psId) {
-        const [ps] = await db.query('SELECT start_date FROM project_services WHERE id = ?', [psId]);
-        if (ps.length > 0 && ps[0].start_date) startDate = ps[0].start_date;
+        const [ps] = await db.query(
+          `SELECT ps.start_date, s.service_type
+           FROM project_services ps
+           JOIN services s ON s.id = ps.service_id
+           WHERE ps.id = ?`,
+          [psId]
+        );
+        if (ps.length > 0) {
+          if (ps[0].start_date) startDate = ps[0].start_date;
+          if (ps[0].service_type === 'one_time') isRecurring = false;
+        }
       }
 
-      if (startDate) {
+      if (startDate && isRecurring) {
         try {
           await generateNextCycleForProject(projectId, startDate, req.user.id, psId);
         } catch (genErr) {
@@ -485,13 +496,21 @@ exports.generateNextCycle = async (req, res) => {
 
     if (psId) {
       const [ps] = await db.query(
-        'SELECT id, start_date FROM project_services WHERE id = ? AND project_id = ?',
+        `SELECT ps.id, ps.start_date, s.service_type
+         FROM project_services ps
+         JOIN services s ON s.id = ps.service_id
+         WHERE ps.id = ? AND ps.project_id = ?`,
         [psId, projectId]
       );
       if (ps.length === 0) {
         return res.status(404).json({ message: 'Project service not found' });
       }
       if (ps[0].start_date) startDate = ps[0].start_date;
+
+      // Block next cycle generation for one-time services
+      if (ps[0].service_type === 'one_time') {
+        return res.status(400).json({ message: 'This is a one-time service. It does not support multiple cycles.' });
+      }
     }
 
     if (!startDate) {

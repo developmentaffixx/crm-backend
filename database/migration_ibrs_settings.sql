@@ -10,7 +10,6 @@ USE crm_task_module;
 CREATE TABLE IF NOT EXISTS ibrs_templates (
   id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   industry_id     INT UNSIGNED NOT NULL,
-  title           VARCHAR(255) NOT NULL,
   content         LONGTEXT NOT NULL,
   sort_order      INT NOT NULL DEFAULT 0,
   is_active       TINYINT(1) NOT NULL DEFAULT 1,

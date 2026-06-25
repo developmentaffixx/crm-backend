@@ -65,12 +65,12 @@ exports.createService = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { name, description, hsn_code, icon } = req.body;
+  const { name, description, hsn_code, icon, service_type } = req.body;
 
   try {
     const [result] = await db.query(
-      `INSERT INTO services (name, description, hsn_code, icon, created_by) VALUES (?, ?, ?, ?, ?)`,
-      [name, description || null, hsn_code || '', icon || '🌐', req.user.id]
+      `INSERT INTO services (name, description, hsn_code, icon, service_type, created_by) VALUES (?, ?, ?, ?, ?, ?)`,
+      [name, description || null, hsn_code || '', icon || '🌐', service_type || 'recurring', req.user.id]
     );
 
     const [rows] = await db.query('SELECT * FROM services WHERE id = ?', [result.insertId]);
@@ -92,13 +92,14 @@ exports.updateService = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM services WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Service not found' });
 
-    const { name, description, hsn_code, icon, is_active } = req.body;
+    const { name, description, hsn_code, icon, is_active, service_type } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (description !== undefined) updates.description = description;
     if (hsn_code !== undefined) updates.hsn_code = hsn_code;
     if (icon !== undefined) updates.icon = icon;
     if (is_active !== undefined) updates.is_active = is_active;
+    if (service_type !== undefined) updates.service_type = service_type;
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ message: 'No valid fields to update' });
@@ -416,7 +417,7 @@ exports.updateFeatureValues = async (req, res) => {
 exports.listServicesForInvoice = async (req, res) => {
   try {
     const [services] = await db.query(
-      `SELECT id, name, hsn_code FROM services WHERE deleted = 0 AND is_active = 1 ORDER BY name ASC`
+      `SELECT id, name, hsn_code, service_type FROM services WHERE deleted = 0 AND is_active = 1 ORDER BY name ASC`
     );
     return res.json({ services });
   } catch (err) {
