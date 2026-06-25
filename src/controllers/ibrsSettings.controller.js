@@ -51,16 +51,16 @@ exports.getOne = async (req, res) => {
 // CREATE IBRS template
 // ─────────────────────────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
-  const { industry_id, content, sort_order } = req.body;
+  const { industry_id, content, content_type, sort_order } = req.body;
 
   if (!industry_id) return res.status(400).json({ message: 'Industry is required' });
   if (!content) return res.status(400).json({ message: 'Content is required' });
 
   try {
     const [result] = await db.query(
-      `INSERT INTO ibrs_templates (industry_id, content, sort_order)
-       VALUES (?, ?, ?)`,
-      [industry_id, content, sort_order || 0]
+      `INSERT INTO ibrs_templates (industry_id, content, content_type, sort_order)
+       VALUES (?, ?, ?, ?)`,
+      [industry_id, content, content_type || 'text', sort_order || 0]
     );
 
     const [created] = await db.query('SELECT * FROM ibrs_templates WHERE id = ?', [result.insertId]);
@@ -79,16 +79,17 @@ exports.update = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM ibrs_templates WHERE id = ?', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'IBRS template not found' });
 
-    const { industry_id, content, sort_order, is_active } = req.body;
+    const { industry_id, content, content_type, sort_order, is_active } = req.body;
     const current = rows[0];
 
     await db.query(
       `UPDATE ibrs_templates SET
-        industry_id = ?, content = ?, sort_order = ?, is_active = ?
+        industry_id = ?, content = ?, content_type = ?, sort_order = ?, is_active = ?
        WHERE id = ?`,
       [
         industry_id !== undefined ? industry_id : current.industry_id,
         content !== undefined ? content : current.content,
+        content_type || current.content_type || 'text',
         sort_order !== undefined ? sort_order : current.sort_order,
         is_active !== undefined ? (is_active ? 1 : 0) : current.is_active,
         req.params.id,

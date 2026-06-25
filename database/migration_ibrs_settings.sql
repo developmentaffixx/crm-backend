@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS ibrs_templates (
   id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   industry_id     INT UNSIGNED NOT NULL,
   content         LONGTEXT NOT NULL,
+  content_type    ENUM('text', 'code') NOT NULL DEFAULT 'text',
   sort_order      INT NOT NULL DEFAULT 0,
   is_active       TINYINT(1) NOT NULL DEFAULT 1,
   created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
