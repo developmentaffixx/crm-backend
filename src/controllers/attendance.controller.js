@@ -1878,6 +1878,7 @@ exports.adminTimesheet = async (req, res) => {
     const [taskTime] = await db.query(
       `SELECT DATE(started_at) AS log_date, SUM(duration) AS total_seconds
        FROM task_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       AND ended_at IS NOT NULL AND duration > 0
        GROUP BY DATE(started_at)`,
       [user_id, startStr, endStr]
     );
@@ -1906,7 +1907,9 @@ exports.adminTimesheet = async (req, res) => {
     const totalTaskSeconds = taskTime.reduce((sum, t) => sum + (Number(t.total_seconds) || 0), 0);
     const totalTicketMinutes = ticketTime.reduce((sum, t) => sum + (Number(t.total_minutes) || 0), 0);
     const totalMeetingSeconds = meetingTime.reduce((sum, m) => sum + (Number(m.total_seconds) || 0), 0);
-    const productiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + totalMeetingSeconds;
+    const rawProductiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + totalMeetingSeconds;
+    // Cap productive to never exceed served (handles overlapping timers / simultaneous tracking)
+    const productiveSeconds = Math.min(rawProductiveSeconds, totalServed);
     const idleSeconds = Math.max(0, totalServed - productiveSeconds - totalAfs);
 
     return res.json({
@@ -1995,8 +1998,10 @@ exports.adminTimesheetDay = async (req, res) => {
     const totalTicketSeconds = ticketLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
     const totalMeetingSeconds = meetingLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
     const totalAfsSeconds = afsLogs.reduce((sum, l) => sum + (Number(l.duration_seconds) || 0), 0);
-    const productiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
+    const rawProductiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
     const totalServedSeconds = Number(attendance[0]?.total_served_seconds) || 0;
+    // Cap productive to never exceed served (handles overlapping timers)
+    const productiveSeconds = Math.min(rawProductiveSeconds, totalServedSeconds);
     const idleSeconds = Math.max(0, totalServedSeconds - productiveSeconds - totalAfsSeconds);
 
     return res.json({
