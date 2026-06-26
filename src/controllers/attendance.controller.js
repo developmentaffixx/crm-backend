@@ -511,7 +511,7 @@ exports.getHistory = async (req, res) => {
     // If admin requests all employees
     if (isAdmin && user_id === 'all') {
       const [users] = await db.query(
-        'SELECT id, first_name, last_name, department FROM users WHERE is_active = 1 AND deleted = 0 ORDER BY first_name'
+        'SELECT id, first_name, last_name, department, avatar_url FROM users WHERE is_active = 1 AND deleted = 0 ORDER BY first_name'
       );
 
       const [allRecords] = await db.query(
@@ -574,7 +574,7 @@ exports.getHistory = async (req, res) => {
       // Group records by user
       const userMap = {};
       for (const u of users) {
-        userMap[u.id] = { id: u.id, name: `${u.first_name} ${u.last_name}`, department: u.department, records: [] };
+        userMap[u.id] = { id: u.id, name: `${u.first_name} ${u.last_name}`, department: u.department, avatar_url: u.avatar_url || null, records: [] };
       }
       for (const record of allRecords) {
         if (!userMap[record.user_id]) continue;
