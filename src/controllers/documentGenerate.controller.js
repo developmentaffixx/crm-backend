@@ -129,79 +129,226 @@ exports.generate = async (req, res) => {
     });
 
     // ─── Parse HTML content and render to PDF ─────────────────────────────────
-    // Strip HTML tags and render as structured text
+    const LEFT_MARGIN = 50;
+    const RIGHT_MARGIN = 50;
+    const PAGE_WIDTH = 595.28;
+    const CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN;
+
+    // Decode HTML entities
+    const decodeEntities = (text) => {
+      return text
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&rsquo;/g, '\u2019')
+        .replace(/&lsquo;/g, '\u2018')
+        .replace(/&rdquo;/g, '\u201D')
+        .replace(/&ldquo;/g, '\u201C')
+        .replace(/&ndash;/g, '\u2013')
+        .replace(/&mdash;/g, '\u2014')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&hellip;/g, '\u2026')
+        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)))
+        .replace(/&rupee;/g, '\u20B9');
+    };
+
+    // Strip HTML tags
     const stripTags = (html) => html.replace(/<[^>]+>/g, '');
-    
-    // Simple HTML-to-PDF renderer
-    const lines = content.split(/(<h1[^>]*>.*?<\/h1>|<h2[^>]*>.*?<\/h2>|<p[^>]*>.*?<\/p>|<li[^>]*>.*?<\/li>|<hr\s*\/?>|<br\s*\/?>|<table[\s\S]*?<\/table>|<strong[^>]*>.*?<\/strong>)/gi);
-    
-    // Process content block by block
-    const blocks = content.split(/<\/?(h1|h2|p|li|hr|br|table|tr|td|th|ul|ol|div|strong|em|span)[^>]*>/gi);
-    
-    // Better approach: split into meaningful sections
-    const sections = content.split(/(?=<h[12])|(?=<p)|(?=<table)|(?=<hr)|(?=<ul)|(?=<ol)/gi);
+
+    // Convert <br> to newlines, strip tags, decode entities
+    const cleanText = (html) => {
+      let text = html.replace(/<br\s*\/?>/gi, '\n');
+      text = stripTags(text);
+      text = decodeEntities(text);
+      return text.trim();
+    };
+
+    // Render rich text (handles <strong>, <em>, <br> inside a block)
+    const renderRichText = (html, options = {}) => {
+      const { fontSize = 10, align = 'justify', lineGap = 3 } = options;
+      
+      // Replace <br> with a special marker
+      let processed = html.replace(/<br\s*\/?>/gi, '\n');
+      
+      // Parse inline elements into segments
+      const segments = [];
+      const regex = /<(strong|b|em|i)>([\s\S]*?)<\/\1>|([^<]+)|<[^>]+>/gi;
+      let match;
+      
+      while ((match = regex.exec(processed)) !== null) {
+        if (match[1]) {
+          // Bold or italic tag
+          const tag = match[1].toLowerCase();
+          const text = decodeEntities(stripTags(match[2]));
+          if (text) {
+            const isBold = tag === 'strong' || tag === 'b';
+            const isItalic = tag === 'em' || tag === 'i';
+            let font = 'Helvetica';
+            if (isBold && isItalic) font = 'Helvetica-BoldOblique';
+            else if (isBold) font = 'Helvetica-Bold';
+            else if (isItalic) font = 'Helvetica-Oblique';
+            segments.push({ text, font });
+          }
+        } else if (match[3]) {
+          // Plain text
+          const text = decodeEntities(match[3]);
+          if (text) {
+            segments.push({ text, font: 'Helvetica' });
+          }
+        }
+      }
+
+      if (segments.length === 0) {
+        const text = cleanText(html);
+        if (text) {
+          doc.fontSize(fontSize).font('Helvetica').text(text, LEFT_MARGIN, doc.y, { 
+            width: CONTENT_WIDTH, align, lineGap 
+          });
+        }
+        return;
+      }
+
+      // If all segments are same font, render as simple text
+      const allSameFont = segments.every(s => s.font === segments[0].font);
+      if (allSameFont) {
+        const fullText = segments.map(s => s.text).join('');
+        doc.fontSize(fontSize).font(segments[0].font).text(fullText, LEFT_MARGIN, doc.y, { 
+          width: CONTENT_WIDTH, align, lineGap 
+        });
+        return;
+      }
+
+      // Render mixed bold/italic/normal text using doc.text with continued
+      doc.fontSize(fontSize);
+      doc.x = LEFT_MARGIN;
+      
+      for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const isLast = i === segments.length - 1;
+        doc.font(seg.font);
+        if (isLast) {
+          doc.text(seg.text, { width: CONTENT_WIDTH, align, lineGap, continued: false });
+        } else {
+          doc.text(seg.text, { width: CONTENT_WIDTH, align, lineGap, continued: true });
+        }
+      }
+    };
+
+    // Check if we need a new page (with bottom margin for letterhead footer)
+    const checkNewPage = () => { 
+      if (doc.y > 720) {
+        doc.addPage(); 
+      }
+    };
+
+    // Reset x position to left margin (fixes table alignment issues)
+    const resetX = () => { doc.x = LEFT_MARGIN; };
+
+    // Split content into meaningful sections
+    const sections = content.split(/(?=<h[12][^>]*>)|(?=<p[^>]*>)|(?=<table)|(?=<hr)|(?=<ul)|(?=<ol)/gi);
 
     for (const section of sections) {
       if (!section.trim()) continue;
 
-      const checkNewPage = () => { if (doc.y > 720) doc.addPage(); };
       checkNewPage();
+      resetX();
 
       if (section.match(/^<h1/i)) {
-        const text = stripTags(section).trim();
+        const text = cleanText(section);
         if (text) {
           doc.moveDown(0.5);
-          doc.fontSize(16).font('Helvetica-Bold').text(text, { align: 'center' });
+          doc.fontSize(16).font('Helvetica-Bold').text(text, LEFT_MARGIN, doc.y, { 
+            width: CONTENT_WIDTH, align: 'center' 
+          });
           doc.moveDown(0.5);
         }
       } else if (section.match(/^<h2/i)) {
-        const text = stripTags(section).trim();
+        const text = cleanText(section);
         if (text) {
           doc.moveDown(0.5);
-          doc.fontSize(11).font('Helvetica-Bold').text(text);
+          doc.fontSize(12).font('Helvetica-Bold').text(text, LEFT_MARGIN, doc.y, { 
+            width: CONTENT_WIDTH 
+          });
           doc.moveDown(0.3);
         }
       } else if (section.match(/^<hr/i)) {
         doc.moveDown(0.5);
-        doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#dddddd').stroke();
+        doc.moveTo(LEFT_MARGIN, doc.y).lineTo(PAGE_WIDTH - RIGHT_MARGIN, doc.y).strokeColor('#dddddd').stroke();
         doc.moveDown(0.5);
       } else if (section.match(/^<table/i)) {
         // Parse table rows
         const rowMatches = section.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+        const tableX = LEFT_MARGIN;
+        
         for (const row of rowMatches) {
           checkNewPage();
-          const cells = (row.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || []).map(c => stripTags(c).trim());
+          const cells = (row.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || []).map(c => cleanText(c));
           if (cells.length >= 2) {
-            const isHeader = row.includes('<th');
+            const isHeader = /<th/i.test(row);
             doc.fontSize(9).font(isHeader ? 'Helvetica-Bold' : 'Helvetica');
-            const colWidth = 495 / cells.length;
-            const startX = 50;
+            const colWidth = CONTENT_WIDTH / cells.length;
             const startY = doc.y;
+            
+            // Calculate max height needed for this row
+            let maxHeight = 14;
             cells.forEach((cell, i) => {
-              doc.text(cell, startX + (i * colWidth), startY, { width: colWidth - 5, align: 'left' });
+              const h = doc.heightOfString(cell, { width: colWidth - 10 });
+              if (h > maxHeight) maxHeight = h;
             });
-            doc.y = startY + 18;
+
+            // Draw cell borders and text
+            cells.forEach((cell, i) => {
+              const cellX = tableX + (i * colWidth);
+              // Draw cell border
+              doc.rect(cellX, startY, colWidth, maxHeight + 8).strokeColor('#cccccc').stroke();
+              // Draw cell text
+              doc.fillColor('#000000').text(cell, cellX + 5, startY + 4, { 
+                width: colWidth - 10, align: 'left' 
+              });
+            });
+            
+            doc.y = startY + maxHeight + 8;
           }
         }
         doc.moveDown(0.5);
+        resetX();
       } else if (section.match(/^<[uo]l/i)) {
-        const items = (section.match(/<li[\s\S]*?<\/li>/gi) || []).map(li => stripTags(li).trim());
+        const items = (section.match(/<li[\s\S]*?<\/li>/gi) || []).map(li => cleanText(li));
         items.forEach(item => {
           checkNewPage();
-          doc.fontSize(10).font('Helvetica').text(`  •  ${item}`, { indent: 10 });
+          doc.fontSize(10).font('Helvetica').text(`  •  ${item}`, LEFT_MARGIN, doc.y, { 
+            width: CONTENT_WIDTH, indent: 15, lineGap: 2 
+          });
+          doc.moveDown(0.15);
         });
         doc.moveDown(0.3);
       } else if (section.match(/^<p/i)) {
-        const text = stripTags(section).trim();
-        if (text) {
-          doc.fontSize(10).font('Helvetica').text(text, { align: 'justify', lineGap: 3 });
-          doc.moveDown(0.3);
+        // Check if paragraph contains inline formatting
+        const hasInline = /<(strong|b|em|i)\b/i.test(section);
+        const innerHtml = section.replace(/^<p[^>]*>/i, '').replace(/<\/p>$/i, '').trim();
+        
+        if (!innerHtml) continue;
+        
+        if (hasInline) {
+          renderRichText(innerHtml, { fontSize: 10, align: 'justify', lineGap: 3 });
+        } else {
+          const text = cleanText(section);
+          if (text) {
+            doc.fontSize(10).font('Helvetica').text(text, LEFT_MARGIN, doc.y, { 
+              width: CONTENT_WIDTH, align: 'justify', lineGap: 3 
+            });
+          }
         }
+        doc.moveDown(0.3);
       } else {
         // Plain text fallback
-        const text = stripTags(section).trim();
+        const text = cleanText(section);
         if (text) {
-          doc.fontSize(10).font('Helvetica').text(text, { lineGap: 3 });
+          doc.fontSize(10).font('Helvetica').text(text, LEFT_MARGIN, doc.y, { 
+            width: CONTENT_WIDTH, lineGap: 3 
+          });
           doc.moveDown(0.2);
         }
       }
