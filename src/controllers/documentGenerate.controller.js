@@ -165,21 +165,14 @@ exports.generate = async (req, res) => {
       return text.trim();
     };
 
-    // Render rich text (handles <strong>, <em>, <br> inside a block)
-    const renderRichText = (html, options = {}) => {
-      const { fontSize = 10, align = 'justify', lineGap = 3 } = options;
-      
-      // Replace <br> with a special marker
-      let processed = html.replace(/<br\s*\/?>/gi, '\n');
-      
-      // Parse inline elements into segments
+    // Parse inline segments from an HTML line (handles <strong>, <em>, <b>, <i>)
+    const parseInlineSegments = (htmlLine) => {
       const segments = [];
       const regex = /<(strong|b|em|i)>([\s\S]*?)<\/\1>|([^<]+)|<[^>]+>/gi;
       let match;
       
-      while ((match = regex.exec(processed)) !== null) {
+      while ((match = regex.exec(htmlLine)) !== null) {
         if (match[1]) {
-          // Bold or italic tag
           const tag = match[1].toLowerCase();
           const text = decodeEntities(stripTags(match[2]));
           if (text) {
@@ -192,38 +185,35 @@ exports.generate = async (req, res) => {
             segments.push({ text, font });
           }
         } else if (match[3]) {
-          // Plain text
           const text = decodeEntities(match[3]);
           if (text) {
             segments.push({ text, font: 'Helvetica' });
           }
         }
       }
+      return segments;
+    };
 
-      if (segments.length === 0) {
-        const text = cleanText(html);
-        if (text) {
-          doc.fontSize(fontSize).font('Helvetica').text(text, LEFT_MARGIN, doc.y, { 
-            width: CONTENT_WIDTH, align, lineGap 
-          });
-        }
-        return;
-      }
+    // Render a single line with mixed fonts
+    const renderLineSegments = (segments, options = {}) => {
+      const { fontSize = 10, align = 'justify', lineGap = 3 } = options;
+      
+      if (segments.length === 0) return;
+
+      doc.fontSize(fontSize);
 
       // If all segments are same font, render as simple text
       const allSameFont = segments.every(s => s.font === segments[0].font);
       if (allSameFont) {
         const fullText = segments.map(s => s.text).join('');
-        doc.fontSize(fontSize).font(segments[0].font).text(fullText, LEFT_MARGIN, doc.y, { 
+        doc.font(segments[0].font).text(fullText, LEFT_MARGIN, doc.y, { 
           width: CONTENT_WIDTH, align, lineGap 
         });
         return;
       }
 
-      // Render mixed bold/italic/normal text using doc.text with continued
-      doc.fontSize(fontSize);
+      // Render mixed bold/italic/normal using continued
       doc.x = LEFT_MARGIN;
-      
       for (let i = 0; i < segments.length; i++) {
         const seg = segments[i];
         const isLast = i === segments.length - 1;
@@ -232,6 +222,36 @@ exports.generate = async (req, res) => {
           doc.text(seg.text, { width: CONTENT_WIDTH, align, lineGap, continued: false });
         } else {
           doc.text(seg.text, { width: CONTENT_WIDTH, align, lineGap, continued: true });
+        }
+      }
+    };
+
+    // Render rich text (handles <strong>, <em>, <br> inside a block)
+    const renderRichText = (html, options = {}) => {
+      const { fontSize = 10, align = 'justify', lineGap = 3 } = options;
+      
+      // Split by <br> into separate lines
+      const lines = html.split(/<br\s*\/?>/gi);
+      
+      for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+        const line = lines[lineIdx].trim();
+        if (!line) {
+          doc.moveDown(0.3);
+          continue;
+        }
+
+        const segments = parseInlineSegments(line);
+        
+        if (segments.length === 0) {
+          // Fallback: plain text
+          const text = decodeEntities(stripTags(line)).trim();
+          if (text) {
+            doc.fontSize(fontSize).font('Helvetica').text(text, LEFT_MARGIN, doc.y, { 
+              width: CONTENT_WIDTH, align, lineGap 
+            });
+          }
+        } else {
+          renderLineSegments(segments, { fontSize, align, lineGap });
         }
       }
     };
@@ -325,13 +345,14 @@ exports.generate = async (req, res) => {
         });
         doc.moveDown(0.3);
       } else if (section.match(/^<p/i)) {
-        // Check if paragraph contains inline formatting
+        // Check if paragraph contains inline formatting or line breaks
         const hasInline = /<(strong|b|em|i)\b/i.test(section);
+        const hasBr = /<br\s*\/?>/i.test(section);
         const innerHtml = section.replace(/^<p[^>]*>/i, '').replace(/<\/p>$/i, '').trim();
         
         if (!innerHtml) continue;
         
-        if (hasInline) {
+        if (hasInline || hasBr) {
           renderRichText(innerHtml, { fontSize: 10, align: 'justify', lineGap: 3 });
         } else {
           const text = cleanText(section);
