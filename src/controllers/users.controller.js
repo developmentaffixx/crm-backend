@@ -691,6 +691,7 @@ exports.myTimesheet = async (req, res) => {
     const [taskTime] = await db.query(
       `SELECT DATE(started_at) AS log_date, SUM(duration) AS total_seconds
        FROM task_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       AND ended_at IS NOT NULL AND duration > 0
        GROUP BY DATE(started_at)`,
       [userId, startStr, endStr]
     );
@@ -703,20 +704,14 @@ exports.myTimesheet = async (req, res) => {
       [userId, startStr, endStr]
     );
 
-    // Meeting time
+    // Meeting time — use actual timer logs, not scheduled meeting times
     const [meetingTime] = await db.query(
-      `SELECT m.meeting_date AS log_date,
-              SUM(TIMESTAMPDIFF(MINUTE, m.start_time, m.end_time)) AS total_minutes
-       FROM (
-         SELECT DISTINCT m2.id, m2.meeting_date, m2.start_time, m2.end_time
-         FROM meetings m2
-         LEFT JOIN meeting_members mm2 ON mm2.meeting_id = m2.id
-         WHERE (m2.created_by = ? OR mm2.user_id = ?)
-         AND m2.status = 'completed' AND m2.deleted = 0
-         AND m2.meeting_date BETWEEN ? AND ?
-       ) m
-       GROUP BY m.meeting_date`,
-      [userId, userId, startStr, endStr]
+      `SELECT DATE(ml.started_at) AS log_date, SUM(ml.duration) AS total_seconds
+       FROM meeting_time_logs ml
+       WHERE ml.user_id = ? AND DATE(ml.started_at) BETWEEN ? AND ?
+       AND ml.ended_at IS NOT NULL AND ml.duration > 0
+       GROUP BY DATE(ml.started_at)`,
+      [userId, startStr, endStr]
     );
 
     // Summary
@@ -724,10 +719,17 @@ exports.myTimesheet = async (req, res) => {
     const totalAfs = attendance.reduce((sum, a) => sum + (Number(a.total_afs_seconds) || 0), 0);
     const totalTaskSeconds = taskTime.reduce((sum, t) => sum + (Number(t.total_seconds) || 0), 0);
     const totalTicketMinutes = ticketTime.reduce((sum, t) => sum + (Number(t.total_minutes) || 0), 0);
-    const totalMeetingMinutes = meetingTime.reduce((sum, m) => sum + (Number(m.total_minutes) || 0), 0);
+    const totalMeetingSeconds = meetingTime.reduce((sum, m) => sum + (Number(m.total_seconds) || 0), 0);
 
-    const productiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + (totalMeetingMinutes * 60);
-    const idleSeconds = Math.max(0, totalServed - productiveSeconds - totalAfs);
+    const rawProductiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + totalMeetingSeconds;
+    // Cap productive to never exceed served (handles overlapping timers)
+    const productiveSeconds = Math.min(rawProductiveSeconds, totalServed);
+    // Deduct lunch per day present from unaccounted time
+    const [settings] = await db.query('SELECT lunch_duration_minutes FROM attendance_settings WHERE id = 1');
+    const lunchSeconds = (settings[0]?.lunch_duration_minutes || 60) * 60;
+    const unaccountedSeconds = Math.max(0, totalServed - productiveSeconds - totalAfs);
+    const totalLunchDeduction = Math.min(lunchSeconds * attendance.length, unaccountedSeconds);
+    const idleSeconds = Math.max(0, unaccountedSeconds - totalLunchDeduction);
 
     return res.json({
       period: { start: startStr, end: endStr },
@@ -742,7 +744,7 @@ exports.myTimesheet = async (req, res) => {
         idle_seconds: idleSeconds,
         total_task_seconds: totalTaskSeconds,
         total_ticket_minutes: totalTicketMinutes,
-        total_meeting_minutes: totalMeetingMinutes,
+        total_meeting_seconds: totalMeetingSeconds,
         days_present: attendance.length,
       },
     });
@@ -815,9 +817,16 @@ exports.myTimesheetDay = async (req, res) => {
     const totalTicketSeconds = ticketLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
     const totalMeetingSeconds = meetingLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
     const totalAfsSeconds = afsLogs.reduce((sum, l) => sum + (Number(l.duration_seconds) || 0), 0);
-    const productiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
+    const rawProductiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
     const totalServedSeconds = Number(attendance[0]?.total_served_seconds) || 0;
-    const idleSeconds = Math.max(0, totalServedSeconds - productiveSeconds - totalAfsSeconds);
+    // Cap productive to never exceed served (handles overlapping timers)
+    const productiveSeconds = Math.min(rawProductiveSeconds, totalServedSeconds);
+    // Deduct lunch from unaccounted time
+    const [settings] = await db.query('SELECT lunch_duration_minutes FROM attendance_settings WHERE id = 1');
+    const lunchSeconds = (settings[0]?.lunch_duration_minutes || 60) * 60;
+    const unaccountedSeconds = Math.max(0, totalServedSeconds - productiveSeconds - totalAfsSeconds);
+    const lunchDeduction = Math.min(lunchSeconds, unaccountedSeconds);
+    const idleSeconds = Math.max(0, unaccountedSeconds - lunchDeduction);
 
     return res.json({
       date,

@@ -1300,12 +1300,14 @@ exports.correctClockOut = async (req, res) => {
 
     const record = records[0];
 
-    // Build the corrected clock-out datetime (same date as attendance, user-provided time)
+    // Build the corrected clock-out datetime (same date as attendance, user-provided time in IST)
     const attendanceDate = new Date(record.date).toISOString().split('T')[0];
-    const correctedDateTime = new Date(`${attendanceDate}T${actual_clock_out_time}:00`);
+    const correctedDateTime = new Date(`${attendanceDate}T${actual_clock_out_time}:00+05:30`);
 
-    // Validate: corrected time must be after clock-in and before midnight
-    const clockInTime = new Date(record.clock_in);
+    // Validate: corrected time must be after clock-in
+    const clockInTime = new Date(record.clock_in.includes('Z') || record.clock_in.includes('+')
+      ? record.clock_in
+      : record.clock_in.replace(' ', 'T') + 'Z');
     if (correctedDateTime <= clockInTime) {
       return res.status(400).json({ message: 'Corrected time must be after clock-in time' });
     }
@@ -1543,9 +1545,13 @@ async function resolveUserPending(userId, attendanceId, clockOutTime, timers) {
   const record = records[0];
   const attendanceDate = new Date(record.date).toISOString().split('T')[0];
 
-  // Build the clock-out datetime
-  const clockOutDateTime = new Date(`${attendanceDate}T${clockOutTime}:00`);
-  const clockInTime = new Date(record.clock_in);
+  // Build the clock-out datetime — user enters time in IST, convert to UTC for storage
+  // IST = UTC + 5:30, so subtract 5h 30m to get UTC
+  const [clockHours, clockMinutes] = clockOutTime.split(':').map(Number);
+  const clockOutDateTime = new Date(`${attendanceDate}T${clockOutTime}:00+05:30`);
+  const clockInTime = new Date(record.clock_in.includes('Z') || record.clock_in.includes('+') 
+    ? record.clock_in 
+    : record.clock_in.replace(' ', 'T') + 'Z');
 
   if (clockOutDateTime <= clockInTime) {
     throw new Error('Clock-out time must be after clock-in time');
@@ -1557,7 +1563,7 @@ async function resolveUserPending(userId, attendanceId, clockOutTime, timers) {
       throw new Error('Each timer requires type, timer_id, and stop_time');
     }
 
-    const stopDateTime = new Date(`${attendanceDate}T${timer.stop_time}:00`);
+    const stopDateTime = new Date(`${attendanceDate}T${timer.stop_time}:00+05:30`);
 
     if (timer.type === 'task') {
       const [taskTimer] = await db.query(
@@ -1891,6 +1897,10 @@ exports.adminTimesheet = async (req, res) => {
       [user_id, startStr, endStr]
     );
 
+    // Get lunch duration from settings
+    const [settings] = await db.query('SELECT lunch_duration_minutes FROM attendance_settings WHERE id = 1');
+    const lunchSeconds = (settings[0]?.lunch_duration_minutes || 60) * 60;
+
     // Summary
     const totalServed = attendance.reduce((sum, a) => sum + (Number(a.total_served_seconds) || 0), 0);
     const totalAfs = attendance.reduce((sum, a) => sum + (Number(a.total_afs_seconds) || 0), 0);
@@ -1900,7 +1910,10 @@ exports.adminTimesheet = async (req, res) => {
     const rawProductiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + totalMeetingSeconds;
     // Cap productive to never exceed served (handles overlapping timers / simultaneous tracking)
     const productiveSeconds = Math.min(rawProductiveSeconds, totalServed);
-    const idleSeconds = Math.max(0, totalServed - productiveSeconds - totalAfs);
+    // Deduct lunch per day present from unaccounted time
+    const unaccountedSeconds = Math.max(0, totalServed - productiveSeconds - totalAfs);
+    const totalLunchDeduction = Math.min(lunchSeconds * attendance.length, unaccountedSeconds);
+    const idleSeconds = Math.max(0, unaccountedSeconds - totalLunchDeduction);
 
     return res.json({
       period: { start: startStr, end: endStr },
@@ -1992,7 +2005,12 @@ exports.adminTimesheetDay = async (req, res) => {
     const totalServedSeconds = Number(attendance[0]?.total_served_seconds) || 0;
     // Cap productive to never exceed served (handles overlapping timers)
     const productiveSeconds = Math.min(rawProductiveSeconds, totalServedSeconds);
-    const idleSeconds = Math.max(0, totalServedSeconds - productiveSeconds - totalAfsSeconds);
+    // Deduct lunch from unaccounted time
+    const [settings] = await db.query('SELECT lunch_duration_minutes FROM attendance_settings WHERE id = 1');
+    const lunchSeconds = (settings[0]?.lunch_duration_minutes || 60) * 60;
+    const unaccountedSeconds = Math.max(0, totalServedSeconds - productiveSeconds - totalAfsSeconds);
+    const lunchDeduction = Math.min(lunchSeconds, unaccountedSeconds);
+    const idleSeconds = Math.max(0, unaccountedSeconds - lunchDeduction);
 
     return res.json({
       date,
