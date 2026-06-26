@@ -17,7 +17,7 @@ exports.dropdown = async (req, res) => {
     }
 
     const [rows] = await db.query(
-      `SELECT id, name, business_name FROM leads WHERE ${where} ORDER BY business_name ASC, name ASC`,
+      `SELECT id, name, business_name, phone, address, city, state FROM leads WHERE ${where} ORDER BY business_name ASC, name ASC`,
       params
     );
 
