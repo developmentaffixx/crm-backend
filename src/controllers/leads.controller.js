@@ -251,7 +251,7 @@ exports.create = async (req, res) => {
         temperature || 'cold', source || null, resource || null, status || 'New',
         current_marketing_status || null, assigned_to || null, req.user.id,
         created_at ? new Date(created_at) : new Date(),
-        lead_stage || 'Cold', lead_score || 1, expected_revenue || null,
+        lead_stage || 'New', lead_score || 1, expected_revenue || null,
         next_action || null,
         interested_services ? (Array.isArray(interested_services) ? interested_services.join(',') : interested_services) : null
       ]
@@ -377,16 +377,16 @@ exports.update = async (req, res) => {
 };
 
 /**
- * PATCH /api/leads/:id/status — Quick status change (without full edit)
+ * PATCH /api/leads/:id/status — Quick stage change (updates lead_stage as the single pipeline field)
  */
 exports.updateStatus = async (req, res) => {
   try {
-    const { status } = req.body;
-    if (!status) return res.status(400).json({ message: 'Status is required' });
+    const { status } = req.body; // 'status' param name kept for API backward compat
+    if (!status) return res.status(400).json({ message: 'Stage is required' });
 
-    const validStatuses = ['New', 'Contacted', 'Qualified', 'Proposal', 'Negotiation', 'Won', 'Lost'];
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({ message: 'Invalid status value' });
+    const validStages = ['New', 'Contacted', 'Replied', 'Interested', 'Qualified', 'Meeting', 'Proposal', 'Negotiation', 'Won', 'Lost'];
+    if (!validStages.includes(status)) {
+      return res.status(400).json({ message: 'Invalid stage value' });
     }
 
     const [rows] = await db.query('SELECT * FROM leads WHERE id = ? AND deleted = 0', [req.params.id]);
@@ -397,22 +397,28 @@ exports.updateStatus = async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    if (lead.status === status) {
-      return res.json({ message: 'Status unchanged', lead });
+    if (lead.lead_stage === status) {
+      return res.json({ message: 'Stage unchanged', lead });
     }
 
     // Record status change history
     await db.query(
       'INSERT INTO lead_status_history (lead_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)',
-      [req.params.id, lead.status, status, req.user.id]
+      [req.params.id, lead.lead_stage || lead.status, status, req.user.id]
     );
 
-    // If status is being set to 'Won', generate client_code (same as convert endpoint)
+    // Auto-derive temperature and score from new stage
+    const stageTemperature = { 'New': 'cold', 'Contacted': 'cold', 'Replied': 'cold', 'Interested': 'warm', 'Qualified': 'warm', 'Meeting': 'hot', 'Proposal': 'hot', 'Negotiation': 'hot', 'Won': 'hot', 'Lost': 'cold' };
+    const stageScore = { 'New': 1, 'Contacted': 1, 'Replied': 2, 'Interested': 3, 'Qualified': 3, 'Meeting': 4, 'Proposal': 4, 'Negotiation': 4, 'Won': 5, 'Lost': 1 };
+    const temperature = stageTemperature[status] || 'cold';
+    const lead_score = stageScore[status] || 1;
+
+    // If stage is being set to 'Won', generate client_code (same as convert endpoint)
     if (status === 'Won' && !lead.client_code) {
       const client_code = await generateClientCode();
-      await db.query('UPDATE leads SET status = ?, client_code = ?, converted_at = NOW() WHERE id = ?', [status, client_code, req.params.id]);
+      await db.query('UPDATE leads SET lead_stage = ?, status = ?, temperature = ?, lead_score = ?, client_code = ?, converted_at = NOW() WHERE id = ?', [status, status, temperature, lead_score, client_code, req.params.id]);
     } else {
-      await db.query('UPDATE leads SET status = ? WHERE id = ?', [status, req.params.id]);
+      await db.query('UPDATE leads SET lead_stage = ?, status = ?, temperature = ?, lead_score = ? WHERE id = ?', [status, status, temperature, lead_score, req.params.id]);
     }
 
     const [updated] = await db.query('SELECT * FROM leads WHERE id = ?', [req.params.id]);
@@ -446,24 +452,27 @@ exports.remove = async (req, res) => {
   }
 };
 
-// ─── Helper: Auto-derive lead_stage and lead_score from follow-up outcome ─────
+// ─── Helper: Auto-derive lead_stage, lead_score, and temperature from follow-up outcome ─────
 function deriveStageAndScore(outcome) {
   const map = {
-    'No Response':                  { stage: 'Contacted',         score: 1 },
-    'Callback Requested':           { stage: 'Contacted',         score: 2 },
-    'Follow-Up Needed':             { stage: 'Contacted',         score: 2 },
-    'Warm Lead':                    { stage: 'Replied',           score: 3 },
-    'Interested':                   { stage: 'Interested',        score: 3 },
-    'Hot Lead':                     { stage: 'Interested',        score: 4 },
-    'Proposal Requested':           { stage: 'Qualified',         score: 4 },
-    'Meeting Scheduled':            { stage: 'Meeting Scheduled', score: 4 },
-    'Negotiation Stage':            { stage: 'Negotiation',       score: 4 },
-    'Decision Pending':             { stage: 'Negotiation',       score: 4 },
-    'Budget Issue':                 { stage: 'Negotiation',       score: 3 },
-    'Timing Issue':                 { stage: 'Negotiation',       score: 3 },
-    'Already Working With Agency':  { stage: 'Lost',              score: 1 },
-    'Not Interested':               { stage: 'Lost',              score: 1 },
-    'Converted':                    { stage: 'Won',               score: 5 },
+    // Contact Outcomes
+    'No Response':                  { stage: 'Contacted',    score: 1, temperature: 'cold' },
+    'Callback Requested':           { stage: 'Contacted',    score: 2, temperature: 'cold' },
+    'Shared Details':               { stage: 'Replied',      score: 2, temperature: 'cold' },
+    // Interest Outcomes
+    'Interested':                   { stage: 'Interested',   score: 3, temperature: 'warm' },
+    'Not Interested':               { stage: 'Lost',         score: 1, temperature: 'cold' },
+    // Qualification Outcomes
+    'Budget Issue':                 { stage: 'Negotiation',  score: 3, temperature: 'warm' },
+    'Timing Issue':                 { stage: 'Negotiation',  score: 3, temperature: 'warm' },
+    'Already Working With Agency':  { stage: 'Lost',         score: 1, temperature: 'cold' },
+    // Sales Outcomes
+    'Meeting Scheduled':            { stage: 'Meeting',      score: 4, temperature: 'hot' },
+    'Proposal Requested':           { stage: 'Proposal',     score: 4, temperature: 'hot' },
+    'Negotiation Stage':            { stage: 'Negotiation',  score: 4, temperature: 'hot' },
+    // Final Outcomes
+    'Converted':                    { stage: 'Won',          score: 5, temperature: 'hot' },
+    'Lost':                         { stage: 'Lost',         score: 1, temperature: 'cold' },
   };
   return map[outcome] || null;
 }
@@ -481,12 +490,20 @@ exports.addFollowUp = async (req, res) => {
 
     const { note, follow_up_date, type, outcome, created_at, lead_stage, lead_score, next_action } = req.body;
 
+    // Validation: outcome and follow_up_date are required alongside note
+    if (!outcome || !outcome.trim()) {
+      return res.status(400).json({ message: 'Outcome is required' });
+    }
+    if (!follow_up_date) {
+      return res.status(400).json({ message: 'Next follow-up date is required' });
+    }
+
     const [result] = await db.query(
       'INSERT INTO lead_follow_ups (lead_id, type, outcome, note, follow_up_date, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [req.params.id, type || 'Phone Call', outcome || null, note, follow_up_date || null, req.user.id, created_at || new Date()]
     );
 
-    // Auto-update lead stage & score from outcome, unless manually overridden
+    // Auto-update lead stage, score & temperature from outcome, unless manually overridden
     const auto = outcome ? deriveStageAndScore(outcome) : null;
     const leadUpdates = {};
 
@@ -494,9 +511,9 @@ exports.addFollowUp = async (req, res) => {
       leadUpdates.lead_stage = lead_stage; // manual override takes priority
     } else if (auto?.stage) {
       // Only auto-advance — never go backwards (except to Lost/Won)
-      const stageOrder = ['Cold','Contacted','Replied','Interested','Qualified','Meeting Scheduled','Proposal Sent','Negotiation','Won','Lost'];
-      const [currentLead] = await db.query('SELECT lead_stage, lead_score FROM leads WHERE id = ?', [req.params.id]);
-      const currentStageIdx = stageOrder.indexOf(currentLead[0]?.lead_stage || 'Cold');
+      const stageOrder = ['New','Contacted','Replied','Interested','Qualified','Meeting','Proposal','Negotiation','Won','Lost'];
+      const [currentLead] = await db.query('SELECT lead_stage, lead_score, temperature FROM leads WHERE id = ?', [req.params.id]);
+      const currentStageIdx = stageOrder.indexOf(currentLead[0]?.lead_stage || 'New');
       const newStageIdx = stageOrder.indexOf(auto.stage);
       // Always allow Won/Lost; otherwise only advance forward
       if (auto.stage === 'Won' || auto.stage === 'Lost' || newStageIdx > currentStageIdx) {
@@ -510,29 +527,39 @@ exports.addFollowUp = async (req, res) => {
       // Only increase score, never decrease (except on Lost)
       const [currentLead] = await db.query('SELECT lead_score FROM leads WHERE id = ?', [req.params.id]);
       const currentScore = currentLead[0]?.lead_score || 1;
-      if (outcome === 'Not Interested' || outcome === 'Already Working With Agency') {
+      if (outcome === 'Not Interested' || outcome === 'Already Working With Agency' || outcome === 'Lost') {
         leadUpdates.lead_score = 1; // reset on loss
       } else if (auto.score > currentScore) {
         leadUpdates.lead_score = auto.score;
       }
     }
 
+    // Auto-update temperature based on outcome
+    if (auto?.temperature) {
+      leadUpdates.temperature = auto.temperature;
+    }
+
     if (next_action) leadUpdates.next_action = next_action;
     else if (auto?.stage) {
       // Auto-suggest next action based on stage
       const nextActionMap = {
-        'Contacted':         'Follow-Up Call',
-        'Replied':           'Follow-Up Call',
-        'Interested':        'Schedule Meeting',
-        'Qualified':         'Send Proposal',
-        'Meeting Scheduled': 'Send Proposal',
-        'Proposal Sent':     'Waiting for Client',
-        'Negotiation':       'Send Pricing',
-        'Won':               null,
-        'Lost':              null,
+        'Contacted':    'Follow-Up Call',
+        'Replied':      'Follow-Up Call',
+        'Interested':   'Schedule Meeting',
+        'Qualified':    'Send Proposal',
+        'Meeting':      'Send Proposal',
+        'Proposal':     'Waiting for Client',
+        'Negotiation':  'Send Pricing',
+        'Won':          null,
+        'Lost':         null,
       };
       const suggested = nextActionMap[leadUpdates.lead_stage || auto.stage];
       if (suggested) leadUpdates.next_action = suggested;
+    }
+
+    // Keep status field in sync with lead_stage (single source of truth)
+    if (leadUpdates.lead_stage) {
+      leadUpdates.status = leadUpdates.lead_stage;
     }
 
     if (Object.keys(leadUpdates).length > 0) {
@@ -680,7 +707,7 @@ async function generateClientCode() {
 exports.getFollowUpCustomOptions = async (req, res) => {
   try {
     const defaultTypes = ['Phone Call', 'Email', 'WhatsApp', 'Meeting', 'Instagram', 'LinkedIn', 'Proposal Discussion', 'Payment Follow-Up', 'Other', 'Initial Follow-up'];
-    const defaultOutcomes = ['No Response', 'Interested', 'Warm Lead', 'Hot Lead', 'Callback Requested', 'Proposal Requested', 'Meeting Scheduled', 'Negotiation Stage', 'Follow-Up Needed', 'Not Interested', 'Budget Issue', 'Timing Issue', 'Already Working With Agency', 'Decision Pending', 'Converted'];
+    const defaultOutcomes = ['No Response', 'Callback Requested', 'Shared Details', 'Interested', 'Not Interested', 'Budget Issue', 'Timing Issue', 'Already Working With Agency', 'Meeting Scheduled', 'Proposal Requested', 'Negotiation Stage', 'Converted', 'Lost'];
 
     const [types] = await db.query(
       `SELECT DISTINCT type FROM lead_follow_ups WHERE type IS NOT NULL AND type != ''`
@@ -713,7 +740,7 @@ exports.convert = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Lead not found' });
 
     const lead = rows[0];
-    if (lead.status === 'Won') {
+    if (lead.lead_stage === 'Won' || lead.status === 'Won') {
       return res.status(400).json({ message: 'Lead is already converted to client' });
     }
 
@@ -723,10 +750,10 @@ exports.convert = async (req, res) => {
     // Record status change
     await db.query(
       'INSERT INTO lead_status_history (lead_id, old_status, new_status, changed_by) VALUES (?, ?, ?, ?)',
-      [req.params.id, lead.status, 'Won', req.user.id]
+      [req.params.id, lead.lead_stage || lead.status, 'Won', req.user.id]
     );
 
-    await db.query("UPDATE leads SET status = 'Won', client_code = ?, converted_at = NOW() WHERE id = ?", [client_code, req.params.id]);
+    await db.query("UPDATE leads SET status = 'Won', lead_stage = 'Won', lead_score = 5, temperature = 'hot', client_code = ?, converted_at = NOW() WHERE id = ?", [client_code, req.params.id]);
 
     const [updated] = await db.query('SELECT * FROM leads WHERE id = ?', [req.params.id]);
     res.emitSocket('leads:updated', updated[0]);
@@ -746,7 +773,7 @@ exports.getFilterOptions = async (req, res) => {
     // Predefined options (always shown regardless of DB data)
     const predefinedStatuses = ['New', 'Contacted', 'Qualified', 'Proposal', 'Negotiation', 'Converted', 'Lost'];
     const predefinedSources = ['Google', 'Facebook', 'Instagram', 'LinkedIn', 'Referral', 'Cold Call', 'Website', 'WhatsApp', 'Event', 'Other'];
-    const predefinedStages = ['Cold', 'Contacted', 'Replied', 'Interested', 'Qualified', 'Meeting Scheduled', 'Proposal Sent', 'Negotiation', 'Won', 'Lost'];
+    const predefinedStages = ['New', 'Contacted', 'Replied', 'Interested', 'Qualified', 'Meeting', 'Proposal', 'Negotiation', 'Won', 'Lost'];
 
     // Get additional values from DB that may not be in predefined lists
     const [dbSources] = await db.query(
