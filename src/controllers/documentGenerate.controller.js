@@ -101,6 +101,29 @@ exports.generate = async (req, res) => {
     // ─── Build PDF with PDFKit ────────────────────────────────────────────────
     const doc = new PDFDocument({ size: 'A4', margins: { top: 60, bottom: 60, left: 50, right: 50 } });
 
+    // Register Noto Sans font (supports ₹ and other Unicode characters)
+    const fontsDir = path.join(__dirname, '../../fonts');
+    const notoRegularPath = path.join(fontsDir, 'NotoSans-Regular.ttf');
+    const notoItalicPath = path.join(fontsDir, 'NotoSans-Italic.ttf');
+    
+    const hasNotoRegular = fs.existsSync(notoRegularPath);
+    const hasNotoItalic = fs.existsSync(notoItalicPath);
+
+    // Font names to use throughout
+    const FONT_REGULAR = hasNotoRegular ? 'NotoSans' : 'Helvetica';
+    const FONT_BOLD = hasNotoRegular ? 'NotoSans-Bold' : 'Helvetica-Bold';
+    const FONT_ITALIC = hasNotoItalic ? 'NotoSans-Italic' : 'Helvetica-Oblique';
+    const FONT_BOLD_ITALIC = hasNotoRegular ? 'NotoSans-Bold' : 'Helvetica-BoldOblique';
+
+    if (hasNotoRegular) {
+      doc.registerFont('NotoSans', notoRegularPath);
+      // Use same file for bold (variable font supports weight axis)
+      doc.registerFont('NotoSans-Bold', notoRegularPath);
+    }
+    if (hasNotoItalic) {
+      doc.registerFont('NotoSans-Italic', notoItalicPath);
+    }
+
     const chunks = [];
     doc.on('data', chunk => chunks.push(chunk));
 
@@ -178,16 +201,16 @@ exports.generate = async (req, res) => {
           if (text) {
             const isBold = tag === 'strong' || tag === 'b';
             const isItalic = tag === 'em' || tag === 'i';
-            let font = 'Helvetica';
-            if (isBold && isItalic) font = 'Helvetica-BoldOblique';
-            else if (isBold) font = 'Helvetica-Bold';
-            else if (isItalic) font = 'Helvetica-Oblique';
+            let font = FONT_REGULAR;
+            if (isBold && isItalic) font = FONT_BOLD_ITALIC;
+            else if (isBold) font = FONT_BOLD;
+            else if (isItalic) font = FONT_ITALIC;
             segments.push({ text, font });
           }
         } else if (match[3]) {
           const text = decodeEntities(match[3]);
           if (text) {
-            segments.push({ text, font: 'Helvetica' });
+            segments.push({ text, font: FONT_REGULAR });
           }
         }
       }
@@ -246,7 +269,7 @@ exports.generate = async (req, res) => {
           // Fallback: plain text
           const text = decodeEntities(stripTags(line)).trim();
           if (text) {
-            doc.fontSize(fontSize).font('Helvetica').text(text, LEFT_MARGIN, doc.y, { 
+            doc.fontSize(fontSize).font(FONT_REGULAR).text(text, LEFT_MARGIN, doc.y, { 
               width: CONTENT_WIDTH, align, lineGap 
             });
           }
@@ -279,7 +302,7 @@ exports.generate = async (req, res) => {
         const text = cleanText(section);
         if (text) {
           doc.moveDown(0.5);
-          doc.fontSize(16).font('Helvetica-Bold').text(text, LEFT_MARGIN, doc.y, { 
+          doc.fontSize(16).font(FONT_BOLD).text(text, LEFT_MARGIN, doc.y, { 
             width: CONTENT_WIDTH, align: 'center' 
           });
           doc.moveDown(0.5);
@@ -288,7 +311,7 @@ exports.generate = async (req, res) => {
         const text = cleanText(section);
         if (text) {
           doc.moveDown(0.5);
-          doc.fontSize(12).font('Helvetica-Bold').text(text, LEFT_MARGIN, doc.y, { 
+          doc.fontSize(12).font(FONT_BOLD).text(text, LEFT_MARGIN, doc.y, { 
             width: CONTENT_WIDTH 
           });
           doc.moveDown(0.3);
@@ -307,7 +330,7 @@ exports.generate = async (req, res) => {
           const cells = (row.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || []).map(c => cleanText(c));
           if (cells.length >= 2) {
             const isHeader = /<th/i.test(row);
-            doc.fontSize(9).font(isHeader ? 'Helvetica-Bold' : 'Helvetica');
+            doc.fontSize(9).font(isHeader ? FONT_BOLD : FONT_REGULAR);
             const colWidth = CONTENT_WIDTH / cells.length;
             const startY = doc.y;
             
@@ -338,7 +361,7 @@ exports.generate = async (req, res) => {
         const items = (section.match(/<li[\s\S]*?<\/li>/gi) || []).map(li => cleanText(li));
         items.forEach(item => {
           checkNewPage();
-          doc.fontSize(10).font('Helvetica').text(`  •  ${item}`, LEFT_MARGIN, doc.y, { 
+          doc.fontSize(10).font(FONT_REGULAR).text(`  •  ${item}`, LEFT_MARGIN, doc.y, { 
             width: CONTENT_WIDTH, indent: 15, lineGap: 2 
           });
           doc.moveDown(0.15);
@@ -357,7 +380,7 @@ exports.generate = async (req, res) => {
         } else {
           const text = cleanText(section);
           if (text) {
-            doc.fontSize(10).font('Helvetica').text(text, LEFT_MARGIN, doc.y, { 
+            doc.fontSize(10).font(FONT_REGULAR).text(text, LEFT_MARGIN, doc.y, { 
               width: CONTENT_WIDTH, align: 'justify', lineGap: 3 
             });
           }
@@ -367,7 +390,7 @@ exports.generate = async (req, res) => {
         // Plain text fallback
         const text = cleanText(section);
         if (text) {
-          doc.fontSize(10).font('Helvetica').text(text, LEFT_MARGIN, doc.y, { 
+          doc.fontSize(10).font(FONT_REGULAR).text(text, LEFT_MARGIN, doc.y, { 
             width: CONTENT_WIDTH, lineGap: 3 
           });
           doc.moveDown(0.2);
