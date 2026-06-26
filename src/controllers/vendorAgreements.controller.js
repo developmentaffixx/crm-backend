@@ -93,7 +93,8 @@ exports.create = async (req, res) => {
     const {
       client_id, template_key, start_date, end_date,
       total_fee, payment_terms, advance_payment, amc_amount,
-      services
+      services, client_contact, client_address, platforms,
+      monthly_creatives, payment_milestones, onboarding_start, onboarding_end
     } = req.body;
 
     if (!client_id || !start_date || !end_date) {
@@ -105,19 +106,28 @@ exports.create = async (req, res) => {
 
     const [result] = await db.query(
       `INSERT INTO vendor_agreements
-        (agreement_id, client_id, template_key, start_date, end_date, total_fee, payment_terms, advance_payment, amc_amount, services, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (agreement_id, client_id, client_contact, client_address, template_key, start_date, end_date,
+         onboarding_start, onboarding_end, total_fee, payment_terms, advance_payment,
+         payment_milestones, amc_amount, services, platforms, monthly_creatives, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         agreement_id,
         client_id,
+        client_contact || null,
+        client_address || null,
         template_key || 'master',
         start_date,
         end_date,
+        onboarding_start || null,
+        onboarding_end || null,
         total_fee || 0,
         payment_terms || null,
         advance_payment || 0,
+        payment_milestones ? JSON.stringify(payment_milestones) : null,
         amc_amount || 0,
         JSON.stringify(services || []),
+        platforms || null,
+        monthly_creatives || null,
         'Active',
         req.user.id,
       ]
@@ -136,25 +146,35 @@ exports.update = async (req, res) => {
     const {
       client_id, template_key, start_date, end_date,
       total_fee, payment_terms, advance_payment, amc_amount,
-      services
+      services, client_contact, client_address, platforms,
+      monthly_creatives, payment_milestones, onboarding_start, onboarding_end
     } = req.body;
 
     const [result] = await db.query(
       `UPDATE vendor_agreements SET
-        client_id = ?, template_key = ?, start_date = ?, end_date = ?,
-        total_fee = ?, payment_terms = ?, advance_payment = ?, amc_amount = ?,
-        services = ?
+        client_id = ?, client_contact = ?, client_address = ?, template_key = ?,
+        start_date = ?, end_date = ?, onboarding_start = ?, onboarding_end = ?,
+        total_fee = ?, payment_terms = ?, advance_payment = ?,
+        payment_milestones = ?, amc_amount = ?,
+        services = ?, platforms = ?, monthly_creatives = ?
        WHERE id = ? AND deleted = 0`,
       [
         client_id,
+        client_contact || null,
+        client_address || null,
         template_key || 'master',
         start_date,
         end_date,
+        onboarding_start || null,
+        onboarding_end || null,
         total_fee || 0,
         payment_terms || null,
         advance_payment || 0,
+        payment_milestones ? JSON.stringify(payment_milestones) : null,
         amc_amount || 0,
         JSON.stringify(services || []),
+        platforms || null,
+        monthly_creatives || null,
         req.params.id,
       ]
     );
@@ -245,7 +265,11 @@ exports.generate = async (req, res) => {
     const [agreements] = await db.query(
       `SELECT va.*,
               l.name AS client_name,
-              l.business_name AS client_brand
+              l.business_name AS client_brand,
+              l.phone AS lead_phone,
+              l.address AS lead_address,
+              l.city AS lead_city,
+              l.state AS lead_state
        FROM vendor_agreements va
        LEFT JOIN leads l ON l.id = va.client_id
        WHERE va.id = ? AND va.deleted = 0`,
@@ -261,6 +285,9 @@ exports.generate = async (req, res) => {
 
     const companyName = company.company_name || '';
     const companyAddress = [company.address_line1, company.address_line2, company.city, company.state].filter(Boolean).join(', ');
+    const companyContact = company.phone || company.contact_number || '';
+    const companySignatory = company.signatory_name || 'Authorized Signatory';
+    const companySignatoryTitle = company.signatory_title || 'Founder & CEO';
 
     // Format dates
     const fmtDate = (d) => {
@@ -269,7 +296,45 @@ exports.generate = async (req, res) => {
       return `${String(date.getDate()).padStart(2, '0')}-${String(date.getMonth() + 1).padStart(2, '0')}-${date.getFullYear()}`;
     };
 
+    // Format date as "DD Month YYYY"
+    const fmtDateLong = (d) => {
+      if (!d) return '';
+      const date = new Date(d);
+      const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      return `${String(date.getDate()).padStart(2, '0')} ${months[date.getMonth()]} ${date.getFullYear()}`;
+    };
+
     const today = fmtDate(new Date());
+    const todayLong = fmtDateLong(new Date());
+
+    // Calculate contract duration
+    const calcDuration = (start, end) => {
+      if (!start || !end) return '';
+      const s = new Date(start);
+      const e = new Date(end);
+      const months = (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
+      if (months === 1) return 'One (1) Month';
+      if (months === 2) return 'Two (2) Months';
+      if (months === 3) return 'Three (3) Months';
+      if (months === 6) return 'Six (6) Months';
+      if (months === 12) return 'Twelve (12) Months';
+      return `${months} Months`;
+    };
+
+    // Number to words (Indian format)
+    const numberToWords = (num) => {
+      if (!num || num === 0) return 'Zero Only';
+      const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
+        'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
+      const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+      const n = Math.floor(Number(num));
+      if (n < 20) return ones[n] + ' Only';
+      if (n < 100) return (tens[Math.floor(n / 10)] + (n % 10 ? ' ' + ones[n % 10] : '')) + ' Only';
+      if (n < 1000) return ones[Math.floor(n / 100)] + ' Hundred' + (n % 100 ? ' ' + numberToWords(n % 100).replace(' Only', '') : '') + ' Only';
+      if (n < 100000) return numberToWords(Math.floor(n / 1000)).replace(' Only', '') + ' Thousand' + (n % 1000 ? ' ' + numberToWords(n % 1000).replace(' Only', '') : '') + ' Only';
+      if (n < 10000000) return numberToWords(Math.floor(n / 100000)).replace(' Only', '') + ' Lakh' + (n % 100000 ? ' ' + numberToWords(n % 100000).replace(' Only', '') : '') + ' Only';
+      return numberToWords(Math.floor(n / 10000000)).replace(' Only', '') + ' Crore' + (n % 10000000 ? ' ' + numberToWords(n % 10000000).replace(' Only', '') : '') + ' Only';
+    };
 
     // Parse services
     let services = [];
@@ -284,20 +349,59 @@ exports.generate = async (req, res) => {
     }
     const serviceNames = services.map(s => s.name).join(', ');
 
+    // Parse payment milestones
+    let paymentMilestones = [];
+    if (agreement.payment_milestones) {
+      try {
+        paymentMilestones = typeof agreement.payment_milestones === 'string'
+          ? JSON.parse(agreement.payment_milestones)
+          : agreement.payment_milestones;
+      } catch (e) {
+        paymentMilestones = [];
+      }
+    }
+
+    // Build payment milestones HTML table
+    let paymentMilestonesTable = '';
+    if (paymentMilestones.length > 0) {
+      paymentMilestonesTable = '<table style="width:100%;border-collapse:collapse;">';
+      paymentMilestonesTable += '<tr><th style="border:1px solid #ccc;padding:8px;background:#f5f5f5;">Payment Milestone</th><th style="border:1px solid #ccc;padding:8px;background:#f5f5f5;">Amount</th><th style="border:1px solid #ccc;padding:8px;background:#f5f5f5;">Due Date</th></tr>';
+      paymentMilestones.forEach(m => {
+        paymentMilestonesTable += `<tr><td style="border:1px solid #ccc;padding:8px;">${m.milestone || ''}</td><td style="border:1px solid #ccc;padding:8px;">₹${Number(m.amount || 0).toLocaleString('en-IN')}</td><td style="border:1px solid #ccc;padding:8px;">${m.due_date ? fmtDateLong(m.due_date) : ''}</td></tr>`;
+      });
+      paymentMilestonesTable += '</table>';
+    }
+
+    // Client address: use agreement-level or fall back to lead data
+    const clientAddress = agreement.client_address || [agreement.lead_address, agreement.lead_city, agreement.lead_state].filter(Boolean).join(', ');
+    const clientContact = agreement.client_contact || agreement.lead_phone || '';
+
     // Build replacements
     const replacements = {
       '{{client_name}}': agreement.client_name || '',
       '{{client_brand}}': agreement.client_brand || '',
+      '{{client_address}}': clientAddress,
+      '{{client_contact}}': clientContact,
       '{{company_name}}': companyName,
       '{{company_address}}': companyAddress,
+      '{{company_contact}}': companyContact,
+      '{{company_signatory}}': companySignatory,
+      '{{company_signatory_title}}': companySignatoryTitle,
       '{{services}}': serviceNames,
-      '{{start_date}}': fmtDate(agreement.start_date),
-      '{{end_date}}': fmtDate(agreement.end_date),
+      '{{platforms}}': agreement.platforms || '',
+      '{{monthly_creatives}}': agreement.monthly_creatives || '',
+      '{{start_date}}': fmtDateLong(agreement.start_date),
+      '{{end_date}}': fmtDateLong(agreement.end_date),
+      '{{onboarding_start}}': fmtDateLong(agreement.onboarding_start),
+      '{{onboarding_end}}': fmtDateLong(agreement.onboarding_end),
+      '{{contract_duration}}': calcDuration(agreement.start_date, agreement.end_date),
       '{{total_fee}}': agreement.total_fee ? Number(agreement.total_fee).toLocaleString('en-IN') : '0',
+      '{{total_fee_words}}': agreement.total_fee ? 'Rupees ' + numberToWords(agreement.total_fee) : '',
       '{{payment_terms}}': agreement.payment_terms || '',
       '{{advance_payment}}': agreement.advance_payment ? Number(agreement.advance_payment).toLocaleString('en-IN') : '0',
       '{{amc_amount}}': agreement.amc_amount ? Number(agreement.amc_amount).toLocaleString('en-IN') : '0',
-      '{{today}}': today,
+      '{{payment_milestones_table}}': paymentMilestonesTable,
+      '{{today}}': todayLong,
     };
 
     const applyReplacements = (text) => {
@@ -316,7 +420,6 @@ exports.generate = async (req, res) => {
       );
     } catch (dbErr) {
       console.error('vendor_agreement_templates query failed:', dbErr.message);
-      return res.status(500).json({ message: 'Agreement templates not found. Please run the database migration.' });
     }
 
     // ─── Build PDF with PDFKit ────────────────────────────────────────────────
@@ -417,53 +520,26 @@ exports.generate = async (req, res) => {
       if (doc.y > 720) doc.addPage();
     };
 
-    // ─── Master Agreement Content ─────────────────────────────────────────────
-    addTitle('VENDOR SERVICE AGREEMENT');
-    addSubtitle('MASTER AGREEMENT');
+    // ─── Render Master Agreement from DB template ───────────────────────────────
+    if (masterTemplates.length && masterTemplates[0].content) {
+      const content = applyReplacements(masterTemplates[0].content);
+      renderHtmlToPdf(doc, content, checkNewPage);
+    } else {
+      addTitle('VENDOR SERVICE AGREEMENT');
+      addParagraph(`This Agreement is entered into on ${fmtDateLong(agreement.start_date)} between:`);
+      addLabelValue('Service Provider:', companyName);
+      addLabelValue('Client:', agreement.client_name || '');
+      addHeading('1. Scope of Services');
+      addParagraph(`Services: ${serviceNames}`);
+      addHeading('2. Term');
+      addParagraph(`From ${fmtDateLong(agreement.start_date)} to ${fmtDateLong(agreement.end_date)}`);
+      addHeading('3. Fees');
+      addLabelValue('Total Fee:', `INR ${replacements['{{total_fee}}']}`);
+      addDivider();
+      addParagraph('Signature: _____________________');
+    }
 
-    addParagraph(`This Vendor Service Agreement ("Agreement") is entered into on ${fmtDate(agreement.start_date)} between:`);
-    doc.moveDown(0.3);
-
-    addLabelValue('Service Provider:', companyName);
-    addLabelValue('Address:', companyAddress);
-    doc.moveDown(0.3);
-    addLabelValue('Client:', agreement.client_name || '');
-    addLabelValue('Brand:', agreement.client_brand || '');
-
-    checkNewPage();
-    addHeading('1. Scope of Services');
-    addParagraph(`The Service Provider agrees to provide the following services: ${serviceNames}`);
-
-    checkNewPage();
-    addHeading('2. Term');
-    addParagraph(`This Agreement shall commence on ${fmtDate(agreement.start_date)} and shall continue until ${fmtDate(agreement.end_date)}, unless terminated earlier in accordance with the terms herein.`);
-
-    checkNewPage();
-    addHeading('3. Fees & Payment');
-    addLabelValue('Total Fee:', `INR ${replacements['{{total_fee}}']}`);
-    addLabelValue('Payment Terms:', replacements['{{payment_terms}}']);
-    addLabelValue('Advance Payment:', `INR ${replacements['{{advance_payment}}']}`);
-    addLabelValue('AMC (Annual Maintenance Charge):', `INR ${replacements['{{amc_amount}}']}`);
-
-    checkNewPage();
-    addHeading('4. Confidentiality');
-    addParagraph('Both parties agree to maintain confidentiality of all proprietary information shared during the course of this agreement.');
-
-    checkNewPage();
-    addHeading('5. Termination');
-    addParagraph('Either party may terminate this Agreement by providing 30 days written notice. In case of breach, the non-breaching party may terminate immediately.');
-
-    addDivider();
-
-    addLabelValue(`For ${companyName}`, '');
-    addParagraph('Authorized Signatory: _____________________');
-    addParagraph(`Date: ${today}`);
-    doc.moveDown(0.5);
-    addLabelValue(`For ${agreement.client_name || ''}`, '');
-    addParagraph('Authorized Signatory: _____________________');
-    addParagraph(`Date: ${today}`);
-
-    // ─── Service-specific pages ───────────────────────────────────────────────
+    // ─── Service-specific pages (from DB templates) ───────────────────────────
     const SERVICE_KEY_MAP = {
       'Social Media Marketing': 'social_media_marketing',
       'Performance Marketing': 'performance_marketing',
@@ -473,103 +549,35 @@ exports.generate = async (req, res) => {
       'Website Development': 'website_development',
     };
 
-    const SERVICE_DELIVERABLES = {
-      'Social Media Marketing': [
-        'Social media strategy development',
-        'Content creation and scheduling',
-        'Community management',
-        'Monthly analytics and reporting',
-        'Platform management (Instagram, Facebook, LinkedIn, Twitter)',
-      ],
-      'Performance Marketing': [
-        'Google Ads campaign management',
-        'Meta (Facebook/Instagram) Ads',
-        'Campaign strategy and optimization',
-        'A/B testing and conversion tracking',
-        'Monthly performance reports with ROI analysis',
-      ],
-      'SEO': [
-        'Technical SEO audit and fixes',
-        'On-page optimization',
-        'Off-page SEO and link building',
-        'Keyword research and strategy',
-        'Monthly ranking and traffic reports',
-      ],
-      'Personal Branding': [
-        'Personal brand strategy development',
-        'LinkedIn profile optimization and content',
-        'Thought leadership content creation',
-        'Public speaking and media coaching',
-        'Online reputation management',
-      ],
-      'Influencer Marketing': [
-        'Influencer identification and outreach',
-        'Campaign planning and execution',
-        'Content collaboration management',
-        'Performance tracking and reporting',
-        'Contract negotiation with influencers',
-      ],
-      'Website Development': [
-        'UI/UX design and prototyping',
-        'Frontend and backend development',
-        'Responsive design implementation',
-        'CMS integration',
-        'Testing, deployment, and handover',
-      ],
-    };
-
     for (const svc of services) {
-      if (!SERVICE_KEY_MAP[svc.name]) continue;
+      const svcKey = SERVICE_KEY_MAP[svc.name];
+      if (!svcKey) continue;
+
+      // Fetch service template from DB
+      let svcTemplates = [];
+      try {
+        [svcTemplates] = await db.query(
+          'SELECT * FROM vendor_agreement_templates WHERE template_key = ?',
+          [svcKey]
+        );
+      } catch (e) {
+        console.error(`Failed to fetch template for ${svcKey}:`, e.message);
+      }
 
       doc.addPage();
-      addTitle(`${svc.name.toUpperCase()} SERVICE AGREEMENT`);
 
-      addParagraph(`This Agreement is entered into on ${fmtDate(agreement.start_date)} between:`);
-      doc.moveDown(0.3);
-      addLabelValue('Service Provider:', companyName);
-      addLabelValue('Client:', `${agreement.client_name || ''} (${agreement.client_brand || ''})`);
-
-      addHeading('1. Scope of Services');
-      addParagraph(`The Service Provider shall provide ${svc.name} services including:`);
-
-      const deliverables = SERVICE_DELIVERABLES[svc.name] || [];
-      deliverables.forEach(item => {
-        doc.fontSize(10).font('Helvetica').text(`  •  ${item}`, { indent: 10 });
-      });
-      doc.moveDown(0.5);
-
-      addHeading('2. Term');
-      addParagraph(`From ${fmtDate(agreement.start_date)} to ${fmtDate(agreement.end_date)}`);
-
-      addHeading('3. Fees');
-      addLabelValue('Total Fee:', `INR ${replacements['{{total_fee}}']}`);
-      addLabelValue('Payment Terms:', replacements['{{payment_terms}}']);
-      addLabelValue('Advance:', `INR ${replacements['{{advance_payment}}']}`);
-      addLabelValue('AMC:', `INR ${replacements['{{amc_amount}}']}`);
-
-      if (svc.name === 'Performance Marketing') {
-        doc.moveDown(0.3);
-        doc.fontSize(9).font('Helvetica-Oblique').text('Note: Ad spend budget is separate from service fees.');
-        doc.font('Helvetica');
+      if (svcTemplates.length && svcTemplates[0].content) {
+        const content = applyReplacements(svcTemplates[0].content);
+        renderHtmlToPdf(doc, content, checkNewPage);
+      } else {
+        // Fallback: basic service page
+        addTitle(`${svc.name.toUpperCase()} SERVICE AGREEMENT`);
+        addParagraph(`Services: ${svc.name}`);
+        addParagraph(`Term: ${fmtDateLong(agreement.start_date)} to ${fmtDateLong(agreement.end_date)}`);
+        addLabelValue('Total Fee:', `INR ${replacements['{{total_fee}}']}`);
+        addDivider();
+        addParagraph('Signature: _____________________');
       }
-      if (svc.name === 'Influencer Marketing') {
-        doc.moveDown(0.3);
-        doc.fontSize(9).font('Helvetica-Oblique').text('Note: Influencer fees/collaborations are billed separately.');
-        doc.font('Helvetica');
-      }
-      if (svc.name === 'Website Development') {
-        addHeading('4. Deliverables');
-        addParagraph('Complete website with source code, documentation, and 30-day post-launch support.');
-      }
-
-      addDivider();
-      addLabelValue(`For ${companyName}`, '');
-      addParagraph('Signature: _____________________');
-      addParagraph(`Date: ${today}`);
-      doc.moveDown(0.5);
-      addLabelValue(`For ${agreement.client_name || ''}`, '');
-      addParagraph('Signature: _____________________');
-      addParagraph(`Date: ${today}`);
     }
 
     // Finalize PDF
@@ -595,3 +603,81 @@ exports.generate = async (req, res) => {
     return res.status(500).json({ message: 'Failed to generate PDF', error: err.message });
   }
 };
+
+// ─── HTML to PDF renderer helper ──────────────────────────────────────────────
+function renderHtmlToPdf(doc, content, checkNewPage) {
+  const stripTags = (html) => html.replace(/<[^>]+>/g, '');
+
+  const sections = content.split(/(?=<h[123])|(?=<p[ >])|(?=<p>)|(?=<table)|(?=<hr)|(?=<ul)|(?=<ol)|(?=<br)/gi);
+
+  for (const section of sections) {
+    if (!section.trim()) continue;
+    checkNewPage();
+
+    if (section.match(/^<h1/i)) {
+      const text = stripTags(section).trim();
+      if (text) {
+        doc.moveDown(0.5);
+        doc.fontSize(16).font('Helvetica-Bold').text(text, { align: 'center' });
+        doc.moveDown(0.5);
+      }
+    } else if (section.match(/^<h2/i)) {
+      const text = stripTags(section).trim();
+      if (text) {
+        doc.moveDown(0.5);
+        doc.fontSize(11).font('Helvetica-Bold').text(text);
+        doc.moveDown(0.3);
+      }
+    } else if (section.match(/^<h3/i)) {
+      const text = stripTags(section).trim();
+      if (text) {
+        doc.moveDown(0.3);
+        doc.fontSize(10).font('Helvetica-Bold').text(text);
+        doc.moveDown(0.2);
+      }
+    } else if (section.match(/^<hr/i)) {
+      doc.moveDown(0.5);
+      doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#dddddd').stroke();
+      doc.moveDown(0.5);
+    } else if (section.match(/^<br/i)) {
+      doc.moveDown(0.3);
+    } else if (section.match(/^<table/i)) {
+      const rowMatches = section.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+      for (const row of rowMatches) {
+        checkNewPage();
+        const cells = (row.match(/<t[dh][\s\S]*?<\/t[dh]>/gi) || []).map(c => stripTags(c).trim());
+        if (cells.length >= 2) {
+          const isHeader = row.includes('<th');
+          doc.fontSize(9).font(isHeader ? 'Helvetica-Bold' : 'Helvetica');
+          const colWidth = 495 / cells.length;
+          const startX = 50;
+          const startY = doc.y;
+          cells.forEach((cell, i) => {
+            doc.text(cell, startX + (i * colWidth), startY, { width: colWidth - 5, align: 'left' });
+          });
+          doc.y = startY + 18;
+        }
+      }
+      doc.moveDown(0.5);
+    } else if (section.match(/^<[uo]l/i)) {
+      const items = (section.match(/<li[\s\S]*?<\/li>/gi) || []).map(li => stripTags(li).trim());
+      items.forEach(item => {
+        checkNewPage();
+        doc.fontSize(10).font('Helvetica').text(`  •  ${item}`, { indent: 10 });
+      });
+      doc.moveDown(0.3);
+    } else if (section.match(/^<p/i)) {
+      const text = stripTags(section).trim();
+      if (text) {
+        doc.fontSize(10).font('Helvetica').text(text, { align: 'justify', lineGap: 3 });
+        doc.moveDown(0.3);
+      }
+    } else {
+      const text = stripTags(section).trim();
+      if (text) {
+        doc.fontSize(10).font('Helvetica').text(text, { lineGap: 3 });
+        doc.moveDown(0.2);
+      }
+    }
+  }
+}
