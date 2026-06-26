@@ -503,3 +503,95 @@ exports.approvedShoots = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+// ─── RESCHEDULE (drag & drop) ─────────────────────────────────────────────────
+// Updates the date of a single post/shoot/ad item
+
+exports.reschedule = async (req, res) => {
+  try {
+    const { item_type, item_id, new_date } = req.body;
+
+    if (!item_type || !item_id) {
+      return res.status(400).json({ message: 'item_type and item_id are required' });
+    }
+
+    if (item_type === 'post') {
+      await db.query(
+        'UPDATE content_calendar_posts SET posting_date = ? WHERE id = ?',
+        [new_date, item_id]
+      );
+    } else if (item_type === 'shoot') {
+      await db.query(
+        'UPDATE content_calendar_shoots SET shoot_date = ? WHERE id = ?',
+        [new_date, item_id]
+      );
+    } else if (item_type === 'ad') {
+      await db.query(
+        'UPDATE content_calendar_ads SET start_date = ? WHERE id = ?',
+        [new_date, item_id]
+      );
+    } else {
+      return res.status(400).json({ message: 'Invalid item_type' });
+    }
+
+    res.emitSocket('content-calendar:updated', { item_type, item_id, new_date });
+    return res.json({ message: 'Rescheduled successfully' });
+  } catch (err) {
+    console.error('Content calendar reschedule error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── QUICK ADD AD ─────────────────────────────────────────────────────────────
+// Creates an ad directly onto a day (finds or creates a plan for that client+month)
+
+exports.quickAd = async (req, res) => {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const { client_id, plan_month, creative_name, campaign_objective, platform, budget, start_date, end_date } = req.body;
+
+    if (!client_id || !plan_month || !start_date) {
+      await conn.rollback(); conn.release();
+      return res.status(400).json({ message: 'client_id, plan_month, and start_date are required' });
+    }
+
+    // Find existing plan or create one
+    let [plans] = await conn.query(
+      'SELECT id FROM content_calendar_plans WHERE client_id = ? AND plan_month = ? AND deleted = 0',
+      [client_id, plan_month]
+    );
+
+    let planId;
+    if (plans.length > 0) {
+      planId = plans[0].id;
+    } else {
+      const [result] = await conn.query(
+        `INSERT INTO content_calendar_plans (client_id, plan_month, status, created_by) VALUES (?, ?, 'active', ?)`,
+        [client_id, plan_month, req.user.id]
+      );
+      planId = result.insertId;
+    }
+
+    // Generate ad number and insert
+    const adNo = await generateNextAdNo(conn);
+    await conn.query(
+      `INSERT INTO content_calendar_ads 
+        (plan_id, ad_no, creative_name, campaign_objective, platform, ad_status, budget, start_date, end_date)
+       VALUES (?, ?, ?, ?, ?, 'planned', ?, ?, ?)`,
+      [planId, adNo, toNull(creative_name), campaign_objective || 'lead_generation', toNull(platform), toNull(budget), start_date, toNull(end_date)]
+    );
+
+    await conn.commit();
+    conn.release();
+
+    res.emitSocket('content-calendar:updated', { planId });
+    return res.status(201).json({ message: 'Ad added', ad_no: adNo });
+  } catch (err) {
+    await conn.rollback();
+    conn.release();
+    console.error('Quick ad error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};

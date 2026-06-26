@@ -18,6 +18,12 @@ router.get('/approved-briefs', controller.approvedBriefs);
 // GET  /api/content-calendar/approved-shoots — approved shoots for linking
 router.get('/approved-shoots', controller.approvedShoots);
 
+// PUT  /api/content-calendar/reschedule   — drag & drop reschedule
+router.put('/reschedule', controller.reschedule);
+
+// POST /api/content-calendar/quick-ad     — quick add ad to a day
+router.post('/quick-ad', controller.quickAd);
+
 // GET  /api/content-calendar/:id          — get single plan with children
 router.get('/:id', param('id').isInt(), controller.getOne);
 
