@@ -4,12 +4,12 @@ const fs = require('fs');
 
 /**
  * GET /api/clients
- * Returns all leads with status = 'Won' (i.e. converted clients)
+ * Returns all leads with status = 'Won' or lead_stage = 'Won' (i.e. converted clients)
  */
 exports.list = async (req, res) => {
   try {
     const { search, sortBy, sortOrder } = req.query;
-    let where = "l.deleted = 0 AND l.status = 'Won'";
+    let where = "l.deleted = 0 AND (l.status = 'Won' OR l.lead_stage = 'Won')";
     const params = [];
 
     if (search) {
@@ -62,7 +62,7 @@ exports.getOne = async (req, res) => {
        FROM leads l
        LEFT JOIN users u_assigned ON u_assigned.id = l.assigned_to
        LEFT JOIN users u_created  ON u_created.id  = l.created_by
-       WHERE l.id = ? AND l.deleted = 0 AND l.status = 'Won'`,
+       WHERE l.id = ? AND l.deleted = 0 AND (l.status = 'Won' OR l.lead_stage = 'Won')`,
       [req.params.id]
     );
 
