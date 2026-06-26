@@ -104,25 +104,25 @@ exports.generate = async (req, res) => {
     // Register Noto Sans font (supports ₹ and other Unicode characters)
     const fontsDir = path.join(__dirname, '../../fonts');
     const notoRegularPath = path.join(fontsDir, 'NotoSans-Regular.ttf');
+    const notoBoldPath = path.join(fontsDir, 'NotoSans-Bold.ttf');
     const notoItalicPath = path.join(fontsDir, 'NotoSans-Italic.ttf');
+    const notoBoldItalicPath = path.join(fontsDir, 'NotoSans-BoldItalic.ttf');
     
     const hasNotoRegular = fs.existsSync(notoRegularPath);
+    const hasNotoBold = fs.existsSync(notoBoldPath);
     const hasNotoItalic = fs.existsSync(notoItalicPath);
+    const hasNotoBoldItalic = fs.existsSync(notoBoldItalicPath);
 
     // Font names to use throughout
     const FONT_REGULAR = hasNotoRegular ? 'NotoSans' : 'Helvetica';
-    const FONT_BOLD = hasNotoRegular ? 'NotoSans-Bold' : 'Helvetica-Bold';
+    const FONT_BOLD = hasNotoBold ? 'NotoSans-Bold' : 'Helvetica-Bold';
     const FONT_ITALIC = hasNotoItalic ? 'NotoSans-Italic' : 'Helvetica-Oblique';
-    const FONT_BOLD_ITALIC = hasNotoRegular ? 'NotoSans-Bold' : 'Helvetica-BoldOblique';
+    const FONT_BOLD_ITALIC = hasNotoBoldItalic ? 'NotoSans-BoldItalic' : 'Helvetica-BoldOblique';
 
-    if (hasNotoRegular) {
-      doc.registerFont('NotoSans', notoRegularPath);
-      // Use same file for bold (variable font supports weight axis)
-      doc.registerFont('NotoSans-Bold', notoRegularPath);
-    }
-    if (hasNotoItalic) {
-      doc.registerFont('NotoSans-Italic', notoItalicPath);
-    }
+    if (hasNotoRegular) doc.registerFont('NotoSans', notoRegularPath);
+    if (hasNotoBold) doc.registerFont('NotoSans-Bold', notoBoldPath);
+    if (hasNotoItalic) doc.registerFont('NotoSans-Italic', notoItalicPath);
+    if (hasNotoBoldItalic) doc.registerFont('NotoSans-BoldItalic', notoBoldItalicPath);
 
     const chunks = [];
     doc.on('data', chunk => chunks.push(chunk));
