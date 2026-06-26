@@ -179,12 +179,11 @@ server.listen(PORT, () => {
 
   // ── One-time: Sync lead_stage with status for existing data ─────────────────
   const db = require('./src/config/db');
-  db.query("UPDATE leads SET lead_stage = 'Won', lead_score = 5, temperature = 'hot' WHERE status = 'Won' AND (lead_stage IS NULL OR lead_stage != 'Won')")
-    .then(() => db.query("UPDATE leads SET lead_stage = 'Lost', lead_score = 1, temperature = 'cold' WHERE status = 'Lost' AND (lead_stage IS NULL OR lead_stage != 'Lost')"))
+  db.query("UPDATE leads SET status = 'Won', lead_stage = 'Won', lead_score = 5, temperature = 'hot' WHERE client_code IS NOT NULL AND client_code != '' AND (status != 'Won' OR lead_stage != 'Won')")
     .then(() => db.query("UPDATE leads SET lead_stage = 'New' WHERE lead_stage = 'Cold'"))
     .then(() => db.query("UPDATE leads SET lead_stage = 'Meeting' WHERE lead_stage = 'Meeting Scheduled'"))
     .then(() => db.query("UPDATE leads SET lead_stage = 'Proposal' WHERE lead_stage = 'Proposal Sent'"))
-    .then(() => db.query("UPDATE leads SET status = lead_stage WHERE status != lead_stage AND lead_stage IS NOT NULL"))
+    .then(() => db.query("UPDATE leads SET status = lead_stage WHERE status != lead_stage AND lead_stage IS NOT NULL AND client_code IS NULL"))
     .then(() => console.log('✅  Lead stages synced'))
     .catch(err => console.error('⚠️  Lead stage sync error (non-fatal):', err.message));
 
