@@ -235,16 +235,16 @@ exports.generate = async (req, res) => {
         return;
       }
 
-      // Render mixed bold/italic/normal using continued
+      // For mixed fonts, use 'left' align to avoid justify spacing issues with continued text
       doc.x = LEFT_MARGIN;
       for (let i = 0; i < segments.length; i++) {
         const seg = segments[i];
         const isLast = i === segments.length - 1;
         doc.font(seg.font);
         if (isLast) {
-          doc.text(seg.text, { width: CONTENT_WIDTH, align, lineGap, continued: false });
+          doc.text(seg.text, { width: CONTENT_WIDTH, align: 'left', lineGap, continued: false });
         } else {
-          doc.text(seg.text, { width: CONTENT_WIDTH, align, lineGap, continued: true });
+          doc.text(seg.text, { width: CONTENT_WIDTH, align: 'left', lineGap, continued: true });
         }
       }
     };
@@ -280,8 +280,8 @@ exports.generate = async (req, res) => {
     };
 
     // Check if we need a new page (with bottom margin for letterhead footer)
-    const checkNewPage = () => { 
-      if (doc.y > 720) {
+    const checkNewPage = (minSpace = 0) => { 
+      if (doc.y > (700 - minSpace)) {
         doc.addPage(); 
       }
     };
@@ -301,6 +301,7 @@ exports.generate = async (req, res) => {
       if (section.match(/^<h1/i)) {
         const text = cleanText(section);
         if (text) {
+          checkNewPage(60); // Ensure space for heading + at least some content
           doc.moveDown(0.5);
           doc.fontSize(16).font(FONT_BOLD).text(text, LEFT_MARGIN, doc.y, { 
             width: CONTENT_WIDTH, align: 'center' 
@@ -310,6 +311,7 @@ exports.generate = async (req, res) => {
       } else if (section.match(/^<h2/i)) {
         const text = cleanText(section);
         if (text) {
+          checkNewPage(60); // Ensure space for heading + at least some content
           doc.moveDown(0.5);
           doc.fontSize(12).font(FONT_BOLD).text(text, LEFT_MARGIN, doc.y, { 
             width: CONTENT_WIDTH 
