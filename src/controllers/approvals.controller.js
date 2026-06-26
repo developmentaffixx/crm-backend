@@ -376,7 +376,7 @@ exports.getApprovalsPage = async (req, res) => {
       pendingTasksWhere += ' AND (t.created_by = ? OR t.assigned_to = ?)';
       params.push(userId, userId);
       extWhere += ' AND er.requested_by = ?';
-      fwdWhere += ' AND fr.forwarded_by = ?';
+      fwdWhere += ' AND (fr.forwarded_by = ? OR fr.forwarded_to = ?)';
     }
 
     const [pendingTasks] = await db.query(
@@ -401,7 +401,7 @@ exports.getApprovalsPage = async (req, res) => {
       extParams
     );
 
-    const fwdParams = isAdmin ? [] : [userId];
+    const fwdParams = isAdmin ? [] : [userId, userId];
     const [forwards] = await db.query(
       `SELECT fr.*, t.title AS task_title,
               CONCAT(u1.first_name, ' ', u1.last_name) AS forwarded_by_name,
@@ -463,8 +463,8 @@ exports.getBadgeCount = async (req, res) => {
         [userId]
       );
       const [[{ fwd_count }]] = await db.query(
-        "SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending' AND forwarded_by = ?",
-        [userId]
+        "SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending' AND (forwarded_by = ? OR forwarded_to = ?)",
+        [userId, userId]
       );
       count = task_count + ext_count + fwd_count;
     }

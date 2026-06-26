@@ -50,7 +50,7 @@ async function syncAssignees(taskId, primaryUserId, collaboratorIds = []) {
 exports.list = async (req, res) => {
   try {
     const {
-      status, is_active, priority, search, exclude_done,
+      status, is_active, priority, search, exclude_done, assigned_to,
       page = 1, limit = 25,
       sort_by = 'created_at', sort_order = 'DESC'
     } = req.query;
@@ -82,6 +82,7 @@ exports.list = async (req, res) => {
     }
     if (exclude_done === '1') { where += ' AND t.is_active != 3'; }
     if (priority)  { where += ' AND t.priority = ?';  params.push(priority); }
+    if (assigned_to) { where += ' AND t.assigned_to = ?'; params.push(assigned_to); }
 
     // Search by title or description
     if (search && search.trim()) {
@@ -104,6 +105,9 @@ exports.list = async (req, res) => {
               COALESCE((SELECT SUM(tl.duration) FROM task_time_logs tl WHERE tl.task_id = t.id), 0) AS time_spent,
               t.timer_started_at,
               CONCAT(u_assigned.first_name, ' ', u_assigned.last_name) AS assigned_to_name,
+              u_assigned.avatar_url AS assigned_to_avatar,
+              u_assigned.first_name AS assigned_to_first_name,
+              u_assigned.last_name AS assigned_to_last_name,
               CONCAT(u_created.first_name,  ' ', u_created.last_name)  AS created_by_name,
               (SELECT pt2.project_id FROM project_tasks pt2 WHERE pt2.task_id = t.id LIMIT 1) AS project_id,
               (SELECT p2.title FROM project_tasks pt2 JOIN projects p2 ON p2.id = pt2.project_id AND p2.deleted = 0 WHERE pt2.task_id = t.id LIMIT 1) AS project_name

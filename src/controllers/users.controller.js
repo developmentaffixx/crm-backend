@@ -8,7 +8,7 @@ const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('.
 exports.list = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT id, first_name, last_name, email, is_admin
+      `SELECT id, first_name, last_name, email, is_admin, avatar_url
        FROM users
        WHERE deleted = 0 AND is_active = 1
        ORDER BY first_name, last_name`
