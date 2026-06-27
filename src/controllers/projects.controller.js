@@ -304,7 +304,7 @@ exports.update = async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    const allowed = ['title', 'description', 'project_type', 'client_id', 'service_id', 'start_date', 'end_date', 'status'];
+    const allowed = ['title', 'description', 'project_type', 'client_id', 'service_id', 'start_date', 'end_date', 'status', 'project_id_code'];
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
 
@@ -315,6 +315,11 @@ exports.update = async (req, res) => {
         updates[f] = null;
       }
     });
+
+    // Don't allow empty project_id_code — remove from updates if blank
+    if (updates.project_id_code !== undefined && !updates.project_id_code.trim()) {
+      delete updates.project_id_code;
+    }
 
     // If switching to internal, clear client_id
     if (updates.project_type === 'internal') {
