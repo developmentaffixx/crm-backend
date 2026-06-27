@@ -49,6 +49,15 @@ exports.list = async (req, res) => {
       const countMap = {};
       memberCounts.forEach(mc => { countMap[mc.project_id] = mc.member_count; });
       rows.forEach(r => { r.member_count = countMap[r.id] || 0; });
+
+      // Fetch service count for each project
+      const [serviceCounts] = await db.query(
+        `SELECT project_id, COUNT(*) AS service_count FROM project_services WHERE project_id IN (?) GROUP BY project_id`,
+        [projectIds]
+      );
+      const svcCountMap = {};
+      serviceCounts.forEach(sc => { svcCountMap[sc.project_id] = sc.service_count; });
+      rows.forEach(r => { r.service_count = svcCountMap[r.id] || 0; });
     }
 
     // Summary counts
