@@ -23,11 +23,13 @@ async function generateNextAdNo(conn) {
 
 exports.list = async (req, res) => {
   try {
-    const { client_id, month, status } = req.query;
+    const { client_id, month, status, project_id, cycle_id } = req.query;
     let where = 'p.deleted = 0';
     const params = [];
 
     if (client_id) { where += ' AND p.client_id = ?'; params.push(client_id); }
+    if (project_id) { where += ' AND p.project_id = ?'; params.push(project_id); }
+    if (cycle_id) { where += ' AND p.cycle_id = ?'; params.push(cycle_id); }
     if (month) { where += ' AND p.plan_month = ?'; params.push(month); }
     if (status) { where += ' AND p.status = ?'; params.push(status); }
 
@@ -136,7 +138,7 @@ exports.create = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { client_id, project_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, posts, shoots, ads } = req.body;
+  const { client_id, project_id, cycle_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, posts, shoots, ads } = req.body;
 
   const conn = await db.getConnection();
   try {
@@ -149,22 +151,35 @@ exports.create = async (req, res) => {
       if (proj.length > 0) resolvedClientId = proj[0].client_id;
     }
 
-    // Check for duplicate project+month
-    const [existing] = await conn.query(
-      'SELECT id FROM content_calendar_plans WHERE project_id = ? AND plan_month = ? AND deleted = 0',
-      [project_id || null, plan_month]
-    );
-    if (existing.length > 0) {
-      await conn.rollback();
-      conn.release();
-      return res.status(400).json({ message: 'A plan already exists for this project and month' });
+    // Check for duplicate project+cycle
+    if (cycle_id) {
+      const [existing] = await conn.query(
+        'SELECT id FROM content_calendar_plans WHERE cycle_id = ? AND deleted = 0',
+        [cycle_id]
+      );
+      if (existing.length > 0) {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ message: 'A plan already exists for this cycle' });
+      }
+    } else {
+      // Legacy: check for duplicate project+month
+      const [existing] = await conn.query(
+        'SELECT id FROM content_calendar_plans WHERE project_id = ? AND plan_month = ? AND deleted = 0',
+        [project_id || null, plan_month]
+      );
+      if (existing.length > 0) {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ message: 'A plan already exists for this project and month' });
+      }
     }
 
     const [result] = await conn.query(
       `INSERT INTO content_calendar_plans 
-        (client_id, project_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
-      [resolvedClientId, project_id || null, plan_month, toNull(primary_goal), toNull(target_audience), toNull(budget_allocation), toNull(hero_offer), req.user.id]
+        (client_id, project_id, cycle_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
+      [resolvedClientId, project_id || null, cycle_id || null, plan_month, toNull(primary_goal), toNull(target_audience), toNull(budget_allocation), toNull(hero_offer), req.user.id]
     );
 
     const planId = result.insertId;
@@ -375,27 +390,33 @@ exports.remove = async (req, res) => {
 
 exports.calendarView = async (req, res) => {
   try {
-    const { month, client_id } = req.query; // month = '2026-05-01'
-    if (!month) return res.status(400).json({ message: 'Month parameter is required' });
+    const { month, client_id, cycle_id, project_id } = req.query;
 
-    // Calculate month range
-    const startDate = month; // first day
-    const endDateObj = new Date(month);
-    endDateObj.setMonth(endDateObj.getMonth() + 1);
-    endDateObj.setDate(0); // last day of month
-    const endDate = endDateObj.toISOString().split('T')[0];
+    // Build plan filter
+    let planWhere = 'p.deleted = 0';
+    const planParams = [];
 
-    let planWhere = 'p.deleted = 0 AND p.plan_month = ?';
-    const planParams = [month];
+    if (cycle_id) {
+      // Cycle-based view: fetch plans linked to this cycle
+      planWhere += ' AND p.cycle_id = ?';
+      planParams.push(cycle_id);
+    } else if (month) {
+      // Legacy month-based view
+      planWhere += ' AND p.plan_month = ?';
+      planParams.push(month);
+    } else {
+      return res.status(400).json({ message: 'Either month or cycle_id parameter is required' });
+    }
 
     if (client_id) { planWhere += ' AND p.client_id = ?'; planParams.push(client_id); }
+    if (project_id) { planWhere += ' AND p.project_id = ?'; planParams.push(project_id); }
     if (!req.user.is_admin) { planWhere += ' AND p.created_by = ?'; planParams.push(req.user.id); }
 
-    // Get plan IDs for this month
+    // Get plan IDs
     let plans = [];
     try {
       const [rows] = await db.query(
-        `SELECT p.id, p.client_id, p.project_id, l.business_name AS client_name, pr.title AS project_title
+        `SELECT p.id, p.client_id, p.project_id, p.cycle_id, l.business_name AS client_name, pr.title AS project_title
          FROM content_calendar_plans p
          LEFT JOIN leads l ON l.id = p.client_id
          LEFT JOIN projects pr ON pr.id = p.project_id
@@ -404,7 +425,6 @@ exports.calendarView = async (req, res) => {
       );
       plans = rows;
     } catch (tableErr) {
-      // Table might not exist yet
       if (tableErr.code === 'ER_NO_SUCH_TABLE') {
         return res.json({ posts: [], shoots: [], ads: [], plans: [] });
       }
