@@ -343,6 +343,12 @@ exports.cancelService = async (req, res) => {
 exports.createNewCycle = async (req, res) => {
   try {
     const { projectId, serviceId } = req.params;
+    const { start_date, end_date } = req.body;
+
+    // Validate required dates
+    if (!start_date || !end_date) {
+      return res.status(400).json({ message: 'Start date and end date are required' });
+    }
 
     const [existing] = await db.query(
       `SELECT ps.*, s.service_type
@@ -375,9 +381,6 @@ exports.createNewCycle = async (req, res) => {
       return res.status(400).json({ message: 'An active cycle already exists for this service' });
     }
 
-    // Determine start date for new cycle
-    const startDate = existing[0].start_date || new Date().toISOString().split('T')[0];
-
     // Get max cycle number
     const [maxRow] = await db.query(
       'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_service_id = ?',
@@ -385,19 +388,12 @@ exports.createNewCycle = async (req, res) => {
     );
     const nextCycleNum = (maxRow[0].max_num || 0) + 1;
 
-    // New cycle starts from today, ends 30 days later
-    const today = new Date();
-    const cycleEnd = new Date(today);
-    cycleEnd.setDate(cycleEnd.getDate() + 30);
-
     const title = `Cycle ${String(nextCycleNum).padStart(2, '0')}`;
-    const startStr = today.toISOString().split('T')[0];
-    const endStr = cycleEnd.toISOString().split('T')[0];
 
     const [result] = await db.query(
       `INSERT INTO service_cycles (project_id, project_service_id, cycle_number, title, start_date, end_date, status, created_by)
        VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
-      [projectId, serviceId, nextCycleNum, title, startStr, endStr, req.user.id]
+      [projectId, serviceId, nextCycleNum, title, start_date, end_date, req.user.id]
     );
 
     // Create 7 standard sections

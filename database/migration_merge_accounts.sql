@@ -39,11 +39,7 @@ SELECT 'Personal Branding', '🎨', 'recurring', 1, 1
 FROM dual WHERE NOT EXISTS (SELECT 1 FROM services WHERE name = 'Personal Branding' AND deleted = 0);
 
 INSERT INTO services (name, icon, service_type, is_active, created_by)
-SELECT 'Media', '📱', 'recurring', 1, 1
-FROM dual WHERE NOT EXISTS (SELECT 1 FROM services WHERE name = 'Media' AND deleted = 0);
-
-INSERT INTO services (name, icon, service_type, is_active, created_by)
-SELECT 'Development', '🛠️', 'one_time', 1, 1
+SELECT 'Development', '�️', 'one_time', 1, 1
 FROM dual WHERE NOT EXISTS (SELECT 1 FROM services WHERE name = 'Development' AND deleted = 0);
 
 -- SMM should already exist, but just in case:
@@ -64,13 +60,8 @@ SET @affixx_branding_id = (SELECT id FROM projects WHERE project_id_code = 'PRJ-
 -- Service IDs
 SET @svc_tech = (SELECT id FROM services WHERE name = 'Tech Development' AND deleted = 0 LIMIT 1);
 SET @svc_branding = (SELECT id FROM services WHERE name = 'Personal Branding' AND deleted = 0 LIMIT 1);
-SET @svc_media = (SELECT id FROM services WHERE name = 'Media' AND deleted = 0 LIMIT 1);
 
 -- Add services to the surviving Affixx account (ignore if already exists)
-INSERT IGNORE INTO project_services (project_id, service_id, start_date, status, created_by)
-SELECT @affixx_id, @svc_media, p.start_date, 'active', p.created_by
-FROM projects p WHERE p.id = @affixx_id;
-
 INSERT IGNORE INTO project_services (project_id, service_id, start_date, status, created_by)
 SELECT @affixx_id, @svc_tech, p.start_date, p.status, p.created_by
 FROM projects p WHERE p.id = @affixx_tech_id;
@@ -93,10 +84,8 @@ SET @ps_branding = (SELECT id FROM project_services WHERE project_id = @affixx_i
 UPDATE service_cycles SET project_id = @affixx_id, project_service_id = @ps_branding
 WHERE project_id = @affixx_branding_id;
 
--- Ensure existing cycles on Affixx Media itself are linked to the Media service
-SET @ps_media = (SELECT id FROM project_services WHERE project_id = @affixx_id AND service_id = @svc_media LIMIT 1);
-UPDATE service_cycles SET project_service_id = @ps_media
-WHERE project_id = @affixx_id AND project_service_id IS NULL;
+-- Delete any orphan cycles on Affixx Media that have no service linked
+DELETE FROM service_cycles WHERE project_id = @affixx_id AND project_service_id IS NULL;
 
 -- ──────────────────────────────────────────────────────────────────────────────
 -- STEP 5: MOVE TASKS & TICKETS FROM OLD AFFIXX PROJECTS

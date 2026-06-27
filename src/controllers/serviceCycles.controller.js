@@ -14,7 +14,7 @@ const CYCLE_SECTIONS = [
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: Generate ONE next cycle for a project service (or legacy project)
 // ─────────────────────────────────────────────────────────────────────────────
-async function generateNextCycleForProject(projectId, startDate, userId, projectServiceId = null) {
+async function generateNextCycleForProject(projectId, startDate, endDate, userId, projectServiceId = null) {
   // Get existing max cycle number (scoped to project_service_id if available)
   let maxQuery, maxParams;
   if (projectServiceId) {
@@ -27,10 +27,9 @@ async function generateNextCycleForProject(projectId, startDate, userId, project
   const [existing] = await db.query(maxQuery, maxParams);
   const nextCycleNum = (existing[0].max_num || 0) + 1;
 
-  // Cycle always starts from TODAY, ends 30 days later
-  const cycleStart = new Date();
-  const cycleEnd = new Date(cycleStart);
-  cycleEnd.setDate(cycleEnd.getDate() + 30);
+  // Use provided dates (manual creation)
+  const cycleStart = startDate ? new Date(startDate) : new Date();
+  const cycleEnd = endDate ? new Date(endDate) : new Date(cycleStart.getTime() + 30 * 24 * 60 * 60 * 1000);
 
   const title = `Cycle ${String(nextCycleNum).padStart(2, '0')}`;
 
@@ -100,9 +99,14 @@ exports.listCycles = async (req, res) => {
 exports.generateCycles = async (req, res) => {
   try {
     const projectId = req.params.projectId;
-    const { project_service_id } = req.body;
+    const { project_service_id, start_date, end_date } = req.body;
 
-    // Get project start_date
+    // Validate required dates
+    if (!start_date || !end_date) {
+      return res.status(400).json({ message: 'Start date and end date are required' });
+    }
+
+    // Get project
     const [project] = await db.query(
       'SELECT id, start_date FROM projects WHERE id = ? AND deleted = 0',
       [projectId]
@@ -112,42 +116,35 @@ exports.generateCycles = async (req, res) => {
       return res.status(404).json({ message: 'Project not found' });
     }
 
-    // Determine the start date — use project_service start_date if available
-    let startDate = project[0].start_date;
     let psId = project_service_id || null;
 
     if (psId) {
       const [ps] = await db.query(
-        'SELECT id, start_date FROM project_services WHERE id = ? AND project_id = ?',
+        'SELECT id FROM project_services WHERE id = ? AND project_id = ?',
         [psId, projectId]
       );
       if (ps.length === 0) {
         return res.status(404).json({ message: 'Project service not found' });
       }
-      if (ps[0].start_date) startDate = ps[0].start_date;
     }
 
-    if (!startDate) {
-      return res.status(400).json({ message: 'A start date is required to generate cycles. Set it on the project or service.' });
-    }
-
-    // Check if any cycle already exists for this scope
+    // Check if any active cycle already exists for this scope
     let existingQuery, existingParams;
     if (psId) {
-      existingQuery = 'SELECT id FROM service_cycles WHERE project_service_id = ? LIMIT 1';
+      existingQuery = `SELECT id FROM service_cycles WHERE project_service_id = ? AND status = 'active' LIMIT 1`;
       existingParams = [psId];
     } else {
-      existingQuery = 'SELECT id FROM service_cycles WHERE project_id = ? AND project_service_id IS NULL LIMIT 1';
+      existingQuery = `SELECT id FROM service_cycles WHERE project_id = ? AND project_service_id IS NULL AND status = 'active' LIMIT 1`;
       existingParams = [projectId];
     }
     const [existing] = await db.query(existingQuery, existingParams);
     if (existing.length > 0) {
-      return res.status(409).json({ message: 'Cycle already exists. Complete current cycle to generate next.' });
+      return res.status(409).json({ message: 'An active cycle already exists. Complete it before creating a new one.' });
     }
 
-    const cycle = await generateNextCycleForProject(projectId, startDate, req.user.id, psId);
+    const cycle = await generateNextCycleForProject(projectId, start_date, end_date, req.user.id, psId);
 
-    return res.status(201).json({ message: 'Cycle 01 generated', cycle });
+    return res.status(201).json({ message: `${cycle.title} created`, cycle });
   } catch (err) {
     console.error('Generate cycles error:', err);
     if (err.code === 'ER_DUP_ENTRY') {
@@ -341,38 +338,7 @@ exports.updateCycle = async (req, res) => {
       [...values, cycleId]
     );
 
-    // If marking as completed, auto-generate next cycle (only for recurring services)
-    if (status === 'completed') {
-      const [proj] = await db.query('SELECT start_date FROM projects WHERE id = ?', [projectId]);
-      let startDate = proj.length > 0 ? proj[0].start_date : null;
-
-      const psId = currentCycle.project_service_id || null;
-      let isRecurring = true;
-
-      if (psId) {
-        const [ps] = await db.query(
-          `SELECT ps.start_date, s.service_type
-           FROM project_services ps
-           JOIN services s ON s.id = ps.service_id
-           WHERE ps.id = ?`,
-          [psId]
-        );
-        if (ps.length > 0) {
-          if (ps[0].start_date) startDate = ps[0].start_date;
-          if (ps[0].service_type === 'one_time') isRecurring = false;
-        }
-      }
-
-      if (startDate && isRecurring) {
-        try {
-          await generateNextCycleForProject(projectId, startDate, req.user.id, psId);
-        } catch (genErr) {
-          if (genErr.code !== 'ER_DUP_ENTRY') {
-            console.error('Auto-generate next cycle error:', genErr);
-          }
-        }
-      }
-    }
+    // Cycles are manually created — no auto-generation on completion
 
     const [updated] = await db.query('SELECT * FROM service_cycles WHERE id = ?', [cycleId]);
     return res.json(updated[0]);
@@ -474,29 +440,33 @@ exports.removeCycleTask = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/projects/:projectId/cycles/generate-next — auto-generate next cycle
-// Supports body: { project_service_id }
+// POST /api/projects/:projectId/cycles/generate-next — manually create next cycle
+// Supports body: { project_service_id, start_date, end_date }
 // ─────────────────────────────────────────────────────────────────────────────
 exports.generateNextCycle = async (req, res) => {
   try {
     const projectId = req.params.projectId;
-    const { project_service_id } = req.body;
+    const { project_service_id, start_date, end_date } = req.body;
 
-    // Get project start_date
+    // Validate required dates
+    if (!start_date || !end_date) {
+      return res.status(400).json({ message: 'Start date and end date are required' });
+    }
+
+    // Get project
     const [project] = await db.query(
-      'SELECT id, start_date FROM projects WHERE id = ? AND deleted = 0',
+      'SELECT id FROM projects WHERE id = ? AND deleted = 0',
       [projectId]
     );
     if (project.length === 0) {
       return res.status(404).json({ message: 'Project not found' });
     }
 
-    let startDate = project[0].start_date;
     let psId = project_service_id || null;
 
     if (psId) {
       const [ps] = await db.query(
-        `SELECT ps.id, ps.start_date, s.service_type
+        `SELECT ps.id, s.service_type
          FROM project_services ps
          JOIN services s ON s.id = ps.service_id
          WHERE ps.id = ? AND ps.project_id = ?`,
@@ -505,16 +475,17 @@ exports.generateNextCycle = async (req, res) => {
       if (ps.length === 0) {
         return res.status(404).json({ message: 'Project service not found' });
       }
-      if (ps[0].start_date) startDate = ps[0].start_date;
 
-      // Block next cycle generation for one-time services
+      // Block next cycle generation for one-time services that already have a completed cycle
       if (ps[0].service_type === 'one_time') {
-        return res.status(400).json({ message: 'This is a one-time service. It does not support multiple cycles.' });
+        const [existingCycles] = await db.query(
+          `SELECT id FROM service_cycles WHERE project_service_id = ? LIMIT 1`,
+          [psId]
+        );
+        if (existingCycles.length > 0) {
+          return res.status(400).json({ message: 'This is a one-time service. It does not support multiple cycles.' });
+        }
       }
-    }
-
-    if (!startDate) {
-      return res.status(400).json({ message: 'A start date is required' });
     }
 
     // Check if there's an active or paused cycle (can't generate next if current isn't completed)
@@ -530,13 +501,13 @@ exports.generateNextCycle = async (req, res) => {
     const [activeCycles] = await db.query(activeQuery, activeParams);
     if (activeCycles.length > 0) {
       const msg = activeCycles[0].status === 'paused'
-        ? 'Current cycle is paused. Resume and complete it before generating the next one.'
-        : 'Complete the current active cycle before generating the next one.';
+        ? 'Current cycle is paused. Resume and complete it before creating the next one.'
+        : 'Complete the current active cycle before creating the next one.';
       return res.status(400).json({ message: msg });
     }
 
-    const cycle = await generateNextCycleForProject(projectId, startDate, req.user.id, psId);
-    return res.status(201).json({ message: 'Next cycle generated', cycle });
+    const cycle = await generateNextCycleForProject(projectId, start_date, end_date, req.user.id, psId);
+    return res.status(201).json({ message: `${cycle.title} created`, cycle });
   } catch (err) {
     console.error('Generate next cycle error:', err);
     return res.status(500).json({ message: 'Server error' });
