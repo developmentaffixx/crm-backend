@@ -41,12 +41,14 @@ exports.list = async (req, res) => {
       const [result] = await db.query(
         `SELECT p.*,
                 l.business_name AS client_name,
+                pr.title AS project_title,
                 CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
                 (SELECT COUNT(*) FROM content_calendar_posts WHERE plan_id = p.id) AS post_count,
                 (SELECT COUNT(*) FROM content_calendar_shoots WHERE plan_id = p.id) AS shoot_count,
                 (SELECT COUNT(*) FROM content_calendar_ads WHERE plan_id = p.id) AS ad_count
          FROM content_calendar_plans p
          LEFT JOIN leads l ON l.id = p.client_id
+         LEFT JOIN projects pr ON pr.id = p.project_id
          LEFT JOIN users u ON u.id = p.created_by
          WHERE ${where}
          ORDER BY p.plan_month DESC, p.created_at DESC`,
@@ -74,9 +76,11 @@ exports.getOne = async (req, res) => {
     const [plans] = await db.query(
       `SELECT p.*,
               l.business_name AS client_name,
+              pr.title AS project_title,
               CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
        FROM content_calendar_plans p
        LEFT JOIN leads l ON l.id = p.client_id
+       LEFT JOIN projects pr ON pr.id = p.project_id
        LEFT JOIN users u ON u.id = p.created_by
        WHERE p.id = ? AND p.deleted = 0`,
       [req.params.id]
@@ -132,28 +136,35 @@ exports.create = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { client_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, posts, shoots, ads } = req.body;
+  const { client_id, project_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, posts, shoots, ads } = req.body;
 
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    // Check for duplicate client+month
+    // Resolve client_id from project if project_id is provided
+    let resolvedClientId = client_id || null;
+    if (project_id && !resolvedClientId) {
+      const [proj] = await conn.query('SELECT client_id FROM projects WHERE id = ?', [project_id]);
+      if (proj.length > 0) resolvedClientId = proj[0].client_id;
+    }
+
+    // Check for duplicate project+month
     const [existing] = await conn.query(
-      'SELECT id FROM content_calendar_plans WHERE client_id = ? AND plan_month = ? AND deleted = 0',
-      [client_id, plan_month]
+      'SELECT id FROM content_calendar_plans WHERE project_id = ? AND plan_month = ? AND deleted = 0',
+      [project_id || null, plan_month]
     );
     if (existing.length > 0) {
       await conn.rollback();
       conn.release();
-      return res.status(400).json({ message: 'A plan already exists for this client and month' });
+      return res.status(400).json({ message: 'A plan already exists for this project and month' });
     }
 
     const [result] = await conn.query(
       `INSERT INTO content_calendar_plans 
-        (client_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, 'draft', ?)`,
-      [client_id, plan_month, toNull(primary_goal), toNull(target_audience), toNull(budget_allocation), toNull(hero_offer), req.user.id]
+        (client_id, project_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
+      [resolvedClientId, project_id || null, plan_month, toNull(primary_goal), toNull(target_audience), toNull(budget_allocation), toNull(hero_offer), req.user.id]
     );
 
     const planId = result.insertId;
@@ -241,11 +252,12 @@ exports.update = async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    const { client_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, posts, shoots, ads } = req.body;
+    const { client_id, project_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, posts, shoots, ads } = req.body;
 
     // Update plan fields
     const planUpdates = {};
     if (client_id !== undefined) planUpdates.client_id = client_id;
+    if (project_id !== undefined) planUpdates.project_id = project_id;
     if (plan_month !== undefined) planUpdates.plan_month = plan_month;
     if (primary_goal !== undefined) planUpdates.primary_goal = toNull(primary_goal);
     if (target_audience !== undefined) planUpdates.target_audience = toNull(target_audience);
@@ -383,9 +395,10 @@ exports.calendarView = async (req, res) => {
     let plans = [];
     try {
       const [rows] = await db.query(
-        `SELECT p.id, p.client_id, l.business_name AS client_name
+        `SELECT p.id, p.client_id, p.project_id, l.business_name AS client_name, pr.title AS project_title
          FROM content_calendar_plans p
          LEFT JOIN leads l ON l.id = p.client_id
+         LEFT JOIN projects pr ON pr.id = p.project_id
          WHERE ${planWhere}`,
         planParams
       );

@@ -31,7 +31,7 @@ router.get('/:id', param('id').isInt(), controller.getOne);
 router.post(
   '/',
   [
-    body('client_id').notEmpty().withMessage('Client is required'),
+    body('project_id').notEmpty().withMessage('Project is required'),
     body('plan_month').notEmpty().withMessage('Month is required'),
   ],
   controller.create
