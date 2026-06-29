@@ -122,11 +122,11 @@ exports.getOne = async (req, res) => {
 
     // Fetch members
     const [members] = await db.query(
-      `SELECT pm.id AS membership_id, u.id, u.first_name, u.last_name, u.email
+      `SELECT pm.id AS membership_id, u.id, u.first_name, u.last_name, u.email, u.is_active
        FROM project_members pm
        JOIN users u ON u.id = pm.user_id
        WHERE pm.project_id = ?
-       ORDER BY u.first_name`,
+       ORDER BY u.is_active DESC, u.first_name`,
       [project.id]
     );
     project.members = members;
