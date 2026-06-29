@@ -46,9 +46,6 @@ exports.saveQualification = async (req, res) => {
       google_profile_status, google_reviews, google_average_rating, google_profile_remarks,
       decision_maker_identified, decision_maker_name, decision_maker_designation, authority_level,
       budget_potential, investment_readiness, budget_remarks,
-      lead_response, interest_remarks,
-      lead_temperature, temperature_reason,
-      next_action_type, follow_up_date, assigned_to, next_action_remarks,
       recommend_pursuing, assessment_reason,
     } = req.body;
 
@@ -81,14 +78,6 @@ exports.saveQualification = async (req, res) => {
       budget_potential: budget_potential || null,
       investment_readiness: investment_readiness || null,
       budget_remarks: budget_remarks || null,
-      lead_response: lead_response || null,
-      interest_remarks: interest_remarks || null,
-      lead_temperature: lead_temperature || null,
-      temperature_reason: temperature_reason || null,
-      next_action_type: next_action_type || null,
-      follow_up_date: follow_up_date || null,
-      assigned_to: assigned_to || null,
-      next_action_remarks: next_action_remarks || null,
       recommend_pursuing: recommend_pursuing || null,
       assessment_reason: assessment_reason || null,
       filled_by: req.user.id,
@@ -114,14 +103,6 @@ exports.saveQualification = async (req, res) => {
       await db.query(
         `INSERT INTO lead_qualifications (${columns}) VALUES (${placeholders})`,
         values
-      );
-    }
-
-    // Sync temperature back to leads table if provided
-    if (lead_temperature) {
-      await db.query(
-        'UPDATE leads SET temperature = ? WHERE id = ?',
-        [lead_temperature, leadId]
       );
     }
 

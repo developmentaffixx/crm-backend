@@ -32,20 +32,6 @@ CREATE TABLE IF NOT EXISTS lead_qualifications (
   investment_readiness ENUM('ready_now', '1_3_months', '3_6_months', 'just_exploring') DEFAULT NULL,
   budget_remarks TEXT DEFAULT NULL,
 
-  -- Interest Level
-  lead_response ENUM('not_interested', 'slightly_interested', 'interested', 'very_interested', 'requested_meeting') DEFAULT NULL,
-  interest_remarks TEXT DEFAULT NULL,
-
-  -- Lead Temperature (synced back to leads table)
-  lead_temperature ENUM('cold', 'warm', 'hot') DEFAULT NULL,
-  temperature_reason TEXT DEFAULT NULL,
-
-  -- Next Action
-  next_action_type SET('follow_up_call','whatsapp_follow_up','send_company_profile','send_portfolio','book_meeting','proposal_required','no_action') DEFAULT NULL,
-  follow_up_date DATE DEFAULT NULL,
-  assigned_to INT UNSIGNED DEFAULT NULL,
-  next_action_remarks TEXT DEFAULT NULL,
-
   -- BDE Final Assessment
   recommend_pursuing ENUM('yes', 'no') DEFAULT NULL,
   assessment_reason TEXT DEFAULT NULL,
