@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS lead_qualifications (
   lead_temperature ENUM('cold', 'warm', 'hot') DEFAULT NULL,
   temperature_reason TEXT DEFAULT NULL,
 
+  -- Next Action
+  next_action_type SET('follow_up_call','whatsapp_follow_up','send_company_profile','send_portfolio','book_meeting','proposal_required','no_action') DEFAULT NULL,
+  follow_up_date DATE DEFAULT NULL,
+  assigned_to INT UNSIGNED DEFAULT NULL,
+  next_action_remarks TEXT DEFAULT NULL,
+
   -- BDE Final Assessment
   recommend_pursuing ENUM('yes', 'no') DEFAULT NULL,
   assessment_reason TEXT DEFAULT NULL,

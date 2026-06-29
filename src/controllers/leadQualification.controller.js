@@ -48,6 +48,7 @@ exports.saveQualification = async (req, res) => {
       budget_potential, investment_readiness, budget_remarks,
       lead_response, interest_remarks,
       lead_temperature, temperature_reason,
+      next_action_type, follow_up_date, assigned_to, next_action_remarks,
       recommend_pursuing, assessment_reason,
     } = req.body;
 
@@ -84,6 +85,10 @@ exports.saveQualification = async (req, res) => {
       interest_remarks: interest_remarks || null,
       lead_temperature: lead_temperature || null,
       temperature_reason: temperature_reason || null,
+      next_action_type: next_action_type || null,
+      follow_up_date: follow_up_date || null,
+      assigned_to: assigned_to || null,
+      next_action_remarks: next_action_remarks || null,
       recommend_pursuing: recommend_pursuing || null,
       assessment_reason: assessment_reason || null,
       filled_by: req.user.id,
