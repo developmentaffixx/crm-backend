@@ -3,6 +3,7 @@ const router  = express.Router();
 const { body, param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const projectsController = require('../controllers/projects.controller');
+const projectAllocationController = require('../controllers/projectAllocation.controller');
 
 // All project routes require authentication
 router.use(authenticate);
@@ -48,5 +49,9 @@ router.post('/:id/drs/:section', param('id').isInt(), projectsController.saveDrs
 // ── IBRS ──
 router.get('/:id/ibrs', param('id').isInt(), projectsController.getIbrs);
 router.post('/:id/ibrs/:section', param('id').isInt(), projectsController.saveIbrs);
+
+// ── Allocation Sheet ──
+router.get('/:id/allocation', param('id').isInt(), projectAllocationController.get);
+router.post('/:id/allocation', param('id').isInt(), projectAllocationController.save);
 
 module.exports = router;
