@@ -6,6 +6,7 @@ const leadsController = require('../controllers/leads.controller');
 const leadSummaryController = require('../controllers/leadSummary.controller');
 const leadSwotController = require('../controllers/leadSwot.controller');
 const leadSwotNotesController = require('../controllers/leadSwotNotes.controller');
+const leadQualificationController = require('../controllers/leadQualification.controller');
 const googleSheetSyncController = require('../controllers/googleSheetSync.controller');
 
 // All lead routes require authentication
@@ -116,5 +117,13 @@ router.delete(
   [param('id').isInt(), param('pointId').isInt()],
   leadSwotController.deleteSwotPoint
 );
+
+// ── Lead Qualification Checklist ───────────────────────────────────────────────
+
+// GET  /api/leads/:id/qualification — get qualification checklist
+router.get('/:id/qualification', param('id').isInt(), leadQualificationController.getQualification);
+
+// PUT  /api/leads/:id/qualification — save/update qualification checklist
+router.put('/:id/qualification', [param('id').isInt()], leadQualificationController.saveQualification);
 
 module.exports = router;
