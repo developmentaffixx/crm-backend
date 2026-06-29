@@ -2,6 +2,50 @@ const { validationResult } = require('express-validator');
 const db = require('../config/db');
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HELPER: Auto-recalculate project status based on service statuses
+// Logic:
+//   - If ANY service is active → project = 'in_progress'
+//   - If ALL services are completed (and at least one exists) → project = 'completed'
+//   - If ALL services are cancelled → project = 'cancelled'
+//   - If ALL services are paused (none active) → project = 'in_progress' (still ongoing)
+//   - If no services exist → leave status unchanged
+// ─────────────────────────────────────────────────────────────────────────────
+async function recalculateProjectStatus(projectId) {
+  const [services] = await db.query(
+    'SELECT status FROM project_services WHERE project_id = ?',
+    [projectId]
+  );
+
+  if (services.length === 0) return; // No services, don't change project status
+
+  const statuses = services.map(s => s.status);
+  const hasActive = statuses.includes('active');
+  const allCompleted = statuses.every(s => s === 'completed');
+  const allCancelled = statuses.every(s => s === 'cancelled');
+  const allCompletedOrCancelled = statuses.every(s => s === 'completed' || s === 'cancelled');
+
+  let newStatus;
+  if (hasActive) {
+    newStatus = 'in_progress';
+  } else if (allCompleted) {
+    newStatus = 'completed';
+  } else if (allCancelled) {
+    newStatus = 'cancelled';
+  } else if (allCompletedOrCancelled) {
+    // Mix of completed + cancelled (but no active/paused) → completed
+    newStatus = 'completed';
+  } else {
+    // Some paused, none active → still in progress
+    newStatus = 'in_progress';
+  }
+
+  await db.query(
+    'UPDATE projects SET status = ? WHERE id = ?',
+    [newStatus, projectId]
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/projects/:projectId/services — list all services for a project
 // ─────────────────────────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
@@ -74,6 +118,9 @@ exports.add = async (req, res) => {
        WHERE ps.id = ?`,
       [result.insertId]
     );
+
+    // Auto-recalculate project status
+    await recalculateProjectStatus(projectId);
 
     return res.status(201).json(newRow[0]);
   } catch (err) {
@@ -149,6 +196,9 @@ exports.remove = async (req, res) => {
 
     // This will cascade-delete related cycles via FK
     await db.query('DELETE FROM project_services WHERE id = ?', [serviceId]);
+
+    // Auto-recalculate project status
+    await recalculateProjectStatus(projectId);
 
     return res.json({ message: 'Service removed from project' });
   } catch (err) {
@@ -234,6 +284,9 @@ exports.pauseService = async (req, res) => {
       [projectId, `Service paused: ${reason.trim()}`, req.user.id]
     );
 
+    // Auto-recalculate project status
+    await recalculateProjectStatus(projectId);
+
     return res.json({ message: 'Service paused successfully' });
   } catch (err) {
     console.error('Pause service error:', err);
@@ -282,6 +335,9 @@ exports.completeService = async (req, res) => {
       [projectId, `Service completed: ${reason.trim()}`, req.user.id]
     );
 
+    // Auto-recalculate project status
+    await recalculateProjectStatus(projectId);
+
     return res.json({ message: 'Service completed successfully' });
   } catch (err) {
     console.error('Complete service error:', err);
@@ -329,6 +385,9 @@ exports.cancelService = async (req, res) => {
       `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'issue', ?, ?)`,
       [projectId, `Service cancelled: ${reason.trim()}`, req.user.id]
     );
+
+    // Auto-recalculate project status
+    await recalculateProjectStatus(projectId);
 
     return res.json({ message: 'Service cancelled successfully' });
   } catch (err) {
@@ -421,6 +480,9 @@ exports.createNewCycle = async (req, res) => {
       `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
       [projectId, `New cycle started: ${title}`, req.user.id]
     );
+
+    // Auto-recalculate project status (service reactivated → project becomes in_progress)
+    await recalculateProjectStatus(projectId);
 
     return res.status(201).json({ message: `${title} created, service reactivated`, cycleId });
   } catch (err) {

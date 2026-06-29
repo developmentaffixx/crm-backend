@@ -338,6 +338,43 @@ exports.updateCycle = async (req, res) => {
       [...values, cycleId]
     );
 
+    // If cycle status changed to 'completed', check if all cycles for this service are completed
+    // If so, mark the service as completed and recalculate project status
+    if (status === 'completed' && currentCycle.project_service_id) {
+      const [remainingActive] = await db.query(
+        `SELECT id FROM service_cycles WHERE project_service_id = ? AND status IN ('active', 'paused') AND id != ?`,
+        [currentCycle.project_service_id, cycleId]
+      );
+      if (remainingActive.length === 0) {
+        // No more active/paused cycles → mark service as completed
+        await db.query(
+          'UPDATE project_services SET status = ? WHERE id = ?',
+          ['completed', currentCycle.project_service_id]
+        );
+      }
+      // Recalculate project status
+      const [allServices] = await db.query(
+        'SELECT status FROM project_services WHERE project_id = ?',
+        [projectId]
+      );
+      if (allServices.length > 0) {
+        const svcStatuses = allServices.map(s => s.status);
+        const hasActive = svcStatuses.includes('active');
+        const allCompleted = svcStatuses.every(s => s === 'completed');
+        const allCancelled = svcStatuses.every(s => s === 'cancelled');
+        const allDone = svcStatuses.every(s => s === 'completed' || s === 'cancelled');
+
+        let newProjectStatus;
+        if (hasActive) newProjectStatus = 'in_progress';
+        else if (allCompleted) newProjectStatus = 'completed';
+        else if (allCancelled) newProjectStatus = 'cancelled';
+        else if (allDone) newProjectStatus = 'completed';
+        else newProjectStatus = 'in_progress';
+
+        await db.query('UPDATE projects SET status = ? WHERE id = ?', [newProjectStatus, projectId]);
+      }
+    }
+
     // Cycles are manually created — no auto-generation on completion
 
     const [updated] = await db.query('SELECT * FROM service_cycles WHERE id = ?', [cycleId]);
