@@ -642,10 +642,8 @@ exports.getFiles = async (req, res) => {
   const clientId = req.clientUser.client_id;
   try {
     const [files] = await db.query(
-      `SELECT cf.id, cf.original_name, cf.file_path, cf.file_size, cf.mime_type, cf.folder_id, cf.created_at,
-              cfo.name as folder_name
+      `SELECT cf.id, cf.file_name, cf.file_path, cf.file_size, cf.file_type, cf.folder_id, cf.category, cf.created_at
        FROM client_files cf
-       LEFT JOIN client_folders cfo ON cfo.id = cf.folder_id
        WHERE cf.client_id = ?
        ORDER BY cf.created_at DESC`,
       [clientId]
