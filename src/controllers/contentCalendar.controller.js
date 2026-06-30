@@ -130,7 +130,10 @@ exports.getOne = async (req, res) => {
     );
 
     const [ads] = await db.query(
-      `SELECT * FROM content_calendar_ads WHERE plan_id = ? ORDER BY start_date ASC`,
+      `SELECT ca.*, ac.campaign_name AS linked_campaign_name, ac.status AS linked_campaign_status
+       FROM content_calendar_ads ca
+       LEFT JOIN ad_campaigns ac ON ac.id = ca.linked_campaign_id
+       WHERE ca.plan_id = ? ORDER BY ca.start_date ASC`,
       [plan.id]
     );
 
@@ -221,17 +224,49 @@ exports.create = async (req, res) => {
       }
     }
 
-    // Insert ads — generate ad_no sequentially from global max
+    // Insert ads — link to existing ad_campaigns via linked_campaign_id
     if (ads && ads.length > 0) {
       for (const ad of ads) {
-        const adNo = await generateNextAdNo(conn);
+        let adNo = await generateNextAdNo(conn);
+        let creativeName = ad.creative_name || null;
+        let campaignObjective = ad.campaign_objective || 'lead_generation';
+        let platform = ad.platform || null;
+        let adStatus = ad.ad_status || 'planned';
+        let targetAudience = ad.target_audience || null;
+        let budget = ad.budget || null;
+        let startDate = ad.start_date;
+        let endDate = ad.end_date || null;
+        let expectedOutcomes = ad.expected_outcomes || null;
+        let linkedCampaignId = toInt(ad.linked_campaign_id) || null;
+
+        // If linked to an existing campaign, pull data from it
+        if (linkedCampaignId) {
+          const [campRows] = await conn.query('SELECT * FROM ad_campaigns WHERE id = ? AND deleted = 0', [linkedCampaignId]);
+          if (campRows.length > 0) {
+            const camp = campRows[0];
+            creativeName = creativeName || camp.campaign_name;
+            campaignObjective = camp.objective || campaignObjective;
+            platform = platform || camp.platform;
+            budget = budget || camp.budget;
+            startDate = startDate || (camp.start_date ? camp.start_date.toISOString().split('T')[0] : null);
+            endDate = endDate || (camp.end_date ? camp.end_date.toISOString().split('T')[0] : null);
+          }
+        }
+
+        if (!startDate) startDate = new Date().toISOString().split('T')[0];
+
         await conn.query(
           `INSERT INTO content_calendar_ads 
-            (plan_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [planId, adNo, toNull(ad.creative_name), ad.campaign_objective, toNull(ad.platform),
-           ad.ad_status || 'planned', toNull(ad.target_audience), toNull(ad.budget), ad.start_date, toNull(ad.end_date), toNull(ad.expected_outcomes)]
+            (plan_id, linked_campaign_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [planId, linkedCampaignId, adNo, creativeName, campaignObjective, platform,
+           adStatus, targetAudience, budget, startDate, endDate, expectedOutcomes]
         );
+
+        // Update the ad_campaign with the linked calendar ad reference
+        if (linkedCampaignId) {
+          await conn.query('UPDATE ad_campaigns SET linked_calendar_ad_id = LAST_INSERT_ID() WHERE id = ?', [linkedCampaignId]);
+        }
       }
     }
 
@@ -328,7 +363,7 @@ exports.update = async (req, res) => {
       }
     }
 
-    // Replace ads — preserve existing ad_no if already set, generate new ones for new ads
+    // Replace ads — link to existing campaigns
     if (ads !== undefined) {
       // Fetch existing ads to preserve their ad_no values
       const [existingAds] = await conn.query(
@@ -341,13 +376,45 @@ exports.update = async (req, res) => {
           const ad = ads[i];
           // Reuse existing ad_no if available, otherwise generate a new global one
           let adNo = (existingAds[i] && existingAds[i].ad_no) ? existingAds[i].ad_no : await generateNextAdNo(conn);
+          let linkedCampaignId = toInt(ad.linked_campaign_id) || null;
+          let creativeName = ad.creative_name || null;
+          let campaignObjective = ad.campaign_objective || 'lead_generation';
+          let platform = ad.platform || null;
+          let adStatus = ad.ad_status || 'planned';
+          let targetAudience = ad.target_audience || null;
+          let budget = ad.budget || null;
+          let startDate = ad.start_date;
+          let endDate = ad.end_date || null;
+          let expectedOutcomes = ad.expected_outcomes || null;
+
+          // If linked to an existing campaign, pull data from it
+          if (linkedCampaignId) {
+            const [campRows] = await conn.query('SELECT * FROM ad_campaigns WHERE id = ? AND deleted = 0', [linkedCampaignId]);
+            if (campRows.length > 0) {
+              const camp = campRows[0];
+              creativeName = creativeName || camp.campaign_name;
+              campaignObjective = camp.objective || campaignObjective;
+              platform = platform || camp.platform;
+              budget = budget || camp.budget;
+              startDate = startDate || (camp.start_date ? camp.start_date.toISOString().split('T')[0] : null);
+              endDate = endDate || (camp.end_date ? camp.end_date.toISOString().split('T')[0] : null);
+            }
+          }
+
+          if (!startDate) startDate = new Date().toISOString().split('T')[0];
+
           await conn.query(
             `INSERT INTO content_calendar_ads 
-              (plan_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.params.id, adNo, toNull(ad.creative_name), ad.campaign_objective, toNull(ad.platform),
-             ad.ad_status || 'planned', toNull(ad.target_audience), toNull(ad.budget), ad.start_date, toNull(ad.end_date), toNull(ad.expected_outcomes)]
+              (plan_id, linked_campaign_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [req.params.id, linkedCampaignId, adNo, creativeName, campaignObjective, platform,
+             adStatus, targetAudience, budget, startDate, endDate, expectedOutcomes]
           );
+
+          // Update the ad_campaign with the linked calendar ad reference
+          if (linkedCampaignId) {
+            await conn.query('UPDATE ad_campaigns SET linked_calendar_ad_id = LAST_INSERT_ID() WHERE id = ?', [linkedCampaignId]);
+          }
         }
       }
     }
