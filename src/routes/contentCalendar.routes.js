@@ -21,6 +21,9 @@ router.get('/approved-shoots', controller.approvedShoots);
 // PUT  /api/content-calendar/reschedule   — drag & drop reschedule
 router.put('/reschedule', controller.reschedule);
 
+// PUT  /api/content-calendar/post-status  — update post status with workflow enforcement
+router.put('/post-status', controller.updatePostStatus);
+
 // POST /api/content-calendar/quick-ad     — quick add ad to a day
 router.post('/quick-ad', controller.quickAd);
 

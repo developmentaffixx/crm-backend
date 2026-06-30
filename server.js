@@ -56,6 +56,7 @@ const plansRoutes              = require('./src/routes/plans.routes');
 const dailyJournalRoutes       = require('./src/routes/dailyJournal.routes');
 const adsCampaignsRoutes       = require('./src/routes/adsCampaigns.routes');
 const monthlyReportRoutes      = require('./src/routes/monthlyReport.routes');
+const socialOverviewRoutes     = require('./src/routes/socialOverview.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -142,6 +143,7 @@ app.use('/api/plans',                 plansRoutes);
 app.use('/api/daily-journal',         dailyJournalRoutes);
 app.use('/api/ads-campaigns',         adsCampaignsRoutes);
 app.use('/api/monthly-reports',       monthlyReportRoutes);
+app.use('/api/social-overview',       socialOverviewRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
 const { authenticate: authMiddleware } = require('./src/middleware/auth');

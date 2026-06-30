@@ -23,7 +23,7 @@ async function generateNextAdNo(conn) {
 
 exports.list = async (req, res) => {
   try {
-    const { client_id, month, status, project_id, cycle_id } = req.query;
+    const { client_id, month, status, project_id, cycle_id, page = 1, limit = 50 } = req.query;
     let where = 'p.deleted = 0';
     const params = [];
 
@@ -37,6 +37,8 @@ exports.list = async (req, res) => {
       where += ' AND p.created_by = ?';
       params.push(req.user.id);
     }
+
+    const offset = (parseInt(page) - 1) * parseInt(limit);
 
     let rows = [];
     try {
@@ -53,18 +55,25 @@ exports.list = async (req, res) => {
          LEFT JOIN projects pr ON pr.id = p.project_id
          LEFT JOIN users u ON u.id = p.created_by
          WHERE ${where}
-         ORDER BY p.plan_month DESC, p.created_at DESC`,
-        params
+         ORDER BY p.plan_month DESC, p.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [...params, parseInt(limit), offset]
       );
       rows = result;
     } catch (tableErr) {
       if (tableErr.code === 'ER_NO_SUCH_TABLE') {
-        return res.json({ plans: [] });
+        return res.json({ plans: [], total: 0 });
       }
       throw tableErr;
     }
 
-    return res.json({ plans: rows });
+    // Get total count for pagination
+    const [countResult] = await db.query(
+      `SELECT COUNT(*) AS total FROM content_calendar_plans p WHERE ${where}`,
+      params
+    );
+
+    return res.json({ plans: rows, total: countResult[0].total, page: parseInt(page), limit: parseInt(limit) });
   } catch (err) {
     console.error('Content calendar list error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -548,7 +557,37 @@ exports.reschedule = async (req, res) => {
       return res.status(400).json({ message: 'item_type and item_id are required' });
     }
 
+    if (!new_date) {
+      return res.status(400).json({ message: 'new_date is required' });
+    }
+
+    // Validate new_date is not in the past
+    const today = new Date().toISOString().split('T')[0];
+    if (new_date < today) {
+      return res.status(400).json({ message: 'Cannot reschedule to a past date' });
+    }
+
     if (item_type === 'post') {
+      // Validate that the new date falls within the plan's month
+      const [postRows] = await db.query(
+        `SELECT cp.plan_id, p.plan_month
+         FROM content_calendar_posts cp
+         JOIN content_calendar_plans p ON p.id = cp.plan_id
+         WHERE cp.id = ?`,
+        [item_id]
+      );
+      if (postRows.length === 0) return res.status(404).json({ message: 'Post not found' });
+
+      const planMonth = postRows[0].plan_month;
+      if (planMonth) {
+        const planDate = new Date(planMonth);
+        const planMonthStr = `${planDate.getFullYear()}-${String(planDate.getMonth() + 1).padStart(2, '0')}`;
+        const newDateMonth = new_date.substring(0, 7);
+        if (planMonthStr !== newDateMonth) {
+          return res.status(400).json({ message: `Cannot reschedule outside the plan month (${planMonthStr}). Update the plan to move to a different month.` });
+        }
+      }
+
       await db.query(
         'UPDATE content_calendar_posts SET posting_date = ? WHERE id = ?',
         [new_date, item_id]
@@ -571,6 +610,68 @@ exports.reschedule = async (req, res) => {
     return res.json({ message: 'Rescheduled successfully' });
   } catch (err) {
     console.error('Content calendar reschedule error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── UPDATE POST STATUS (with workflow enforcement) ───────────────────────────
+// Validates that a post can only be marked 'done' if its linked brief is approved
+
+exports.updatePostStatus = async (req, res) => {
+  try {
+    const { post_id, status } = req.body;
+
+    if (!post_id || !status) {
+      return res.status(400).json({ message: 'post_id and status are required' });
+    }
+
+    const validStatuses = ['planned', 'in_progress', 'done', 'cancelled'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+    }
+
+    // Fetch the post
+    const [posts] = await db.query(
+      `SELECT cp.*, p.created_by AS plan_creator
+       FROM content_calendar_posts cp
+       JOIN content_calendar_plans p ON p.id = cp.plan_id
+       WHERE cp.id = ?`,
+      [post_id]
+    );
+
+    if (posts.length === 0) return res.status(404).json({ message: 'Post not found' });
+    const post = posts[0];
+
+    // Access check
+    if (!req.user.is_admin && post.plan_creator !== req.user.id) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Workflow enforcement: cannot mark as 'done' if linked brief is not approved
+    if (status === 'done' && post.linked_brief_id) {
+      const [brief] = await db.query(
+        'SELECT id, status FROM content_write_requests WHERE id = ? AND deleted = 0',
+        [post.linked_brief_id]
+      );
+      if (brief.length > 0 && brief[0].status !== 'approved' && brief[0].status !== 'completed') {
+        return res.status(400).json({
+          message: 'Cannot mark post as done — the linked content brief has not been approved yet.',
+          brief_status: brief[0].status,
+        });
+      }
+    }
+
+    await db.query('UPDATE content_calendar_posts SET status = ? WHERE id = ?', [status, post_id]);
+
+    // Update brief_approved flag
+    if (status === 'done' && post.linked_brief_id) {
+      await db.query('UPDATE content_calendar_posts SET brief_approved = 1 WHERE id = ?', [post_id]);
+    }
+
+    res.emitSocket('content-calendar:updated', { post_id, status });
+    return res.json({ message: 'Post status updated', post_id, status });
+  } catch (err) {
+    console.error('Content calendar post status update error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

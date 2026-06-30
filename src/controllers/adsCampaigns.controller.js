@@ -84,14 +84,22 @@ exports.getOne = async (req, res) => {
 // ─── CREATE ──────────────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
   try {
-    const { project_id, campaign_name, platform, objective, budget, start_date, end_date, assignment_type, assigned_to, notes } = req.body;
+    const { project_id, campaign_name, platform, objective, budget, start_date, end_date, assignment_type, assigned_to, notes, linked_calendar_ad_id } = req.body;
     if (!project_id || !campaign_name) return res.status(400).json({ message: 'Project and campaign name are required' });
 
     const [result] = await db.query(
-      `INSERT INTO ad_campaigns (project_id, campaign_name, platform, objective, budget, start_date, end_date, assignment_type, assigned_to, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [project_id, campaign_name, platform || null, objective || null, budget || null, start_date || null, end_date || null, assignment_type || 'self', assigned_to || null, notes || null, req.user.id]
+      `INSERT INTO ad_campaigns (project_id, campaign_name, platform, objective, budget, start_date, end_date, assignment_type, assigned_to, notes, linked_calendar_ad_id, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [project_id, campaign_name, platform || null, objective || null, budget || null, start_date || null, end_date || null, assignment_type || 'self', assigned_to || null, notes || null, linked_calendar_ad_id || null, req.user.id]
     );
+
+    // If linked to a calendar ad, update the calendar ad with this campaign's ID
+    if (linked_calendar_ad_id) {
+      await db.query(
+        'UPDATE content_calendar_ads SET linked_campaign_id = ? WHERE id = ?',
+        [result.insertId, linked_calendar_ad_id]
+      );
+    }
 
     const [campaign] = await db.query('SELECT * FROM ad_campaigns WHERE id = ?', [result.insertId]);
     res.emitSocket('ads:created', campaign[0]);

@@ -7,6 +7,7 @@ const controller = require('../controllers/monthlyReport.controller');
 router.use(authenticate);
 
 router.get('/', controller.list);
+router.get('/auto-populate', controller.autoPopulate);
 router.get('/:id', param('id').isInt(), controller.getOne);
 router.post('/', controller.create);
 router.put('/:id', param('id').isInt(), controller.update);
