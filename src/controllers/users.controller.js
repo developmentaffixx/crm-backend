@@ -170,13 +170,13 @@ exports.myPermissions = async (req, res) => {
 
       // Admins get full social submenu access
       const socialAccess = {
-        social_overview: 1,
-        content_calendar: 1,
-        content_writing: 1,
-        shoot_planning: 1,
-        ads_planning: 1,
-        daily_journal: 1,
-        report_centre: 1,
+        social_overview: 2,
+        content_calendar: 2,
+        content_writing: 2,
+        shoot_planning: 2,
+        ads_planning: 2,
+        daily_journal: 2,
+        report_centre: 2,
       };
 
       return res.json({ is_admin: true, role_id: roleId || null, role_name: 'Admin', responsibilities, permissions: perms, socialAccess });
