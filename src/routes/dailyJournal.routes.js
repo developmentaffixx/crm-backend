@@ -2,9 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
+const { requireSocialAccess } = require('../middleware/socialAccess');
 const dailyJournalController = require('../controllers/dailyJournal.controller');
 
 router.use(authenticate);
+router.use(requireSocialAccess('daily_journal'));
 
 // GET  /api/daily-journal         — list entries with filters
 router.get('/', dailyJournalController.list);

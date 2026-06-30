@@ -251,6 +251,78 @@ exports.updateRolePermissions = async (req, res) => {
   }
 };
 
+// ─── SOCIAL MEDIA OPS SUBMENU PERMISSIONS ─────────────────────────────────────
+
+/**
+ * GET /api/settings/roles/:id/social-permissions
+ * Returns social submenu access for a role.
+ */
+exports.getRoleSocialPermissions = async (req, res) => {
+  const roleId = parseInt(req.params.id, 10);
+  try {
+    const [rows] = await db.query(
+      'SELECT social_overview, content_calendar, content_writing, shoot_planning, ads_planning, daily_journal, report_centre FROM role_social_permissions WHERE role_id = ?',
+      [roleId]
+    );
+    if (rows.length === 0) {
+      return res.json({
+        social_overview: 0,
+        content_calendar: 0,
+        content_writing: 0,
+        shoot_planning: 0,
+        ads_planning: 0,
+        daily_journal: 0,
+        report_centre: 0,
+      });
+    }
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error('getRoleSocialPermissions error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/settings/roles/:id/social-permissions
+ * Upsert social submenu access for a role.
+ * Body: { social_overview, content_calendar, content_writing, shoot_planning, ads_planning, daily_journal, report_centre }
+ */
+exports.updateRoleSocialPermissions = async (req, res) => {
+  const roleId = parseInt(req.params.id, 10);
+  const {
+    social_overview = 0,
+    content_calendar = 0,
+    content_writing = 0,
+    shoot_planning = 0,
+    ads_planning = 0,
+    daily_journal = 0,
+    report_centre = 0,
+  } = req.body;
+
+  try {
+    await db.query(
+      `INSERT INTO role_social_permissions (role_id, social_overview, content_calendar, content_writing, shoot_planning, ads_planning, daily_journal, report_centre)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         social_overview = VALUES(social_overview),
+         content_calendar = VALUES(content_calendar),
+         content_writing = VALUES(content_writing),
+         shoot_planning = VALUES(shoot_planning),
+         ads_planning = VALUES(ads_planning),
+         daily_journal = VALUES(daily_journal),
+         report_centre = VALUES(report_centre)`,
+      [roleId, social_overview ? 1 : 0, content_calendar ? 1 : 0, content_writing ? 1 : 0, shoot_planning ? 1 : 0, ads_planning ? 1 : 0, daily_journal ? 1 : 0, report_centre ? 1 : 0]
+    );
+
+    await logAudit(db, req.user.id, 'social_permissions_updated', 'role', roleId, req.body, req.ip);
+
+    return res.json({ message: 'Social permissions updated' });
+  } catch (err) {
+    console.error('updateRoleSocialPermissions error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── USER MANAGEMENT ─────────────────────────────────────────────────────────
 
 /**

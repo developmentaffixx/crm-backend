@@ -168,7 +168,18 @@ exports.myPermissions = async (req, res) => {
         responsibilities = adminRole[0]?.responsibilities || null;
       }
 
-      return res.json({ is_admin: true, role_id: roleId || null, role_name: 'Admin', responsibilities, permissions: perms });
+      // Admins get full social submenu access
+      const socialAccess = {
+        social_overview: 1,
+        content_calendar: 1,
+        content_writing: 1,
+        shoot_planning: 1,
+        ads_planning: 1,
+        daily_journal: 1,
+        report_centre: 1,
+      };
+
+      return res.json({ is_admin: true, role_id: roleId || null, role_name: 'Admin', responsibilities, permissions: perms, socialAccess });
     }
 
     const [userRows] = await db.query(
@@ -202,7 +213,25 @@ exports.myPermissions = async (req, res) => {
       return acc;
     }, {});
 
-    return res.json({ is_admin: false, role_id: roleId, role_name: roleName, responsibilities, permissions });
+    // Fetch social submenu permissions for this role
+    let socialAccess = {
+      social_overview: 0,
+      content_calendar: 0,
+      content_writing: 0,
+      shoot_planning: 0,
+      ads_planning: 0,
+      daily_journal: 0,
+      report_centre: 0,
+    };
+    const [socialRows] = await db.query(
+      'SELECT social_overview, content_calendar, content_writing, shoot_planning, ads_planning, daily_journal, report_centre FROM role_social_permissions WHERE role_id = ?',
+      [roleId]
+    );
+    if (socialRows.length > 0) {
+      socialAccess = socialRows[0];
+    }
+
+    return res.json({ is_admin: false, role_id: roleId, role_name: roleName, responsibilities, permissions, socialAccess });
   } catch (err) {
     console.error('myPermissions error:', err);
     return res.status(500).json({ message: 'Server error' });

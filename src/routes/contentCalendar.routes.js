@@ -2,9 +2,11 @@ const express = require('express');
 const router  = express.Router();
 const { body, param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
+const { requireSocialAccess } = require('../middleware/socialAccess');
 const controller = require('../controllers/contentCalendar.controller');
 
 router.use(authenticate);
+router.use(requireSocialAccess('content_calendar'));
 
 // GET  /api/content-calendar              — list all plans
 router.get('/', controller.list);

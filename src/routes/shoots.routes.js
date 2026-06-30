@@ -2,9 +2,11 @@ const express = require('express');
 const router  = express.Router();
 const { body, param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
+const { requireSocialAccess } = require('../middleware/socialAccess');
 const shootsController = require('../controllers/shoots.controller');
 
 router.use(authenticate);
+router.use(requireSocialAccess('shoot_planning'));
 
 // GET  /api/shoots
 router.get('/', shootsController.list);

@@ -32,6 +32,10 @@ router.delete('/roles/:id', [param('id').isInt({ min: 1 })], ctrl.deleteRole);
 router.get('/roles/:id/permissions', [param('id').isInt({ min: 1 })], ctrl.getRolePermissions);
 router.put('/roles/:id/permissions', [param('id').isInt({ min: 1 })], ctrl.updateRolePermissions);
 
+// ─── Social Media Ops Submenu Permissions ─────────────────────────────────────
+router.get('/roles/:id/social-permissions', [param('id').isInt({ min: 1 })], ctrl.getRoleSocialPermissions);
+router.put('/roles/:id/social-permissions', [param('id').isInt({ min: 1 })], ctrl.updateRoleSocialPermissions);
+
 // ─── Role Members ─────────────────────────────────────────────────────────────
 router.get('/roles/:id/members', [param('id').isInt({ min: 1 })], ctrl.getRoleMembers);
 

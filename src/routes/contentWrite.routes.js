@@ -2,10 +2,12 @@ const express = require('express');
 const router  = express.Router();
 const { body, param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
+const { requireSocialAccess } = require('../middleware/socialAccess');
 const contentWriteController = require('../controllers/contentWrite.controller');
 
 // All routes require authentication
 router.use(authenticate);
+router.use(requireSocialAccess('content_writing'));
 
 // GET  /api/content-write         — list all content write requests
 router.get('/', contentWriteController.list);
