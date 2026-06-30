@@ -179,7 +179,7 @@ exports.sendCredentials = async (req, res) => {
 
     const html = `
       <div style="font-family: 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px;">
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <div style="background: linear-gradient(135deg, #4C2C21 0%, #7a4433 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
           <h1 style="color: #fff; margin: 0; font-size: 24px;">Welcome to Your Growth Dashboard</h1>
           <p style="color: rgba(255,255,255,0.9); margin: 10px 0 0 0;">AffixxMedia Client Portal</p>
         </div>
@@ -187,12 +187,12 @@ exports.sendCredentials = async (req, res) => {
           <p style="color: #374151; font-size: 16px;">Hi <strong>${clientName}</strong>,</p>
           <p style="color: #6b7280;">Your Client Growth Dashboard is ready! Access your marketing updates, approvals, reports, and more — all in one place.</p>
           <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; margin: 20px 0;">
-            <p style="margin: 0 0 8px 0; color: #374151;"><strong>Portal URL:</strong> <a href="${portalUrl}" style="color: #6366f1;">${portalUrl}</a></p>
+            <p style="margin: 0 0 8px 0; color: #374151;"><strong>Portal URL:</strong> <a href="${portalUrl}" style="color: #4C2C21;">${portalUrl}</a></p>
             <p style="margin: 0 0 8px 0; color: #374151;"><strong>Login Email:</strong> ${login_email}</p>
             <p style="margin: 0; color: #374151;"><strong>Password:</strong> ${plain_password}</p>
           </div>
           <p style="color: #6b7280; font-size: 14px;">Spend just 10 minutes a day staying updated on your marketing. We handle the heavy lifting.</p>
-          <a href="${portalUrl}" style="display: inline-block; background: #6366f1; color: #fff; padding: 12px 24px; border-radius: 8px; text-decoration: none; margin-top: 16px;">Access Your Dashboard</a>
+          <a href="${portalUrl}" style="display: inline-block; background: #4C2C21; color: #fff; padding: 12px 24px; border-radius: 8px; text-decoration: none; margin-top: 16px;">Access Your Dashboard</a>
         </div>
       </div>
     `;
