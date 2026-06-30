@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { authenticate } = require('../middleware/auth');
 const ctrl = require('../controllers/clientPortal.controller');
+const v2 = require('../controllers/clientPortalV2.controller');
 
 // ═══════════════════════════════════════════════════════════════
 // PUBLIC (client-facing) routes — no CRM auth required
@@ -28,6 +29,15 @@ router.get('/meetings', ctrl.authenticateClient, ctrl.getMeetings);
 router.get('/files', ctrl.authenticateClient, ctrl.getFiles);
 router.get('/profile', ctrl.authenticateClient, ctrl.getProfile);
 
+// V2 client-facing routes
+router.get('/services/:serviceType', ctrl.authenticateClient, v2.getServiceModule);
+router.get('/knowledge-hub', ctrl.authenticateClient, v2.getKnowledgeHub);
+router.get('/weekly-updates', ctrl.authenticateClient, v2.getWeeklyUpdates);
+router.get('/upsell', ctrl.authenticateClient, v2.getUpsell);
+router.get('/milestones', ctrl.authenticateClient, v2.getMilestones);
+router.put('/milestones/:id/celebrate', ctrl.authenticateClient, v2.celebrateMilestone);
+router.get('/behind-the-scenes', ctrl.authenticateClient, v2.getBehindTheScenes);
+
 // ═══════════════════════════════════════════════════════════════
 // CRM-SIDE routes (requires CRM authentication)
 // ═══════════════════════════════════════════════════════════════
@@ -46,5 +56,13 @@ router.post('/approvals', authenticate, ctrl.createApproval);
 router.post('/reports', authenticate, ctrl.addReport);
 router.post('/team', authenticate, ctrl.upsertTeam);
 router.post('/brand-health', authenticate, ctrl.updateBrandHealth);
+
+// V2 CRM-side routes
+router.post('/service-updates', authenticate, v2.addServiceUpdate);
+router.post('/knowledge', authenticate, v2.addKnowledge);
+router.post('/weekly-updates', authenticate, v2.addWeeklyUpdate);
+router.post('/upsell', authenticate, v2.addUpsell);
+router.post('/milestones', authenticate, v2.addMilestone);
+router.post('/behind-the-scenes', authenticate, v2.addBTS);
 
 module.exports = router;
