@@ -226,7 +226,7 @@ exports.clientLogin = async (req, res) => {
 
   try {
     const [rows] = await db.query(
-      'SELECT * FROM client_portal_users WHERE login_email = ? AND is_active = 1',
+      'SELECT * FROM client_portal_users WHERE login_email = ?',
       [email]
     );
     if (!rows.length) {
@@ -234,6 +234,12 @@ exports.clientLogin = async (req, res) => {
     }
 
     const portalUser = rows[0];
+
+    // Check if access is disabled
+    if (!portalUser.is_active) {
+      return res.status(403).json({ message: 'access_disabled' });
+    }
+
     const match = await bcrypt.compare(password, portalUser.password_hash);
     if (!match) {
       return res.status(401).json({ message: 'Invalid email or password' });
@@ -309,80 +315,91 @@ exports.authenticateClient = async (req, res, next) => {
 exports.getDashboard = async (req, res) => {
   const clientId = req.clientUser.client_id;
 
+  // Helper: safely query, return empty array/null if table doesn't exist
+  const safeQuery = async (sql, params) => {
+    try {
+      const [rows] = await db.query(sql, params);
+      return rows;
+    } catch (err) {
+      console.warn('Dashboard query warning:', err.message);
+      return [];
+    }
+  };
+
   try {
     // Client info
-    const [clientRows] = await db.query(
+    const clientRows = await safeQuery(
       'SELECT id, name, business_name, email, phone FROM leads WHERE id = ?',
       [clientId]
     );
     const client = clientRows[0] || {};
 
     // Active services
-    const [services] = await db.query(
-      `SELECT cp.*, p.name as plan_name, p.service_name
+    const services = await safeQuery(
+      `SELECT cp.*, p.name as plan_name, s.name as service_name
        FROM client_plans cp
        LEFT JOIN plans p ON p.id = cp.plan_id
+       LEFT JOIN services s ON s.id = cp.service_id
        WHERE cp.client_id = ? AND cp.status = 'active'`,
       [clientId]
     );
 
     // Recent activities
-    const [activities] = await db.query(
+    const activities = await safeQuery(
       'SELECT * FROM client_portal_activities WHERE client_id = ? ORDER BY created_at DESC LIMIT 20',
       [clientId]
     );
 
     // Progress bars
-    const [progress] = await db.query(
+    const progress = await safeQuery(
       'SELECT * FROM client_portal_progress WHERE client_id = ? ORDER BY sort_order',
       [clientId]
     );
 
-    // Monthly wins (current month)
-    const [wins] = await db.query(
-      `SELECT * FROM client_portal_wins WHERE client_id = ? 
-       ORDER BY created_at DESC LIMIT 10`,
+    // Monthly wins
+    const wins = await safeQuery(
+      'SELECT * FROM client_portal_wins WHERE client_id = ? ORDER BY created_at DESC LIMIT 10',
       [clientId]
     );
 
     // Next actions (pending)
-    const [nextActions] = await db.query(
+    const nextActions = await safeQuery(
       'SELECT * FROM client_portal_next_actions WHERE client_id = ? AND is_completed = 0 ORDER BY due_date ASC LIMIT 10',
       [clientId]
     );
 
     // Team
-    const [team] = await db.query(
+    const team = await safeQuery(
       'SELECT * FROM client_portal_team WHERE client_id = ? ORDER BY sort_order',
       [clientId]
     );
 
     // Brand health
-    const [brandHealth] = await db.query(
+    const brandHealthRows = await safeQuery(
       'SELECT * FROM client_portal_brand_health WHERE client_id = ?',
       [clientId]
     );
 
     // Pending approvals count
-    const [approvalCount] = await db.query(
+    const approvalCountRows = await safeQuery(
       "SELECT COUNT(*) as count FROM client_portal_approvals WHERE client_id = ? AND status = 'pending'",
       [clientId]
     );
 
     // Pending from client
-    const [pendingItems] = await db.query(
+    const pendingItems = await safeQuery(
       'SELECT * FROM client_portal_pending WHERE client_id = ? AND is_resolved = 0 ORDER BY priority DESC',
       [clientId]
     );
 
     // Upcoming meeting
-    const [meetings] = await db.query(
+    const meetingRows = await safeQuery(
       "SELECT * FROM client_portal_meetings WHERE client_id = ? AND status = 'scheduled' AND scheduled_at > NOW() ORDER BY scheduled_at ASC LIMIT 1",
       [clientId]
     );
 
     // Unread notifications count
-    const [notifCount] = await db.query(
+    const notifCountRows = await safeQuery(
       'SELECT COUNT(*) as count FROM client_portal_notifications WHERE client_id = ? AND is_read = 0',
       [clientId]
     );
@@ -395,11 +412,11 @@ exports.getDashboard = async (req, res) => {
       wins,
       nextActions,
       team,
-      brandHealth: brandHealth[0] || null,
-      pendingApprovals: approvalCount[0]?.count || 0,
+      brandHealth: brandHealthRows[0] || null,
+      pendingApprovals: approvalCountRows[0]?.count || 0,
       pendingItems,
-      upcomingMeeting: meetings[0] || null,
-      unreadNotifications: notifCount[0]?.count || 0,
+      upcomingMeeting: meetingRows[0] || null,
+      unreadNotifications: notifCountRows[0]?.count || 0,
     });
   } catch (err) {
     console.error('getDashboard error:', err);
