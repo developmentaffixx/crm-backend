@@ -164,16 +164,14 @@ exports.setSalary = async (req, res) => {
        VALUES (?, ?, ?, ?)`,
       [employee_id, parseFloat(monthly_salary), effective_from || new Date().toISOString().split('T')[0], req.user.id]
     );
-    // Update employment_status and last_working_date on users table if provided
-    if (employment_status || last_working_date !== undefined) {
-      await db.query(
-        `UPDATE users SET
-           employment_status = COALESCE(?, employment_status),
-           last_working_date = ?
-         WHERE id = ?`,
-        [employment_status || null, last_working_date || null, employee_id]
-      );
-    }
+    // Always update employment_status and last_working_date on users table
+    await db.query(
+      `UPDATE users SET
+         employment_status = ?,
+         last_working_date = ?
+       WHERE id = ?`,
+      [employment_status || 'probation', last_working_date || null, employee_id]
+    );
     const [created] = await db.query(
       `SELECT es.*, CONCAT(u.first_name,' ',u.last_name) AS employee_name
        FROM employee_salary es JOIN users u ON u.id = es.employee_id WHERE es.id = ?`,
@@ -196,14 +194,18 @@ exports.updateSalary = async (req, res) => {
       `UPDATE employee_salary SET monthly_salary = ?, effective_from = ? WHERE id = ?`,
       [parseFloat(monthly_salary ?? rows[0].monthly_salary), effective_from || rows[0].effective_from, req.params.id]
     );
-    if (employment_status !== undefined || last_working_date !== undefined) {
-      await db.query(
-        `UPDATE users SET
-           employment_status = COALESCE(?, employment_status),
-           last_working_date = ?
-         WHERE id = ?`,
-        [employment_status || null, last_working_date !== undefined ? (last_working_date || null) : rows[0].last_working_date, rows[0].employee_id]
-      );
+    // Always update employment_status and last_working_date if provided
+    const newStatus  = employment_status  !== undefined ? employment_status  : null;
+    const newLwd     = last_working_date  !== undefined ? (last_working_date || null) : null;
+    if (newStatus !== null || last_working_date !== undefined) {
+      const setParts = [];
+      const setVals  = [];
+      if (newStatus !== null)          { setParts.push('employment_status = ?'); setVals.push(newStatus); }
+      if (last_working_date !== undefined) { setParts.push('last_working_date = ?'); setVals.push(newLwd); }
+      if (setParts.length > 0) {
+        setVals.push(rows[0].employee_id);
+        await db.query(`UPDATE users SET ${setParts.join(', ')} WHERE id = ?`, setVals);
+      }
     }
     const [updated] = await db.query(
       `SELECT es.*, CONCAT(u.first_name,' ',u.last_name) AS employee_name,
