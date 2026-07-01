@@ -476,7 +476,8 @@ exports.updateUser = async (req, res) => {
 
   const userId = parseInt(req.params.id, 10);
   const { first_name, last_name, email, role_id, is_active, reason,
-          phone, department, designation, date_of_joining, reporting_to } = req.body;
+          phone, department, designation, date_of_joining, reporting_to,
+          is_rejoining } = req.body;
 
   try {
     const [rows] = await db.query('SELECT * FROM users WHERE id = ? AND deleted = 0', [userId]);
@@ -514,13 +515,17 @@ exports.updateUser = async (req, res) => {
     const newReportingTo   = reporting_to   !== undefined ? (reporting_to || null) : user.reporting_to;
     // emp_code is auto-generated and not editable — keep existing value
     const newEmpCode       = user.emp_code;
+    // is_rejoining: admin can set/clear; only update if explicitly provided
+    const newIsRejoining   = is_rejoining !== undefined ? (is_rejoining ? 1 : 0) : user.is_rejoining;
 
     await db.query(
       `UPDATE users SET first_name = ?, last_name = ?, email = ?, role_id = ?, is_active = ?, is_admin = ?,
-       phone = ?, department = ?, designation = ?, date_of_joining = ?, reporting_to = ?, emp_code = ?
+       phone = ?, department = ?, designation = ?, date_of_joining = ?, reporting_to = ?, emp_code = ?,
+       is_rejoining = ?
        WHERE id = ?`,
       [newFirstName, newLastName, newEmail, newRoleId, newIsActive, newIsAdmin,
-       newPhone, newDepartment, newDesignation, newDateOfJoining, newReportingTo, newEmpCode, userId]
+       newPhone, newDepartment, newDesignation, newDateOfJoining, newReportingTo, newEmpCode,
+       newIsRejoining, userId]
     );
 
     // Log role change if role_id changed
@@ -563,6 +568,24 @@ exports.updateUser = async (req, res) => {
       is_admin:   newIsAdmin,
       emp_code:   newEmpCode,
     }, req.ip);
+
+    // Send welcome email on edit if explicitly requested (fire-and-forget)
+    if (req.body.send_welcome_email === true) {
+      const [cfgRows] = await db.query('SELECT from_email, enabled, from_name FROM email_settings WHERE id = 1');
+      const emailEnabled = cfgRows[0]?.enabled;
+      if (emailEnabled) {
+        const loginUrl    = process.env.APP_URL || 'http://localhost:5173';
+        const companyName = cfgRows[0]?.from_name || 'CRM System';
+        sendTemplateEmail('welcome_user', newEmail, {
+          first_name:   newFirstName,
+          last_name:    newLastName,
+          email:        newEmail,
+          password:     '(use your existing password)',
+          login_url:    loginUrl,
+          company_name: companyName,
+        }).catch(e => console.error('Welcome email (edit) failed:', e.message));
+      }
+    }
 
     return res.json({ message: 'User updated' });
   } catch (err) {

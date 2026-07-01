@@ -75,7 +75,30 @@ exports.clockIn = async (req, res) => {
     const shiftTotalMinutes = shiftHours * 60 + shiftMinutes;
     const graceEndMinutes = shiftTotalMinutes + grace_period_minutes; // 9*60 + 0 + 10 = 550
 
+    // ── First Day Joining detection ───────────────────────────────────────────
+    // Trigger if:
+    //   (a) User has zero prior attendance records, OR
+    //   (b) User has is_rejoining = 1 set by admin (returning employee)
+    // AND they provide "first day joining" (case-insensitive) as their late reason.
+    const isFirstDayReason = typeof late_reason === 'string' &&
+      late_reason.trim().toLowerCase() === 'first day joining';
+
+    const [priorAttendance] = await db.query(
+      'SELECT COUNT(*) AS cnt FROM attendance WHERE user_id = ?',
+      [userId]
+    );
+    const [userFlags] = await db.query(
+      'SELECT is_rejoining FROM users WHERE id = ?',
+      [userId]
+    );
+    const hasNoHistory = priorAttendance[0].cnt === 0;
+    const isRejoining = userFlags[0]?.is_rejoining === 1;
+    const isFirstDayJoining = isFirstDayReason && (hasNoHistory || isRejoining);
+    // ─────────────────────────────────────────────────────────────────────────
+
     let clock_in_status;
+    let effective_clock_in = null;
+
     if (nowTotalMinutes <= shiftTotalMinutes) {
       // e.g. 09:00:xx or earlier → on_time
       clock_in_status = 'on_time';
@@ -84,17 +107,32 @@ exports.clockIn = async (req, res) => {
       clock_in_status = 'grace';
     } else {
       // e.g. 09:11:xx onwards → late
-      clock_in_status = 'late';
-      if (!late_reason) {
-        return res.status(400).json({ message: 'Late reason is required when clocking in late' });
+      if (isFirstDayJoining) {
+        // ── FDJ treatment: mark on_time, backdate effective clock-in to shift start ──
+        clock_in_status = 'on_time';
+        // Build effective_clock_in = today's date + shift start time (IST → UTC)
+        const todayIST = nowIST.toISOString().split('T')[0]; // YYYY-MM-DD in IST
+        // shift_start_time is in IST (e.g. "09:00"), convert to UTC by subtracting 5h30m
+        const shiftStartIST = new Date(`${todayIST}T${shift_start_time}:00+05:30`);
+        effective_clock_in = shiftStartIST; // store as UTC datetime
+      } else {
+        clock_in_status = 'late';
+        if (!late_reason) {
+          return res.status(400).json({ message: 'Late reason is required when clocking in late' });
+        }
       }
     }
 
     const [result] = await db.query(
-      `INSERT INTO attendance (user_id, date, clock_in, clock_in_status, late_reason)
-       VALUES (?, CURDATE(), NOW(), ?, ?)`,
-      [userId, clock_in_status, late_reason || null]
+      `INSERT INTO attendance (user_id, date, clock_in, effective_clock_in, clock_in_status, late_reason)
+       VALUES (?, CURDATE(), NOW(), ?, ?, ?)`,
+      [userId, effective_clock_in || null, clock_in_status, late_reason || null]
     );
+
+    // ── Auto-clear is_rejoining flag after first FDJ clock-in ─────────────────
+    if (isFirstDayJoining && isRejoining) {
+      await db.query('UPDATE users SET is_rejoining = 0 WHERE id = ?', [userId]);
+    }
     const attendanceId = result.insertId;
 
     const insertedPlans = [];
@@ -213,8 +251,10 @@ exports.clockOut = async (req, res) => {
     }
 
     // ── Calculate served time and clock out ────────────────────────────────────
+    // Use effective_clock_in if set (First Day Joining case) so deficit is correct
     const [servedResult] = await db.query(
-      'SELECT TIMESTAMPDIFF(SECOND, clock_in, NOW()) AS total_served FROM attendance WHERE id = ?',
+      `SELECT TIMESTAMPDIFF(SECOND, COALESCE(effective_clock_in, clock_in), NOW()) AS total_served
+       FROM attendance WHERE id = ?`,
       [attendanceId]
     );
     const total_served_seconds = servedResult[0].total_served;
@@ -335,6 +375,17 @@ exports.getToday = async (req, res) => {
     const today = new Date().toISOString().split('T')[0];
     const todaySchedule = await getExpectedHoursForDate(today);
 
+    // Check if this user has no attendance records yet (first-ever day) or is_rejoining
+    const [priorCount] = await db.query(
+      'SELECT COUNT(*) AS cnt FROM attendance WHERE user_id = ?',
+      [userId]
+    );
+    const [userFlagRows] = await db.query(
+      'SELECT is_rejoining FROM users WHERE id = ?',
+      [userId]
+    );
+    const isFirstDay = priorCount[0].cnt === 0 || userFlagRows[0]?.is_rejoining === 1;
+
     return res.json({
       attendance: attendance[0] || null,
       plans,
@@ -342,7 +393,8 @@ exports.getToday = async (req, res) => {
       total_task_seconds: parseInt(totalTaskSecondsToday) || 0,
       total_ticket_seconds: (parseInt(ticketTimerResult[0].total) || 0) * 60,
       total_meeting_seconds: totalMeetingSecondsToday,
-      today_schedule: todaySchedule
+      today_schedule: todaySchedule,
+      is_first_day: isFirstDay,
     });
   } catch (err) {
     console.error('Get today error:', err);
