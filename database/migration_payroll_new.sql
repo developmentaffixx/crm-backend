@@ -4,10 +4,15 @@ USE crm_task_module;
 -- Payroll Module (New — Simple & Clean)
 -- ============================================================
 
--- ─── 1. Add employment_status + probation_end_date to users (if not exists) ──
+-- ─── 1. Add employment_status + last_working_date to users (if not exists) ──
+--      Also extend ENUM to include 'permanent' (old data used 'confirmed')
 ALTER TABLE users
-  ADD COLUMN IF NOT EXISTS employment_status ENUM('probation','permanent') NOT NULL DEFAULT 'probation' AFTER date_of_joining,
+  ADD COLUMN IF NOT EXISTS employment_status ENUM('probation','confirmed','permanent') NOT NULL DEFAULT 'probation' AFTER date_of_joining,
   ADD COLUMN IF NOT EXISTS last_working_date DATE DEFAULT NULL AFTER employment_status;
+
+-- If column already existed with old ENUM, extend it to include 'permanent'
+ALTER TABLE users
+  MODIFY COLUMN employment_status ENUM('probation','confirmed','permanent') NOT NULL DEFAULT 'probation';
 
 -- ─── 2. Employee Salary table ─────────────────────────────────────────────────
 -- One active salary per employee. HR updates when salary changes.

@@ -94,7 +94,7 @@ function calcPayroll(workingDays, daysPresent, monthlySalary, employmentStatus) 
   let paidLeaveUsed = 0;
   let lopDays       = 0;
 
-  if (employmentStatus === 'permanent') {
+  if (employmentStatus === 'permanent' || employmentStatus === 'confirmed') {
     // 1 paid leave per month (lapse — no carryover)
     if (absentDays <= 1) {
       paidLeaveUsed = absentDays;
@@ -269,7 +269,8 @@ exports.generate = async (req, res) => {
 
       const workingDays  = calcWorkingDays(year, month, emp.date_of_joining, emp.last_working_date);
       const daysPresent  = await getAttendance(emp.id, year, month, emp.date_of_joining, emp.last_working_date);
-      const { perDay, paidLeaveUsed, lopDays, lopDeduction, absentDays } = calcPayroll(workingDays, daysPresent, emp.monthly_salary, emp.employment_status);
+      const empStatus    = (emp.employment_status === 'permanent' || emp.employment_status === 'confirmed') ? 'permanent' : 'probation';
+      const { perDay, paidLeaveUsed, lopDays, lopDeduction, absentDays } = calcPayroll(workingDays, daysPresent, emp.monthly_salary, empStatus);
 
       const netSalary   = parseFloat((workingDays * perDay - lopDeduction).toFixed(2));
       const payrollCode = await generatePayrollCode(year, month, emp.id);
@@ -281,7 +282,7 @@ exports.generate = async (req, res) => {
            monthly_salary, per_day_salary, lop_deduction, bonus, advance_deduction, other_deduction, net_salary,
            payment_mode, status, auto_generated, created_by
          ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,0,?,'Bank','Draft',1,1)`,
-        [payrollCode, emp.id, month, year, emp.employment_status,
+        [payrollCode, emp.id, month, year, empStatus,
          workingDays, daysPresent, absentDays, paidLeaveUsed, lopDays,
          emp.monthly_salary, perDay, lopDeduction, netSalary]
       );
