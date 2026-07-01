@@ -7,11 +7,8 @@ exports.listCandidates = async (req, res) => {
     const { search, status, source } = req.query;
 
     let sql = `
-      SELECT
-        ic.*,
-        CONCAT(u.first_name, ' ', u.last_name) AS shortlisted_by_name
+      SELECT ic.*
       FROM interview_candidates ic
-      LEFT JOIN users u ON u.id = ic.shortlisted_by
       WHERE ic.deleted = 0
     `;
     const params = [];
@@ -21,7 +18,11 @@ exports.listCandidates = async (req, res) => {
       const s = `%${search}%`;
       params.push(s, s, s, s);
     }
-    if (status) {
+    if (status === 'waiting') {
+      sql += ` AND ic.status = 'on_hold'`;
+    } else if (status === 'pipeline') {
+      sql += ` AND ic.status IN ('new', 'in_process')`;
+    } else if (status) {
       sql += ` AND ic.status = ?`;
       params.push(status);
     }
@@ -61,46 +62,23 @@ exports.getCandidate = async (req, res) => {
     );
 
     const candidate = candidates[0];
-    // Parse JSON fields
-    candidate.siblings = candidate.siblings ? (typeof candidate.siblings === 'string' ? JSON.parse(candidate.siblings) : candidate.siblings) : [];
+    candidate.siblings  = candidate.siblings  ? (typeof candidate.siblings  === 'string' ? JSON.parse(candidate.siblings)  : candidate.siblings)  : [];
     candidate.referrals = candidate.referrals ? (typeof candidate.referrals === 'string' ? JSON.parse(candidate.referrals) : candidate.referrals) : [];
 
-    return res.json({ candidate, rounds });
+    // Fetch questions for this candidate's position
+    const [questions] = await db.query(
+      `SELECT * FROM interview_question_bank WHERE position_name = ? ORDER BY order_no ASC`,
+      [candidate.position_applied]
+    );
+
+    return res.json({ candidate, rounds, questions });
   } catch (err) {
     console.error('interview getCandidate error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
-// ── POST /api/interview-scheduler/candidates (manual add) ─────────────────────
-exports.createCandidate = async (req, res) => {
-  try {
-    const { full_name, email, contact_number, position_applied, source } = req.body;
-
-    if (!full_name?.trim() || !position_applied?.trim()) {
-      return res.status(400).json({ message: 'Name and position are required' });
-    }
-
-    const [result] = await db.query(
-      `INSERT INTO interview_candidates (full_name, email, contact_number, position_applied, source, status)
-       VALUES (?, ?, ?, ?, ?, 'shortlisted')`,
-      [
-        full_name.trim(),
-        email?.trim() || null,
-        contact_number?.trim() || null,
-        position_applied.trim(),
-        source || 'other',
-      ]
-    );
-
-    return res.status(201).json({ message: 'Candidate added', id: result.insertId });
-  } catch (err) {
-    console.error('interview createCandidate error:', err);
-    return res.status(500).json({ message: 'Server error' });
-  }
-};
-
-// ── POST /api/interview-scheduler/applications (public - joinus form) ─────────
+// ── POST /api/interview-scheduler/applications (public — joinus form) ─────────
 exports.submitApplication = async (req, res) => {
   try {
     const d = req.body;
@@ -109,7 +87,7 @@ exports.submitApplication = async (req, res) => {
       return res.status(400).json({ message: 'Name and position are required' });
     }
 
-    const siblingsJson = d.siblings && Array.isArray(d.siblings) && d.siblings.length ? JSON.stringify(d.siblings) : null;
+    const siblingsJson  = d.siblings  && Array.isArray(d.siblings)  && d.siblings.length  ? JSON.stringify(d.siblings)  : null;
     const referralsJson = d.referrals && Array.isArray(d.referrals) && d.referrals.length ? JSON.stringify(d.referrals) : null;
 
     const [result] = await db.query(
@@ -124,7 +102,7 @@ exports.submitApplication = async (req, res) => {
         last_designation, employment_from, employment_to, reason_for_leaving,
         comfortable_relocating, has_medical_condition, medical_condition_note,
         referrals, source, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'joinus_form', 'new')`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')`,
       [
         d.full_name?.trim(),
         d.email?.trim() || null,
@@ -163,6 +141,7 @@ exports.submitApplication = async (req, res) => {
         d.has_medical_condition ? 1 : 0,
         d.medical_condition_note || null,
         referralsJson,
+        d.source || 'joinus_form',
       ]
     );
 
@@ -179,20 +158,14 @@ exports.updateStatus = async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    const validStatuses = ['new', 'shortlisted', 'in_process', 'selected', 'rejected', 'on_hold'];
+    const validStatuses = ['new', 'in_process', 'selected', 'rejected', 'on_hold'];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ message: 'Invalid status' });
     }
 
-    const updates = { status };
-    if (status === 'shortlisted') {
-      updates.shortlisted_by = req.user.id;
-      updates.shortlisted_at = new Date();
-    }
-
     await db.query(
-      `UPDATE interview_candidates SET status = ?, shortlisted_by = ?, shortlisted_at = ? WHERE id = ? AND deleted = 0`,
-      [updates.status, updates.shortlisted_by || null, updates.shortlisted_at || null, id]
+      `UPDATE interview_candidates SET status = ? WHERE id = ? AND deleted = 0`,
+      [status, id]
     );
 
     return res.json({ message: 'Status updated' });
@@ -223,7 +196,7 @@ exports.createRound = async (req, res) => {
 
     // Update candidate status to in_process
     await db.query(
-      `UPDATE interview_candidates SET status = 'in_process' WHERE id = ? AND status = 'shortlisted'`,
+      `UPDATE interview_candidates SET status = 'in_process' WHERE id = ? AND status = 'new'`,
       [id]
     );
 
@@ -231,28 +204,28 @@ exports.createRound = async (req, res) => {
     try {
       const [candidates] = await db.query(`SELECT full_name, email FROM interview_candidates WHERE id = ?`, [id]);
       const candidate = candidates[0];
-
       if (candidate && candidate.email) {
-        const interviewerName = interviewer_id
-          ? await db.query(`SELECT CONCAT(first_name, ' ', last_name) AS name FROM users WHERE id = ?`, [interviewer_id]).then(([r]) => r[0]?.name || 'HR Team')
-          : 'HR Team';
-
-        const formattedDate = scheduled_date ? new Date(scheduled_date).toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : 'To be confirmed';
-        const formattedTime = scheduled_time || 'To be confirmed';
+        const [[ivRow]] = await db.query(
+          `SELECT CONCAT(first_name, ' ', last_name) AS name FROM users WHERE id = ?`,
+          [interviewer_id]
+        );
+        const interviewerName = ivRow?.name || 'HR Team';
+        const formattedDate = scheduled_date
+          ? new Date(scheduled_date).toLocaleDateString('en-IN', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+          : 'To be confirmed';
         const modeLabel = mode === 'in_person' ? 'In Person' : mode === 'video' ? 'Video Call' : 'Phone Call';
 
         await sendTemplateEmail('interview_scheduled', candidate.email, {
-          candidate_name: candidate.full_name,
-          round_name: round_name || `Round ${nextRound}`,
-          scheduled_date: formattedDate,
-          scheduled_time: formattedTime,
-          mode: modeLabel,
+          candidate_name:  candidate.full_name,
+          round_name:      round_name || `Round ${nextRound}`,
+          scheduled_date:  formattedDate,
+          scheduled_time:  scheduled_time || 'To be confirmed',
+          mode:            modeLabel,
           interviewer_name: interviewerName,
         });
       }
     } catch (emailErr) {
       console.error('Interview schedule email failed:', emailErr.message);
-      // Don't fail the request if email fails
     }
 
     return res.status(201).json({ message: 'Round scheduled', id: result.insertId, round_number: nextRound });
@@ -271,15 +244,16 @@ exports.updateRound = async (req, res) => {
     const fields = [];
     const params = [];
 
-    if (verdict !== undefined) { fields.push('verdict = ?'); params.push(verdict); }
-    if (remarks !== undefined) { fields.push('remarks = ?'); params.push(remarks); }
-    if (rating !== undefined) { fields.push('rating = ?'); params.push(rating); }
-    if (scheduled_date !== undefined) { fields.push('scheduled_date = ?'); params.push(scheduled_date); }
-    if (scheduled_time !== undefined) { fields.push('scheduled_time = ?'); params.push(scheduled_time); }
-    if (interviewer_id !== undefined) { fields.push('interviewer_id = ?'); params.push(interviewer_id); }
-    if (status !== undefined) { fields.push('status = ?'); params.push(status); }
+    if (scheduled_date  !== undefined) { fields.push('scheduled_date = ?');  params.push(scheduled_date); }
+    if (scheduled_time  !== undefined) { fields.push('scheduled_time = ?');  params.push(scheduled_time); }
+    if (interviewer_id  !== undefined) { fields.push('interviewer_id = ?');  params.push(interviewer_id); }
+    if (remarks         !== undefined) { fields.push('remarks = ?');         params.push(remarks); }
+    if (rating          !== undefined) { fields.push('rating = ?');          params.push(rating); }
+    if (status          !== undefined) { fields.push('status = ?');          params.push(status); }
 
-    if (verdict) {
+    if (verdict !== undefined) {
+      fields.push('verdict = ?');
+      params.push(verdict);
       fields.push('completed_at = NOW()');
       fields.push('status = ?');
       params.push('completed');
@@ -290,19 +264,18 @@ exports.updateRound = async (req, res) => {
     params.push(id);
     await db.query(`UPDATE interview_rounds SET ${fields.join(', ')} WHERE id = ? AND deleted = 0`, params);
 
-    // If verdict is rejected, update candidate status
-    if (verdict === 'rejected') {
-      const [round] = await db.query(`SELECT candidate_id FROM interview_rounds WHERE id = ?`, [id]);
-      if (round.length) {
-        await db.query(`UPDATE interview_candidates SET status = 'rejected' WHERE id = ?`, [round[0].candidate_id]);
-      }
-    }
-
-    // If verdict is selected, check if this was the final decision
-    if (verdict === 'selected') {
-      const [round] = await db.query(`SELECT candidate_id FROM interview_rounds WHERE id = ?`, [id]);
-      if (round.length) {
-        // Keep status as in_process — HR can manually mark as 'selected' when all rounds done
+    // Update candidate status based on verdict
+    if (verdict) {
+      const [[round]] = await db.query(`SELECT candidate_id FROM interview_rounds WHERE id = ?`, [id]);
+      if (round) {
+        if (verdict === 'rejected') {
+          await db.query(`UPDATE interview_candidates SET status = 'rejected' WHERE id = ?`, [round.candidate_id]);
+        } else if (verdict === 'selected') {
+          await db.query(`UPDATE interview_candidates SET status = 'selected' WHERE id = ?`, [round.candidate_id]);
+        } else if (verdict === 'on_hold') {
+          await db.query(`UPDATE interview_candidates SET status = 'on_hold' WHERE id = ?`, [round.candidate_id]);
+        }
+        // verdict === 'pass' → candidate stays in_process, next round will be scheduled
       }
     }
 
@@ -331,14 +304,8 @@ exports.getSchedule = async (req, res) => {
     `;
     const params = [];
 
-    if (from) {
-      sql += ` AND ir.scheduled_date >= ?`;
-      params.push(from);
-    }
-    if (to) {
-      sql += ` AND ir.scheduled_date <= ?`;
-      params.push(to);
-    }
+    if (from) { sql += ` AND ir.scheduled_date >= ?`; params.push(from); }
+    if (to)   { sql += ` AND ir.scheduled_date <= ?`; params.push(to); }
 
     sql += ` ORDER BY ir.scheduled_date ASC, ir.scheduled_time ASC`;
 
@@ -350,31 +317,61 @@ exports.getSchedule = async (req, res) => {
   }
 };
 
+// ── GET /api/interview-scheduler/today ────────────────────────────────────────
+exports.getToday = async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const [rows] = await db.query(
+      `SELECT
+        ir.*,
+        ic.full_name AS candidate_name,
+        ic.contact_number,
+        ic.position_applied,
+        ic.source,
+        CONCAT(u.first_name, ' ', u.last_name) AS interviewer_name
+       FROM interview_rounds ir
+       JOIN interview_candidates ic ON ic.id = ir.candidate_id
+       LEFT JOIN users u ON u.id = ir.interviewer_id
+       WHERE ir.deleted = 0 AND ir.scheduled_date = ?
+       ORDER BY ir.scheduled_time ASC`,
+      [today]
+    );
+    return res.json({ interviews: rows });
+  } catch (err) {
+    console.error('interview getToday error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ── GET /api/interview-scheduler/stats ────────────────────────────────────────
 exports.getStats = async (req, res) => {
   try {
-    const [rows] = await db.query(`
+    const [[stats]] = await db.query(`
       SELECT
-        CAST(COUNT(*) AS UNSIGNED) AS total,
-        CAST(SUM(status = 'new') AS UNSIGNED) AS new_count,
-        CAST(SUM(status = 'shortlisted') AS UNSIGNED) AS shortlisted_count,
-        CAST(SUM(status = 'in_process') AS UNSIGNED) AS in_process_count,
-        CAST(SUM(status = 'selected') AS UNSIGNED) AS selected_count,
-        CAST(SUM(status = 'rejected') AS UNSIGNED) AS rejected_count,
-        CAST(SUM(status = 'on_hold') AS UNSIGNED) AS on_hold_count
+        CAST(COUNT(*) AS UNSIGNED)                        AS total,
+        CAST(SUM(status = 'new') AS UNSIGNED)             AS new_count,
+        CAST(SUM(status = 'in_process') AS UNSIGNED)      AS in_process_count,
+        CAST(SUM(status = 'selected') AS UNSIGNED)        AS selected_count,
+        CAST(SUM(status = 'rejected') AS UNSIGNED)        AS rejected_count,
+        CAST(SUM(status = 'on_hold') AS UNSIGNED)         AS on_hold_count
       FROM interview_candidates
       WHERE deleted = 0
     `);
-    const stats = rows[0];
-    // Ensure all counts are numbers (MySQL driver may return strings)
+
+    const [[todayCount]] = await db.query(`
+      SELECT CAST(COUNT(*) AS UNSIGNED) AS today_count
+      FROM interview_rounds
+      WHERE deleted = 0 AND scheduled_date = CURDATE()
+    `);
+
     return res.json({
-      total: Number(stats.total || 0),
-      new_count: Number(stats.new_count || 0),
-      shortlisted_count: Number(stats.shortlisted_count || 0),
+      total:           Number(stats.total          || 0),
+      new_count:       Number(stats.new_count       || 0),
       in_process_count: Number(stats.in_process_count || 0),
-      selected_count: Number(stats.selected_count || 0),
-      rejected_count: Number(stats.rejected_count || 0),
-      on_hold_count: Number(stats.on_hold_count || 0),
+      selected_count:  Number(stats.selected_count  || 0),
+      rejected_count:  Number(stats.rejected_count  || 0),
+      on_hold_count:   Number(stats.on_hold_count   || 0),
+      today_count:     Number(todayCount.today_count || 0),
     });
   } catch (err) {
     console.error('interview getStats error:', err);
@@ -390,6 +387,103 @@ exports.deleteCandidate = async (req, res) => {
     return res.json({ message: 'Candidate deleted' });
   } catch (err) {
     console.error('interview deleteCandidate error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// QUESTION BANK (Admin only)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── GET /api/interview-scheduler/questions ────────────────────────────────────
+exports.listQuestions = async (req, res) => {
+  try {
+    const { position } = req.query;
+    let sql = `SELECT * FROM interview_question_bank`;
+    const params = [];
+    if (position) { sql += ` WHERE position_name = ?`; params.push(position); }
+    sql += ` ORDER BY position_name ASC, order_no ASC`;
+    const [rows] = await db.query(sql, params);
+    return res.json({ questions: rows });
+  } catch (err) {
+    console.error('listQuestions error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── GET /api/interview-scheduler/questions/positions ─────────────────────────
+exports.listPositions = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT DISTINCT position_name, COUNT(*) AS question_count
+       FROM interview_question_bank
+       GROUP BY position_name
+       ORDER BY position_name ASC`
+    );
+    return res.json({ positions: rows });
+  } catch (err) {
+    console.error('listPositions error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── POST /api/interview-scheduler/questions ───────────────────────────────────
+exports.createQuestion = async (req, res) => {
+  try {
+    const { position_name, question, order_no } = req.body;
+    if (!position_name?.trim() || !question?.trim()) {
+      return res.status(400).json({ message: 'Position and question are required' });
+    }
+
+    // Auto order_no if not provided
+    let nextOrder = order_no;
+    if (!nextOrder) {
+      const [[maxRow]] = await db.query(
+        `SELECT COALESCE(MAX(order_no), 0) + 1 AS next_order FROM interview_question_bank WHERE position_name = ?`,
+        [position_name.trim()]
+      );
+      nextOrder = maxRow.next_order;
+    }
+
+    const [result] = await db.query(
+      `INSERT INTO interview_question_bank (position_name, question, order_no, created_by) VALUES (?, ?, ?, ?)`,
+      [position_name.trim(), question.trim(), nextOrder, req.user.id]
+    );
+    return res.status(201).json({ message: 'Question added', id: result.insertId });
+  } catch (err) {
+    console.error('createQuestion error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── PATCH /api/interview-scheduler/questions/:id ─────────────────────────────
+exports.updateQuestion = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { position_name, question, order_no } = req.body;
+    const fields = [];
+    const params = [];
+    if (position_name !== undefined) { fields.push('position_name = ?'); params.push(position_name); }
+    if (question      !== undefined) { fields.push('question = ?');      params.push(question); }
+    if (order_no      !== undefined) { fields.push('order_no = ?');      params.push(order_no); }
+    if (!fields.length) return res.status(400).json({ message: 'Nothing to update' });
+    params.push(id);
+    await db.query(`UPDATE interview_question_bank SET ${fields.join(', ')} WHERE id = ?`, params);
+    return res.json({ message: 'Question updated' });
+  } catch (err) {
+    console.error('updateQuestion error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── DELETE /api/interview-scheduler/questions/:id ────────────────────────────
+exports.deleteQuestion = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.query(`DELETE FROM interview_question_bank WHERE id = ?`, [id]);
+    return res.json({ message: 'Question deleted' });
+  } catch (err) {
+    console.error('deleteQuestion error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

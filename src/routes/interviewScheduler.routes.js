@@ -3,25 +3,32 @@ const router  = express.Router();
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const ctrl    = require('../controllers/interviewScheduler.controller');
 
-// Public route — joinus form submits here (no auth required)
+// ── Public route — joinus form (no auth) ─────────────────────────────────────
 router.post('/applications', ctrl.submitApplication);
 
-// All other routes require authentication
+// ── All routes below require authentication ───────────────────────────────────
 router.use(authenticate);
 
 // Candidates
-router.get('/candidates',           ctrl.listCandidates);
-router.get('/candidates/:id',       ctrl.getCandidate);
-router.post('/candidates',          ctrl.createCandidate);
-router.patch('/candidates/:id/status', ctrl.updateStatus);
-router.delete('/candidates/:id',    requireAdmin, ctrl.deleteCandidate);
+router.get('/candidates',                ctrl.listCandidates);
+router.get('/candidates/:id',            ctrl.getCandidate);
+router.patch('/candidates/:id/status',   ctrl.updateStatus);
+router.delete('/candidates/:id',         requireAdmin, ctrl.deleteCandidate);
 
 // Rounds
-router.post('/candidates/:id/rounds', ctrl.createRound);
-router.patch('/rounds/:id',           ctrl.updateRound);
+router.post('/candidates/:id/rounds',    ctrl.createRound);
+router.patch('/rounds/:id',              ctrl.updateRound);
 
-// Schedule & Stats
-router.get('/schedule', ctrl.getSchedule);
-router.get('/stats',    ctrl.getStats);
+// Schedule, Today & Stats
+router.get('/schedule',  ctrl.getSchedule);
+router.get('/today',     ctrl.getToday);
+router.get('/stats',     ctrl.getStats);
+
+// Question Bank (Admin only)
+router.get('/questions',           ctrl.listQuestions);
+router.get('/questions/positions', ctrl.listPositions);
+router.post('/questions',          requireAdmin, ctrl.createQuestion);
+router.patch('/questions/:id',     requireAdmin, ctrl.updateQuestion);
+router.delete('/questions/:id',    requireAdmin, ctrl.deleteQuestion);
 
 module.exports = router;
