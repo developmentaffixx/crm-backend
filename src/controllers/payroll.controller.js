@@ -407,6 +407,88 @@ exports.markPaid = async (req, res) => {
   }
 };
 
+// POST /api/payroll/manual — HR manually enters a past payroll record
+exports.createManual = async (req, res) => {
+  try {
+    const {
+      employee_id, pay_month, pay_year,
+      net_salary, bonus, advance_deduction, other_deduction,
+      payment_mode, payment_date, notes,
+    } = req.body;
+
+    if (!employee_id || !pay_month || !pay_year || !net_salary) {
+      return res.status(400).json({ message: 'employee_id, pay_month, pay_year and net_salary are required' });
+    }
+
+    // Check duplicate
+    const [existing] = await db.query(
+      'SELECT id FROM payroll WHERE employee_id = ? AND pay_month = ? AND pay_year = ? AND deleted = 0',
+      [employee_id, pay_month, pay_year]
+    );
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'Payroll already exists for this employee in the selected month' });
+    }
+
+    // Get employee salary for reference (optional — may not exist for old months)
+    const [salRows] = await db.query(
+      `SELECT es.monthly_salary, u.employment_status, u.emp_code
+       FROM users u
+       LEFT JOIN employee_salary es ON es.id = (
+         SELECT id FROM employee_salary WHERE employee_id = u.id
+         ORDER BY effective_from DESC LIMIT 1
+       )
+       WHERE u.id = ?`,
+      [employee_id]
+    );
+    const monthlySalary = salRows[0]?.monthly_salary || parseFloat(net_salary);
+    const empStatus     = salRows[0]?.employment_status || 'probation';
+
+    const bonusAmt   = parseFloat(bonus             || 0);
+    const advAmt     = parseFloat(advance_deduction || 0);
+    const otherAmt   = parseFloat(other_deduction   || 0);
+    const netAmt     = parseFloat(net_salary);
+
+    const payrollCode = await generatePayrollCode(pay_year, pay_month, employee_id);
+
+    const [result] = await db.query(
+      `INSERT INTO payroll (
+         payroll_code, employee_id, pay_month, pay_year, employment_status,
+         working_days, days_present, absent_days, paid_leave_used, lop_days,
+         monthly_salary, per_day_salary, lop_deduction,
+         bonus, advance_deduction, other_deduction, net_salary,
+         payment_mode, payment_date, status, auto_generated, notes, created_by
+       ) VALUES (?,?,?,?,?,30,0,0,0,0,?,?,0,?,?,?,?,'Bank','Draft',1,0,?,?)`,
+      [
+        payrollCode, employee_id, pay_month, pay_year, empStatus,
+        monthlySalary, parseFloat((monthlySalary / 30).toFixed(2)),
+        bonusAmt, advAmt, otherAmt, netAmt,
+        notes || 'Manual entry — pre CRM',
+        req.user.id,
+      ]
+    );
+
+    // If payment_date provided → mark as Paid immediately
+    if (payment_date) {
+      await db.query(
+        `UPDATE payroll SET status = 'Paid', payment_date = ?, payment_mode = ? WHERE id = ?`,
+        [payment_date, payment_mode || 'Bank', result.insertId]
+      );
+    }
+
+    const [created] = await db.query(
+      `SELECT p.*, CONCAT(u.first_name,' ',u.last_name) AS employee_name,
+              u.department, u.designation, u.emp_code
+       FROM payroll p LEFT JOIN users u ON u.id = p.employee_id WHERE p.id = ?`,
+      [result.insertId]
+    );
+    res.emitSocket('payroll:created', created[0]);
+    return res.status(201).json(created[0]);
+  } catch (err) {
+    console.error('createManual error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // DELETE /api/payroll/:id — soft delete
 exports.remove = async (req, res) => {
   try {

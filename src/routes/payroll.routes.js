@@ -12,6 +12,7 @@ router.put('/salaries/:id', c.updateSalary);
 
 // ── Payroll ────────────────────────────────────────────────────────────────
 router.post('/generate',             c.generate);
+router.post('/manual',               c.createManual);
 router.get('/',                      c.list);
 router.get('/:id',                   c.getOne);
 router.put('/:id',                   c.update);
