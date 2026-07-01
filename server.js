@@ -16,6 +16,7 @@ const invoicesRoutes  = require('./src/routes/invoices.routes');
 const expensesRoutes  = require('./src/routes/expenses.routes');
 const capitalRoutes   = require('./src/routes/capital.routes');
 const assetsRoutes    = require('./src/routes/assets.routes');
+
 const payrollRoutes   = require('./src/routes/payroll.routes');
 const projectsRoutes  = require('./src/routes/projects.routes');
 const clientsRoutes   = require('./src/routes/clients.routes');
@@ -104,6 +105,7 @@ app.use('/api/invoices',         invoicesRoutes);
 app.use('/api/expenses',         expensesRoutes);
 app.use('/api/capital',          capitalRoutes);
 app.use('/api/assets',           assetsRoutes);
+
 app.use('/api/payroll',          payrollRoutes);
 app.use('/api/projects',         projectsRoutes);
 app.use('/api/clients',          clientsRoutes);
@@ -197,9 +199,6 @@ server.listen(PORT, () => {
     .then(() => console.log('✅  Lead stages synced'))
     .catch(err => console.error('⚠️  Lead stage sync error (non-fatal):', err.message));
 
-  // ── Start Payroll Auto-Generate Cron ────────────────────────────────────────
-  const { startPayrollCron } = require('./src/jobs/payrollCron');
-  startPayrollCron();
 
   // ── Start Performance Review Cron ──────────────────────────────────────────
   const { startPerformanceCron } = require('./src/jobs/performanceCron');
