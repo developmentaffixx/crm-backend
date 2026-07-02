@@ -28,24 +28,63 @@ exports.todayCount = async (req, res) => {
 /**
  * GET /api/meetings
  * List meetings - users only see meetings they are a member of or created. Admin sees all.
+ * Supports pagination via ?page=1&limit=20 and status filter via ?status=scheduled
  */
 exports.list = async (req, res) => {
   try {
-    const { search } = req.query;
-    let where = 'm.deleted = 0';
-    const params = [];
+    const { search, status } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page)  || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
 
-    // Non-admin: only see meetings where user is creator or a member
+    const allowedSortFields = { title: 'm.title', meeting_date: 'm.meeting_date', start_time: 'm.start_time' };
+    const sortField = allowedSortFields[req.query.sort_by] || 'm.meeting_date';
+    const sortDir   = req.query.sort_order === 'ASC' ? 'ASC' : 'DESC';
+
+    let baseWhere = 'm.deleted = 0';
+    const baseParams = [];
+
     if (!req.user.is_admin) {
-      where += ' AND (m.created_by = ? OR m.id IN (SELECT meeting_id FROM meeting_members WHERE user_id = ?))';
-      params.push(req.user.id, req.user.id);
+      baseWhere += ' AND (m.created_by = ? OR m.id IN (SELECT meeting_id FROM meeting_members WHERE user_id = ?))';
+      baseParams.push(req.user.id, req.user.id);
     }
 
     if (search) {
-      where += ' AND (m.title LIKE ? OR m.description LIKE ?)';
+      baseWhere += ' AND (m.title LIKE ? OR m.description LIKE ?)';
       const s = `%${search}%`;
-      params.push(s, s);
+      baseParams.push(s, s);
     }
+
+    // Summary counts (unaffected by status filter)
+    const [[summaryRows]] = await db.query(
+      `SELECT
+         SUM(status = 'scheduled')  AS scheduled,
+         SUM(status = 'in_progress') AS in_progress,
+         SUM(status = 'completed')  AS completed,
+         SUM(status = 'cancelled')  AS cancelled
+       FROM meetings m WHERE ${baseWhere}`,
+      baseParams
+    );
+    const summary = {
+      scheduled:   parseInt(summaryRows.scheduled  || 0),
+      in_progress: parseInt(summaryRows.in_progress || 0),
+      completed:   parseInt(summaryRows.completed   || 0),
+      cancelled:   parseInt(summaryRows.cancelled   || 0),
+    };
+
+    // Apply status filter for paginated results
+    let where = baseWhere;
+    const params = [...baseParams];
+    if (status) {
+      where += ' AND m.status = ?';
+      params.push(status);
+    }
+
+    // Count query
+    const [[{ total }]] = await db.query(
+      `SELECT COUNT(*) AS total FROM meetings m WHERE ${where}`,
+      params
+    );
 
     const [rows] = await db.query(
       `SELECT m.*,
@@ -55,11 +94,12 @@ exports.list = async (req, res) => {
        LEFT JOIN leads l ON l.id = m.client_id
        LEFT JOIN users u ON u.id = m.created_by
        WHERE ${where}
-       ORDER BY m.meeting_date DESC, m.start_time DESC`,
-      params
+       ORDER BY ${sortField} ${sortDir}, m.start_time ${sortDir}
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
     );
 
-    // Fetch members for all meetings
+    // Fetch members for returned meetings
     if (rows.length > 0) {
       const meetingIds = rows.map(r => r.id);
       const [members] = await db.query(
@@ -82,7 +122,14 @@ exports.list = async (req, res) => {
       });
     }
 
-    return res.json({ meetings: rows, total: rows.length });
+    return res.json({
+      meetings: rows,
+      total: parseInt(total),
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      summary,
+    });
   } catch (err) {
     console.error('Meetings list error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -476,13 +523,18 @@ exports.stopTimer = async (req, res) => {
       );
     }
 
-    // If no more active timers, clear legacy timer_started_at
+    // If no more active timers, clear legacy timer_started_at + auto-complete if in_progress
     const [remaining] = await db.query(
       'SELECT 1 FROM meeting_active_timers WHERE meeting_id = ?',
       [meeting.id]
     );
     if (remaining.length === 0) {
       await db.query('UPDATE meetings SET timer_started_at = NULL WHERE id = ?', [meeting.id]);
+
+      // Auto-complete: if still in_progress and no timers left, mark as completed
+      if (meeting.status === 'in_progress') {
+        await db.query('UPDATE meetings SET status = ? WHERE id = ?', ['completed', meeting.id]);
+      }
     }
 
     // Fetch updated meeting
@@ -493,6 +545,7 @@ exports.stopTimer = async (req, res) => {
       total_time_seconds: updated[0].total_time_seconds,
       duration: durationSec,
       timer_started_at: null,
+      status: updated[0].status,
     });
   } catch (err) {
     console.error('Meeting stopTimer error:', err);
