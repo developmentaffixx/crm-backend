@@ -100,6 +100,26 @@ exports.getOne = async (req, res) => {
     );
     client.projects = projects;
 
+    // Fetch project services (across all client projects)
+    if (projects.length > 0) {
+      const projectIds = projects.map(p => p.id);
+      const [projectServices] = await db.query(
+        `SELECT ps.*, s.name AS service_name, s.icon AS service_icon, s.service_type,
+                p.title AS project_title,
+                (SELECT COUNT(*) FROM service_cycles sc WHERE sc.project_service_id = ps.id) AS cycle_count,
+                (SELECT sc.status FROM service_cycles sc WHERE sc.project_service_id = ps.id ORDER BY sc.cycle_number DESC LIMIT 1) AS latest_cycle_status
+         FROM project_services ps
+         JOIN services s ON s.id = ps.service_id
+         JOIN projects p ON p.id = ps.project_id
+         WHERE ps.project_id IN (?)
+         ORDER BY p.title ASC, ps.created_at ASC`,
+        [projectIds]
+      );
+      client.project_services = projectServices;
+    } else {
+      client.project_services = [];
+    }
+
     // Fetch related invoices
     const [invoices] = await db.query(
       `SELECT i.id, i.invoice_number, i.status, i.bill_date, i.due_date, i.total_amount, i.paid_amount, i.balance_amount
@@ -287,16 +307,36 @@ exports.saveOnboardingB = async (req, res) => {
       business_whatsapp: data.business_whatsapp || null,
       about_business: data.about_business || null,
       years_in_business: data.years_in_business || null,
+      years_in_industry: data.years_in_industry || null,
       current_business_performance: data.current_business_performance || null,
+      daily_sales: data.daily_sales || null,
+      monthly_sales: data.monthly_sales || null,
+      daily_walkin: data.daily_walkin || null,
+      avg_customer: data.avg_customer || null,
       key_offers_usps: data.key_offers_usps || null,
+      key_offers: data.key_offers || null,
+      business_usps: data.business_usps || null,
       advertising_regulations: data.advertising_regulations || 'no',
       advertising_regulations_explain: data.advertising_regulations_explain || null,
       products_services: data.products_services ? JSON.stringify(data.products_services) : null,
       social_media_credentials: data.social_media_credentials || 'existing',
+      social_existing_id: data.social_existing_id || null,
+      social_existing_password: data.social_existing_password || null,
+      social_new_email: data.social_new_email || null,
+      social_new_phone: data.social_new_phone || null,
       digital_promotion_goals: data.digital_promotion_goals || null,
+      goal_month_1: data.goal_month_1 || null,
+      goal_month_2: data.goal_month_2 || null,
+      goal_month_3: data.goal_month_3 || null,
       previous_digital_marketing: data.previous_digital_marketing || 'no',
       previous_digital_marketing_report: data.previous_digital_marketing_report || null,
       brand_guidelines: data.brand_guidelines || null,
+      brand_guidelines_exists: data.brand_guidelines_exists || 'no',
+      brand_guidelines_text: data.brand_guidelines_text || null,
+      asset_logo: data.asset_logo ? 1 : 0,
+      asset_photos_videos: data.asset_photos_videos ? 1 : 0,
+      asset_flyers: data.asset_flyers ? 1 : 0,
+      asset_brochures: data.asset_brochures ? 1 : 0,
       logo_file_path: data.logo_file_path || null,
       photos_videos_paths: data.photos_videos_paths ? JSON.stringify(data.photos_videos_paths) : null,
       flyers_paths: data.flyers_paths ? JSON.stringify(data.flyers_paths) : null,
