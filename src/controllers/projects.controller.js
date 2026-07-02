@@ -10,7 +10,16 @@ exports.list = async (req, res) => {
     let where = 'p.deleted = 0';
     const params = [];
 
-    if (status) { where += ' AND p.status = ?'; params.push(status); }
+    if (status === 'active') {
+      // Default view: open + in_progress only
+      where += ` AND p.status IN ('open', 'in_progress')`;
+    } else if (status) {
+      where += ' AND p.status = ?';
+      params.push(status);
+    } else {
+      // No filter passed — default to active only
+      where += ` AND p.status IN ('open', 'in_progress')`;
+    }
     if (client_id) { where += ' AND p.client_id = ?'; params.push(client_id); }
     if (search) {
       where += ' AND (p.title LIKE ? OR l.business_name LIKE ?)';
