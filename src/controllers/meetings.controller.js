@@ -75,9 +75,15 @@ exports.list = async (req, res) => {
     // Apply status filter for paginated results
     let where = baseWhere;
     const params = [...baseParams];
-    if (status) {
+    if (status === 'active') {
+      // Default view: only scheduled + in_progress
+      where += ` AND m.status IN ('scheduled', 'in_progress')`;
+    } else if (status) {
       where += ' AND m.status = ?';
       params.push(status);
+    } else {
+      // No filter passed — default to active only
+      where += ` AND m.status IN ('scheduled', 'in_progress')`;
     }
 
     // Count query
