@@ -7,11 +7,49 @@ const db = require('../config/db');
 exports.list = async (req, res) => {
   try {
     const { status, search, client_id } = req.query;
-    let where = 'p.deleted = 0';
-    const params = [];
+
+    // ── Base conditions (no status filter) — used for summary counts ──
+    let baseWhere = 'p.deleted = 0';
+    const baseParams = [];
+
+    if (client_id) { baseWhere += ' AND p.client_id = ?'; baseParams.push(client_id); }
+    if (search) {
+      baseWhere += ' AND (p.title LIKE ? OR l.business_name LIKE ?)';
+      const s = `%${search}%`;
+      baseParams.push(s, s);
+    }
+    if (!req.user.is_admin) {
+      baseWhere += ' AND (p.created_by = ? OR pm_self.user_id IS NOT NULL)';
+      baseParams.push(req.user.id);
+    }
+
+    // ── Summary query — always runs across ALL statuses ──
+    const [[summaryRow]] = await db.query(
+      `SELECT
+         COUNT(*)                                AS total,
+         SUM(p.status = 'open')                 AS open,
+         SUM(p.status = 'in_progress')          AS in_progress,
+         SUM(p.status = 'completed')            AS completed,
+         SUM(p.status = 'cancelled')            AS cancelled
+       FROM projects p
+       LEFT JOIN leads l ON l.id = p.client_id
+       ${!req.user.is_admin ? `LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ${req.user.id}` : ''}
+       WHERE ${baseWhere}`,
+      baseParams
+    );
+    const summary = {
+      total:       Number(summaryRow.total       || 0),
+      open:        Number(summaryRow.open        || 0),
+      in_progress: Number(summaryRow.in_progress || 0),
+      completed:   Number(summaryRow.completed   || 0),
+      cancelled:   Number(summaryRow.cancelled   || 0),
+    };
+
+    // ── Main query — applies status filter ──
+    let where = baseWhere;
+    const params = [...baseParams];
 
     if (status === 'active') {
-      // Default view: open + in_progress only
       where += ` AND p.status IN ('open', 'in_progress')`;
     } else if (status) {
       where += ' AND p.status = ?';
@@ -19,18 +57,6 @@ exports.list = async (req, res) => {
     } else {
       // No filter passed — default to active only
       where += ` AND p.status IN ('open', 'in_progress')`;
-    }
-    if (client_id) { where += ' AND p.client_id = ?'; params.push(client_id); }
-    if (search) {
-      where += ' AND (p.title LIKE ? OR l.business_name LIKE ?)';
-      const s = `%${search}%`;
-      params.push(s, s);
-    }
-
-    // Non-admin: only see projects they are a member of or created
-    if (!req.user.is_admin) {
-      where += ' AND (p.created_by = ? OR pm_self.user_id IS NOT NULL)';
-      params.push(req.user.id);
     }
 
     const [rows] = await db.query(
@@ -68,15 +94,6 @@ exports.list = async (req, res) => {
       serviceCounts.forEach(sc => { svcCountMap[sc.project_id] = sc.service_count; });
       rows.forEach(r => { r.service_count = svcCountMap[r.id] || 0; });
     }
-
-    // Summary counts
-    const summary = {
-      total:       rows.length,
-      open:        rows.filter(r => r.status === 'open').length,
-      in_progress: rows.filter(r => r.status === 'in_progress').length,
-      completed:   rows.filter(r => r.status === 'completed').length,
-      cancelled:   rows.filter(r => r.status === 'cancelled').length,
-    };
 
     return res.json({ projects: rows, summary });
   } catch (err) {
