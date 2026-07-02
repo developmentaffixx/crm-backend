@@ -232,9 +232,19 @@ exports.getOne = async (req, res) => {
     // Fetch onboarding B data from client (if external project with client)
     if (project.client_id) {
       const [onbB] = await db.query(
-        `SELECT * FROM client_onboarding_b WHERE client_id = ?`,
+        `SELECT ob.*, l.client_code AS lead_client_code
+         FROM client_onboarding_b ob
+         LEFT JOIN leads l ON l.id = ob.client_id
+         WHERE ob.client_id = ?`,
         [project.client_id]
       );
+      if (onbB[0]) {
+        // Use lead's client_code if onboarding B doesn't have one
+        if (!onbB[0].client_code && onbB[0].lead_client_code) {
+          onbB[0].client_code = onbB[0].lead_client_code;
+        }
+        delete onbB[0].lead_client_code;
+      }
       project.onboarding_b = onbB[0] || null;
     }
 
