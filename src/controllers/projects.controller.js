@@ -132,6 +132,7 @@ exports.getOne = async (req, res) => {
     const [rows] = await db.query(
       `SELECT p.*,
               l.business_name AS client_name,
+              l.industry AS client_industry,
               s.name AS service_name,
               CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name
        FROM projects p
