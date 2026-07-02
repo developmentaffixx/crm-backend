@@ -1,4 +1,6 @@
-const db = require('../config/db');
+const db   = require('../config/db');
+const https = require('https');
+const http  = require('http');
 
 // ── GET /api/interview-scheduler/candidates ───────────────────────────────────
 exports.listCandidates = async (req, res) => {
@@ -455,6 +457,55 @@ exports.deleteQuestion = async (req, res) => {
     return res.json({ message: 'Question deleted' });
   } catch (err) {
     console.error('deleteQuestion error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── GET /api/interview-scheduler/candidates/:id/resume ───────────────────────
+// Authenticated proxy — streams the resume PDF from the joinus storage server.
+// Keeps the file behind auth so the direct storage URL (which is blocked) is
+// never exposed to the browser.
+exports.getResume = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [rows] = await db.query(
+      `SELECT resume_path FROM interview_candidates WHERE id = ? AND deleted = 0`,
+      [id]
+    );
+    if (!rows.length || !rows[0].resume_path) {
+      return res.status(404).json({ message: 'Resume not found' });
+    }
+
+    const resumeUrl = rows[0].resume_path; // full URL stored by joinus e.g. https://joinus.affixxmedia.com/storage/resumes/xxx.pdf
+
+    // Validate it looks like a URL we trust
+    if (!resumeUrl.startsWith('http')) {
+      return res.status(400).json({ message: 'Invalid resume path' });
+    }
+
+    const urlObj = new URL(resumeUrl);
+    const lib    = urlObj.protocol === 'https:' ? https : http;
+
+    const proxyReq = lib.get(resumeUrl, (proxyRes) => {
+      if (proxyRes.statusCode !== 200) {
+        return res.status(proxyRes.statusCode).json({ message: 'Could not fetch resume from storage' });
+      }
+
+      res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="resume_candidate_${id}.pdf"`);
+      if (proxyRes.headers['content-length']) {
+        res.setHeader('Content-Length', proxyRes.headers['content-length']);
+      }
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', (err) => {
+      console.error('Resume proxy error:', err);
+      if (!res.headersSent) res.status(502).json({ message: 'Failed to fetch resume' });
+    });
+  } catch (err) {
+    console.error('getResume error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

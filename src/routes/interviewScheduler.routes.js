@@ -12,6 +12,7 @@ router.use(authenticate);
 // Candidates
 router.get('/candidates',                ctrl.listCandidates);
 router.get('/candidates/:id',            ctrl.getCandidate);
+router.get('/candidates/:id/resume',     ctrl.getResume);
 router.patch('/candidates/:id/status',   ctrl.updateStatus);
 router.delete('/candidates/:id',         requireAdmin, ctrl.deleteCandidate);
 
