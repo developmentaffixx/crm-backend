@@ -970,16 +970,19 @@ exports.adminGetToday = async (req, res) => {
     const [users] = await db.query(
       `SELECT u.id, u.first_name, u.last_name, u.department, u.designation,
               a.id AS attendance_id, a.clock_in, a.clock_out, a.clock_in_status, a.total_served_seconds, a.total_afs_seconds,
-              l.id AS leave_id, l.leave_type,
-              t.id AS current_task_id, t.title AS current_task_title,
-              afs.id AS active_afs_id, afs.start_time AS afs_start_time
+              MAX(l.id) AS leave_id, MAX(l.leave_type) AS leave_type,
+              MAX(t.id) AS current_task_id, MAX(t.title) AS current_task_title,
+              MAX(afs.id) AS active_afs_id, MAX(afs.start_time) AS afs_start_time
        FROM users u
        LEFT JOIN attendance a ON a.user_id = u.id AND a.date = CURDATE()
        LEFT JOIN leaves l ON l.user_id = u.id AND l.status = 'approved' AND l.deleted = 0
          AND CURDATE() BETWEEN l.from_date AND l.to_date
-       LEFT JOIN tasks t ON t.assigned_to = u.id AND t.timer_started_at IS NOT NULL AND t.deleted = 0
+       LEFT JOIN task_active_timers tat ON tat.user_id = u.id
+       LEFT JOIN tasks t ON t.id = tat.task_id AND t.deleted = 0
        LEFT JOIN afs_logs afs ON afs.user_id = u.id AND afs.end_time IS NULL
        WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
+       GROUP BY u.id, u.first_name, u.last_name, u.department, u.designation,
+                a.id, a.clock_in, a.clock_out, a.clock_in_status, a.total_served_seconds, a.total_afs_seconds
        ORDER BY u.first_name`
     );
 
