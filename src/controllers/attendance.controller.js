@@ -971,68 +971,34 @@ exports.adminGetToday = async (req, res) => {
       `SELECT u.id, u.first_name, u.last_name, u.department, u.designation,
               a.id AS attendance_id, a.clock_in, a.clock_out, a.clock_in_status, a.total_served_seconds, a.total_afs_seconds,
               l.id AS leave_id, l.leave_type,
+              t.id AS current_task_id, t.title AS current_task_title,
               afs.id AS active_afs_id, afs.start_time AS afs_start_time
        FROM users u
        LEFT JOIN attendance a ON a.user_id = u.id AND a.date = CURDATE()
        LEFT JOIN leaves l ON l.user_id = u.id AND l.status = 'approved' AND l.deleted = 0
          AND CURDATE() BETWEEN l.from_date AND l.to_date
+       LEFT JOIN tasks t ON t.assigned_to = u.id AND t.timer_started_at IS NOT NULL AND t.deleted = 0
        LEFT JOIN afs_logs afs ON afs.user_id = u.id AND afs.end_time IS NULL
        WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
-       GROUP BY u.id
        ORDER BY u.first_name`
     );
 
-    // Fetch active tasks separately to avoid row duplication
-    const userIds = users.map(u => u.id);
-    let activeTasksMap = {};
-    if (userIds.length > 0) {
-      const [tasks] = await db.query(
-        `SELECT assigned_to, id, title FROM tasks
-         WHERE assigned_to IN (?) AND timer_started_at IS NOT NULL AND deleted = 0
-         ORDER BY timer_started_at DESC`,
-        [userIds]
-      );
-      for (const t of tasks) {
-        // Only keep the first (most recent) active task per user
-        if (!activeTasksMap[t.assigned_to]) {
-          activeTasksMap[t.assigned_to] = { id: t.id, title: t.title };
-        }
-      }
-    }
-
-    const now = new Date();
-    const team = users.map(u => {
-      // Calculate live hours served if employee is clocked in and hasn't clocked out
-      let totalServedSeconds = u.total_served_seconds || 0;
-      if (u.clock_in && !u.clock_out) {
-        const clockInTime = new Date(u.clock_in);
-        const liveSeconds = Math.floor((now - clockInTime) / 1000);
-        // Use live calculation if it's greater (total_served_seconds may not be updated yet)
-        if (liveSeconds > totalServedSeconds) {
-          totalServedSeconds = liveSeconds;
-        }
-        // Subtract AFS (away from seat) time if currently away
-        const totalAfsSeconds = u.total_afs_seconds || 0;
-        totalServedSeconds = Math.max(0, totalServedSeconds - totalAfsSeconds);
-      }
-
-      return {
-        id: u.id,
-        name: u.first_name + ' ' + u.last_name,
-        department: u.department,
-        designation: u.designation,
-        clocked_in: !!u.attendance_id,
-        clock_in: u.clock_in,
-        clock_out: u.clock_out,
-        clock_in_status: u.clock_in_status,
-        total_served_seconds: totalServedSeconds,
-        on_leave: !!u.leave_id,
-        leave_type: u.leave_type,
-        current_task: activeTasksMap[u.id] || null,
-        afs_active: !!u.active_afs_id,
-        afs_start_time: u.afs_start_time
-      };
-    });
+    const team = users.map(u => ({
+      id: u.id,
+      name: u.first_name + ' ' + u.last_name,
+      department: u.department,
+      designation: u.designation,
+      clocked_in: !!u.attendance_id,
+      clock_in: u.clock_in,
+      clock_out: u.clock_out,
+      clock_in_status: u.clock_in_status,
+      total_served_seconds: u.total_served_seconds,
+      on_leave: !!u.leave_id,
+      leave_type: u.leave_type,
+      current_task: u.current_task_id ? { id: u.current_task_id, title: u.current_task_title } : null,
+      afs_active: !!u.active_afs_id,
+      afs_start_time: u.afs_start_time
+    }));
 
     return res.json(team);
   } catch (err) {
