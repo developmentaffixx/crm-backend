@@ -180,6 +180,30 @@ exports.adminStats = async (req, res) => {
       total: pendingTaskApprovals[0].count + pendingLeaveApprovals[0].count + pendingReimbursements[0].count
     };
 
+    // Total leads (all active leads)
+    const [totalLeadsResult] = await db.query(
+      `SELECT COUNT(*) AS count FROM leads WHERE deleted = 0`
+    );
+    const [newLeadsThisMonth] = await db.query(
+      `SELECT COUNT(*) AS count FROM leads WHERE deleted = 0 AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())`
+    );
+    const leads = {
+      total: totalLeadsResult[0].count,
+      new_this_month: newLeadsThisMonth[0].count
+    };
+
+    // Total clients (converted leads)
+    const [totalClientsResult] = await db.query(
+      `SELECT COUNT(*) AS count FROM leads WHERE deleted = 0 AND (status = 'Won' OR lead_stage = 'Won')`
+    );
+    const [newClientsThisMonth] = await db.query(
+      `SELECT COUNT(*) AS count FROM leads WHERE deleted = 0 AND (status = 'Won' OR lead_stage = 'Won') AND MONTH(converted_at) = MONTH(CURDATE()) AND YEAR(converted_at) = YEAR(CURDATE())`
+    );
+    const clients = {
+      total: totalClientsResult[0].count,
+      new_this_month: newClientsThisMonth[0].count
+    };
+
     // Revenue this month
     const [invoicedResult] = await db.query(
       `SELECT COALESCE(SUM(total_amount), 0) AS total FROM invoices
@@ -212,6 +236,8 @@ exports.adminStats = async (req, res) => {
       projects: projectStats,
       tickets: ticketStats,
       approvals,
+      leads,
+      clients,
       revenue,
       expenses
     });
