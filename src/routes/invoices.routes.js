@@ -45,8 +45,11 @@ router.post('/:id/upload-qr', param('id').isInt(), upload.single('qr'), invoices
 
 // ── Email ─────────────────────────────────────────────────────────────────────
 
+// GET  /api/invoices/:id/download-pdf — generate & download invoice PDF (server-side)
+router.get('/:id/download-pdf', param('id').isInt(), invoicesController.downloadPdf);
+
 // POST /api/invoices/:id/send-email — send invoice PDF to client via email
-router.post('/:id/send-email', param('id').isInt(), upload.single('pdf'), invoicesController.sendEmail);
+router.post('/:id/send-email', param('id').isInt(), invoicesController.sendEmail);
 
 // POST /api/invoices/:id/send-reminder — send payment reminder to client
 router.post('/:id/send-reminder', param('id').isInt(), invoicesController.sendReminder);

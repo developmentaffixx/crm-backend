@@ -403,14 +403,91 @@ exports.uploadQR = async (req, res) => {
   }
 };
 
-// ─── POST /api/invoices/:id/send-email ────────────────────────────────────────
-exports.sendEmail = async (req, res) => {
+// ─── GET /api/invoices/:id/download-pdf — Server-side PDF generation ──────────
+exports.downloadPdf = async (req, res) => {
   try {
+    const puppeteer = require('puppeteer');
+    const path = require('path');
+    const fs = require('fs');
+    const { buildInvoiceHtml } = require('../helpers/invoicePdfHtml');
+
     // Fetch invoice with client details
     const [rows] = await db.query(
       `SELECT i.*,
               l.name AS lead_name,
-              l.email AS lead_email
+              l.business_name AS lead_business,
+              l.email AS lead_email,
+              l.phone AS lead_phone,
+              l.address AS lead_address,
+              l.city AS lead_city,
+              l.state AS lead_state,
+              l.zip_code AS lead_zip
+       FROM invoices i
+       LEFT JOIN leads l ON l.id = i.lead_id
+       WHERE i.id = ? AND i.deleted = 0`,
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ message: 'Invoice not found' });
+    const invoice = rows[0];
+
+    // Fetch invoice items
+    const [items] = await db.query('SELECT * FROM invoice_items WHERE invoice_id = ? ORDER BY id', [req.params.id]);
+
+    // Get company settings
+    const [compRows] = await db.query('SELECT * FROM company_settings WHERE id = 1');
+    const comp = compRows[0] || {};
+
+    // Convert logo to base64
+    let logoBase64 = null;
+    const logoPath = path.join(__dirname, '../../frontend-logo.png');
+    if (fs.existsSync(logoPath)) {
+      const logoBuffer = fs.readFileSync(logoPath);
+      logoBase64 = `data:image/png;base64,${logoBuffer.toString('base64')}`;
+    }
+
+    // Build the HTML using the same template as the view page
+    const html = buildInvoiceHtml(invoice, comp, items, logoBase64);
+
+    // Generate PDF using Puppeteer
+    const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const pdfBuffer = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      margin: { top: '0', right: '0', bottom: '0', left: '0' },
+    });
+    await browser.close();
+
+    // Return PDF as download
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${invoice.invoice_number}.pdf"`);
+    return res.send(pdfBuffer);
+  } catch (err) {
+    console.error('Download PDF error:', err);
+    return res.status(500).json({ message: 'Failed to generate PDF: ' + err.message });
+  }
+};
+
+// ─── POST /api/invoices/:id/send-email ────────────────────────────────────────
+exports.sendEmail = async (req, res) => {
+  try {
+    const puppeteer = require('puppeteer');
+    const path = require('path');
+    const fs = require('fs');
+    const { buildInvoiceHtml } = require('../helpers/invoicePdfHtml');
+
+    // Fetch invoice with client details
+    const [rows] = await db.query(
+      `SELECT i.*,
+              l.name AS lead_name,
+              l.business_name AS lead_business,
+              l.email AS lead_email,
+              l.phone AS lead_phone,
+              l.address AS lead_address,
+              l.city AS lead_city,
+              l.state AS lead_state,
+              l.zip_code AS lead_zip
        FROM invoices i
        LEFT JOIN leads l ON l.id = i.lead_id
        WHERE i.id = ? AND i.deleted = 0`,
@@ -423,13 +500,34 @@ exports.sendEmail = async (req, res) => {
       return res.status(400).json({ message: 'Client does not have an email address' });
     }
 
-    if (!req.file) {
-      return res.status(400).json({ message: 'PDF file is required' });
-    }
+    // Fetch invoice items
+    const [items] = await db.query('SELECT * FROM invoice_items WHERE invoice_id = ? ORDER BY id', [req.params.id]);
 
     // Get company settings
     const [compRows] = await db.query('SELECT * FROM company_settings WHERE id = 1');
     const comp = compRows[0] || {};
+
+    // Convert logo to base64
+    let logoBase64 = null;
+    const logoPath = path.join(__dirname, '../../frontend-logo.png');
+    if (fs.existsSync(logoPath)) {
+      const logoBuffer = fs.readFileSync(logoPath);
+      logoBase64 = `data:image/png;base64,${logoBuffer.toString('base64')}`;
+    }
+
+    // Build the HTML using the same template as the view page
+    const html = buildInvoiceHtml(invoice, comp, items, logoBase64);
+
+    // Generate PDF using Puppeteer (same design as the detail view page)
+    const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const pdfBuffer = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      margin: { top: '0', right: '0', bottom: '0', left: '0' },
+    });
+    await browser.close();
 
     const dueDate = invoice.due_date
       ? new Date(invoice.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -482,7 +580,7 @@ exports.sendEmail = async (req, res) => {
 </body>
 </html>`;
 
-    // Send email with the uploaded PDF attached
+    // Send email with the server-generated PDF attached
     await sendRawEmail({
       to: invoice.lead_email,
       subject: `Invoice ${invoice.invoice_number} from ${comp.company_name || 'CRM'}`,
@@ -490,7 +588,7 @@ exports.sendEmail = async (req, res) => {
       attachments: [
         {
           filename: `${invoice.invoice_number}.pdf`,
-          content: req.file.buffer,
+          content: pdfBuffer,
           contentType: 'application/pdf',
         }
       ],
