@@ -122,7 +122,7 @@ exports.getAdminWorkload = async (req, res) => {
               SUM(CASE WHEN t.deadline < CURDATE() AND t.status != 'done' THEN 1 ELSE 0 END) AS overdue
        FROM users u
        LEFT JOIN tasks t ON t.assigned_to = u.id AND t.deleted = 0 AND t.is_active = 1
-       WHERE u.is_active = 1 AND u.deleted = 0
+       WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
        GROUP BY u.id, u.first_name, u.last_name
        ORDER BY total_tasks DESC`
     );
@@ -158,7 +158,7 @@ exports.getAdminTopPerformers = async (req, res) => {
        WHERE t.status = 'done' AND t.deleted = 0
        AND MONTH(t.updated_at) = MONTH(CURDATE())
        AND YEAR(t.updated_at) = YEAR(CURDATE())
-       AND u.is_active = 1 AND u.deleted = 0
+       AND u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
        GROUP BY u.id ORDER BY tasks_completed DESC LIMIT 5`
     );
 
@@ -171,7 +171,7 @@ exports.getAdminTopPerformers = async (req, res) => {
        WHERE a.clock_in_status = 'on_time'
        AND MONTH(a.date) = MONTH(CURDATE())
        AND YEAR(a.date) = YEAR(CURDATE())
-       AND u.is_active = 1 AND u.deleted = 0
+       AND u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
        GROUP BY u.id ORDER BY on_time_days DESC LIMIT 5`
     );
 
@@ -184,7 +184,7 @@ exports.getAdminTopPerformers = async (req, res) => {
        JOIN task_time_logs ttl ON ttl.user_id = u.id
        WHERE MONTH(ttl.started_at) = MONTH(CURDATE())
        AND YEAR(ttl.started_at) = YEAR(CURDATE())
-       AND u.is_active = 1 AND u.deleted = 0
+       AND u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
        GROUP BY u.id ORDER BY total_hours DESC LIMIT 5`
     );
 

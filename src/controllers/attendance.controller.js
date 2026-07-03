@@ -979,7 +979,7 @@ exports.adminGetToday = async (req, res) => {
          AND CURDATE() BETWEEN l.from_date AND l.to_date
        LEFT JOIN tasks t ON t.assigned_to = u.id AND t.timer_started_at IS NOT NULL AND t.deleted = 0
        LEFT JOIN afs_logs afs ON afs.user_id = u.id AND afs.end_time IS NULL
-       WHERE u.is_active = 1 AND u.deleted = 0
+       WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
        ORDER BY u.first_name`
     );
 
@@ -1016,7 +1016,7 @@ exports.adminWeekReport = async (req, res) => {
     const { week_start, week_end } = weekRange[0];
 
     const [users] = await db.query(
-      'SELECT id, first_name, last_name, department FROM users WHERE is_active = 1 AND deleted = 0'
+      'SELECT id, first_name, last_name, department FROM users WHERE is_active = 1 AND deleted = 0 AND is_admin = 0'
     );
 
     // Only calculate up to today

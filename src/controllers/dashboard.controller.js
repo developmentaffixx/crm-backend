@@ -85,18 +85,24 @@ exports.adminStats = async (req, res) => {
   try {
     // Team today
     const [presentResult] = await db.query(
-      `SELECT COUNT(*) AS count FROM attendance WHERE date = CURDATE()`
+      `SELECT COUNT(*) AS count FROM attendance a
+       JOIN users u ON u.id = a.user_id
+       WHERE a.date = CURDATE() AND u.is_admin = 0 AND u.is_active = 1 AND u.deleted = 0`
     );
     const [lateResult] = await db.query(
-      `SELECT COUNT(*) AS count FROM attendance WHERE date = CURDATE() AND clock_in_status = 'late'`
+      `SELECT COUNT(*) AS count FROM attendance a
+       JOIN users u ON u.id = a.user_id
+       WHERE a.date = CURDATE() AND a.clock_in_status = 'late' AND u.is_admin = 0 AND u.is_active = 1 AND u.deleted = 0`
     );
     const [onLeaveResult] = await db.query(
-      `SELECT COUNT(DISTINCT user_id) AS count FROM leaves
-       WHERE status = 'approved' AND deleted = 0
-       AND CURDATE() BETWEEN from_date AND to_date`
+      `SELECT COUNT(DISTINCT l.user_id) AS count FROM leaves l
+       JOIN users u ON u.id = l.user_id
+       WHERE l.status = 'approved' AND l.deleted = 0
+       AND CURDATE() BETWEEN l.from_date AND l.to_date
+       AND u.is_admin = 0 AND u.is_active = 1 AND u.deleted = 0`
     );
     const [totalUsersResult] = await db.query(
-      `SELECT COUNT(*) AS count FROM users WHERE is_active = 1 AND deleted = 0`
+      `SELECT COUNT(*) AS count FROM users WHERE is_active = 1 AND deleted = 0 AND is_admin = 0`
     );
     const present = presentResult[0].count;
     const on_leave = onLeaveResult[0].count;
@@ -373,9 +379,9 @@ exports.chartsTeamAttendance = async (req, res) => {
     );
     const { week_start, week_end } = weekRange[0];
 
-    // Total active users
+    // Total active users (excluding admins)
     const [totalUsersResult] = await db.query(
-      `SELECT COUNT(*) AS count FROM users WHERE is_active = 1 AND deleted = 0`
+      `SELECT COUNT(*) AS count FROM users WHERE is_active = 1 AND deleted = 0 AND is_admin = 0`
     );
     const totalUsers = totalUsersResult[0].count;
 
