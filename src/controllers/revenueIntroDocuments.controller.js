@@ -32,9 +32,9 @@ exports.create = async (req, res) => {
       return res.status(400).json({ message: 'Document name is required' });
     }
 
-    // Upload PDFs and images as 'image' resource_type so Cloudinary serves them inline (not as download)
-    // Cloudinary supports PDF under 'image' resource_type for inline viewing
-    const resourceType = 'image';
+    // Upload PDFs as 'raw' and images as 'image'
+    // PDF.js will fetch the raw PDF file directly for rendering
+    const resourceType = file.mimetype.startsWith('image/') ? 'image' : 'raw';
 
     const { url, public_id } = await uploadToCloudinary(
       file.buffer,
@@ -91,14 +91,16 @@ exports.update = async (req, res) => {
     if (req.file) {
       // Delete old file from Cloudinary
       if (existing[0].cloudinary_id) {
-        await deleteFromCloudinary(existing[0].cloudinary_id, 'image');
+        const resourceType = existing[0].file_type === 'image' ? 'image' : 'raw';
+        await deleteFromCloudinary(existing[0].cloudinary_id, resourceType);
       }
 
-      // Upload as 'image' resource_type for inline viewing
+      // Upload replacement file
+      const resourceType = req.file.mimetype.startsWith('image/') ? 'image' : 'raw';
       const { url, public_id } = await uploadToCloudinary(
         req.file.buffer,
         'crm/revenue-intro-documents',
-        'image'
+        resourceType
       );
 
       let fileType = 'other';
@@ -140,7 +142,8 @@ exports.remove = async (req, res) => {
 
     // Delete from Cloudinary
     if (existing[0].cloudinary_id) {
-      await deleteFromCloudinary(existing[0].cloudinary_id, 'image');
+      const resourceType = existing[0].file_type === 'image' ? 'image' : 'raw';
+      await deleteFromCloudinary(existing[0].cloudinary_id, resourceType);
     }
 
     await db.query('DELETE FROM revenue_intro_documents WHERE id = ?', [id]);
