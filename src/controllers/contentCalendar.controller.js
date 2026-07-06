@@ -34,8 +34,12 @@ exports.list = async (req, res) => {
     if (status) { where += ' AND p.status = ?'; params.push(status); }
 
     if (!req.user.is_admin) {
-      where += ' AND p.created_by = ?';
-      params.push(req.user.id);
+      where += ` AND (p.created_by = ? OR p.id IN (
+        SELECT plan_id FROM content_calendar_posts WHERE assigned_to = ?
+        UNION SELECT plan_id FROM content_calendar_shoots WHERE assigned_to = ?
+        UNION SELECT plan_id FROM content_calendar_ads WHERE assigned_to = ?
+      ))`;
+      params.push(req.user.id, req.user.id, req.user.id, req.user.id);
     }
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -64,7 +68,30 @@ exports.list = async (req, res) => {
       if (tableErr.code === 'ER_NO_SUCH_TABLE') {
         return res.json({ plans: [], total: 0 });
       }
-      throw tableErr;
+      // Fallback if assigned_to column doesn't exist yet
+      if (tableErr.code === 'ER_BAD_FIELD_ERROR' && !req.user.is_admin) {
+        // Rebuild with simple created_by filter
+        let fbWhere = 'p.deleted = 0';
+        const fbParams = [];
+        if (client_id) { fbWhere += ' AND p.client_id = ?'; fbParams.push(client_id); }
+        if (project_id) { fbWhere += ' AND p.project_id = ?'; fbParams.push(project_id); }
+        if (cycle_id) { fbWhere += ' AND p.cycle_id = ?'; fbParams.push(cycle_id); }
+        if (month) { fbWhere += ' AND p.plan_month = ?'; fbParams.push(month); }
+        if (status) { fbWhere += ' AND p.status = ?'; fbParams.push(status); }
+        fbWhere += ' AND p.created_by = ?'; fbParams.push(req.user.id);
+        const [result] = await db.query(
+          `SELECT p.*, l.business_name AS client_name, pr.title AS project_title,
+                  CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
+                  (SELECT COUNT(*) FROM content_calendar_posts WHERE plan_id = p.id) AS post_count,
+                  (SELECT COUNT(*) FROM content_calendar_shoots WHERE plan_id = p.id) AS shoot_count,
+                  (SELECT COUNT(*) FROM content_calendar_ads WHERE plan_id = p.id) AS ad_count
+           FROM content_calendar_plans p LEFT JOIN leads l ON l.id = p.client_id
+           LEFT JOIN projects pr ON pr.id = p.project_id LEFT JOIN users u ON u.id = p.created_by
+           WHERE ${fbWhere} ORDER BY p.plan_month DESC, p.created_at DESC LIMIT ? OFFSET ?`,
+          [...fbParams, parseInt(limit), offset]
+        );
+        rows = result;
+      } else throw tableErr;
     }
 
     // Get total count for pagination
@@ -486,7 +513,15 @@ exports.calendarView = async (req, res) => {
 
     if (client_id) { planWhere += ' AND p.client_id = ?'; planParams.push(client_id); }
     if (project_id) { planWhere += ' AND p.project_id = ?'; planParams.push(project_id); }
-    if (!req.user.is_admin) { planWhere += ' AND p.created_by = ?'; planParams.push(req.user.id); }
+    if (!req.user.is_admin) {
+      // Show plans created by user OR plans where user has assigned slots
+      planWhere += ` AND (p.created_by = ? OR p.id IN (
+        SELECT plan_id FROM content_calendar_posts WHERE assigned_to = ?
+        UNION SELECT plan_id FROM content_calendar_shoots WHERE assigned_to = ?
+        UNION SELECT plan_id FROM content_calendar_ads WHERE assigned_to = ?
+      ))`;
+      planParams.push(req.user.id, req.user.id, req.user.id, req.user.id);
+    }
 
     // Get plan IDs
     let plans = [];
@@ -504,7 +539,25 @@ exports.calendarView = async (req, res) => {
       if (tableErr.code === 'ER_NO_SUCH_TABLE') {
         return res.json({ posts: [], shoots: [], ads: [], plans: [] });
       }
-      throw tableErr;
+      // Fallback if assigned_to column doesn't exist yet — use simple created_by filter
+      if (tableErr.code === 'ER_BAD_FIELD_ERROR' && !req.user.is_admin) {
+        let fallbackWhere = 'p.deleted = 0';
+        const fallbackParams = [];
+        if (cycle_id) { fallbackWhere += ' AND p.cycle_id = ?'; fallbackParams.push(cycle_id); }
+        else if (month) { fallbackWhere += ' AND p.plan_month = ?'; fallbackParams.push(month); }
+        if (client_id) { fallbackWhere += ' AND p.client_id = ?'; fallbackParams.push(client_id); }
+        if (project_id) { fallbackWhere += ' AND p.project_id = ?'; fallbackParams.push(project_id); }
+        fallbackWhere += ' AND p.created_by = ?'; fallbackParams.push(req.user.id);
+        const [rows] = await db.query(
+          `SELECT p.id, p.client_id, p.project_id, p.cycle_id, l.business_name AS client_name, pr.title AS project_title
+           FROM content_calendar_plans p
+           LEFT JOIN leads l ON l.id = p.client_id
+           LEFT JOIN projects pr ON pr.id = p.project_id
+           WHERE ${fallbackWhere}`,
+          fallbackParams
+        );
+        plans = rows;
+      } else throw tableErr;
     }
 
     if (plans.length === 0) {
@@ -514,49 +567,107 @@ exports.calendarView = async (req, res) => {
     const planIds = plans.map(p => p.id);
 
     // Fetch posts for these plans within the month
-    const [posts] = await db.query(
-      `SELECT cp.*, p.client_id, l.business_name AS client_name,
-              cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
-              cwr.content_type AS brief_content_type, cwr.platform AS brief_platform,
-              CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
-       FROM content_calendar_posts cp
-       JOIN content_calendar_plans p ON p.id = cp.plan_id
-       LEFT JOIN leads l ON l.id = p.client_id
-       LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
-       LEFT JOIN users au ON au.id = cp.assigned_to
-       WHERE cp.plan_id IN (?)
-       ORDER BY cp.id ASC`,
-      [planIds]
-    );
+    let posts = [];
+    try {
+      const [rows] = await db.query(
+        `SELECT cp.*, p.client_id, l.business_name AS client_name,
+                cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
+                cwr.content_type AS brief_content_type, cwr.platform AS brief_platform,
+                CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
+         FROM content_calendar_posts cp
+         JOIN content_calendar_plans p ON p.id = cp.plan_id
+         LEFT JOIN leads l ON l.id = p.client_id
+         LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
+         LEFT JOIN users au ON au.id = cp.assigned_to
+         WHERE cp.plan_id IN (?)
+         ORDER BY cp.id ASC`,
+        [planIds]
+      );
+      posts = rows;
+    } catch (colErr) {
+      // Fallback if assigned_to column doesn't exist yet
+      if (colErr.code === 'ER_BAD_FIELD_ERROR') {
+        const [rows] = await db.query(
+          `SELECT cp.*, p.client_id, l.business_name AS client_name,
+                  cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
+                  cwr.content_type AS brief_content_type, cwr.platform AS brief_platform
+           FROM content_calendar_posts cp
+           JOIN content_calendar_plans p ON p.id = cp.plan_id
+           LEFT JOIN leads l ON l.id = p.client_id
+           LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
+           WHERE cp.plan_id IN (?)
+           ORDER BY cp.id ASC`,
+          [planIds]
+        );
+        posts = rows;
+      } else throw colErr;
+    }
 
     // Fetch shoots for these plans within the month
-    const [shoots] = await db.query(
-      `SELECT cs.*, p.client_id, l.business_name AS client_name,
-              s.shoot_id_code AS linked_shoot_code, s.project_campaign_name AS shoot_name,
-              s.shoot_date AS linked_shoot_date, s.city AS shoot_city,
-              CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
-       FROM content_calendar_shoots cs
-       JOIN content_calendar_plans p ON p.id = cs.plan_id
-       LEFT JOIN leads l ON l.id = p.client_id
-       LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
-       LEFT JOIN users au ON au.id = cs.assigned_to
-       WHERE cs.plan_id IN (?)
-       ORDER BY cs.id ASC`,
-      [planIds]
-    );
+    let shoots = [];
+    try {
+      const [rows] = await db.query(
+        `SELECT cs.*, p.client_id, l.business_name AS client_name,
+                s.shoot_id_code AS linked_shoot_code, s.project_campaign_name AS shoot_name,
+                s.shoot_date AS linked_shoot_date, s.city AS shoot_city,
+                CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
+         FROM content_calendar_shoots cs
+         JOIN content_calendar_plans p ON p.id = cs.plan_id
+         LEFT JOIN leads l ON l.id = p.client_id
+         LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
+         LEFT JOIN users au ON au.id = cs.assigned_to
+         WHERE cs.plan_id IN (?)
+         ORDER BY cs.id ASC`,
+        [planIds]
+      );
+      shoots = rows;
+    } catch (colErr) {
+      if (colErr.code === 'ER_BAD_FIELD_ERROR') {
+        const [rows] = await db.query(
+          `SELECT cs.*, p.client_id, l.business_name AS client_name,
+                  s.shoot_id_code AS linked_shoot_code, s.project_campaign_name AS shoot_name,
+                  s.shoot_date AS linked_shoot_date, s.city AS shoot_city
+           FROM content_calendar_shoots cs
+           JOIN content_calendar_plans p ON p.id = cs.plan_id
+           LEFT JOIN leads l ON l.id = p.client_id
+           LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
+           WHERE cs.plan_id IN (?)
+           ORDER BY cs.id ASC`,
+          [planIds]
+        );
+        shoots = rows;
+      } else throw colErr;
+    }
 
     // Fetch ads for these plans that overlap with the month
-    const [ads] = await db.query(
-      `SELECT ca.*, p.client_id, l.business_name AS client_name,
-              CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
-       FROM content_calendar_ads ca
-       JOIN content_calendar_plans p ON p.id = ca.plan_id
-       LEFT JOIN leads l ON l.id = p.client_id
-       LEFT JOIN users au ON au.id = ca.assigned_to
-       WHERE ca.plan_id IN (?)
-       ORDER BY ca.start_date ASC`,
-      [planIds]
-    );
+    let ads = [];
+    try {
+      const [rows] = await db.query(
+        `SELECT ca.*, p.client_id, l.business_name AS client_name,
+                CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
+         FROM content_calendar_ads ca
+         JOIN content_calendar_plans p ON p.id = ca.plan_id
+         LEFT JOIN leads l ON l.id = p.client_id
+         LEFT JOIN users au ON au.id = ca.assigned_to
+         WHERE ca.plan_id IN (?)
+         ORDER BY ca.start_date ASC`,
+        [planIds]
+      );
+      ads = rows;
+    } catch (colErr) {
+      if (colErr.code === 'ER_BAD_FIELD_ERROR') {
+        const [rows] = await db.query(
+          `SELECT ca.*, p.client_id, l.business_name AS client_name
+           FROM content_calendar_ads ca
+           JOIN content_calendar_plans p ON p.id = ca.plan_id
+           LEFT JOIN leads l ON l.id = p.client_id
+           WHERE ca.plan_id IN (?)
+           ORDER BY ca.start_date ASC`,
+          [planIds]
+        );
+        ads = rows;
+      } else throw colErr;
+    }
 
     return res.json({ posts, shoots, ads, plans });
   } catch (err) {
