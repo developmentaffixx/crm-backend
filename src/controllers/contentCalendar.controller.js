@@ -228,11 +228,11 @@ exports.create = async (req, res) => {
       for (const post of posts) {
         await conn.query(
           `INSERT INTO content_calendar_posts 
-            (plan_id, linked_brief_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status, slot_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [planId, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform),
+            (plan_id, assigned_to, linked_brief_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status, slot_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [planId, post.assigned_to || null, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform),
            toNull(post.format), toNull(post.topic), post.ad_target || 'organic',
-           toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta), post.status || 'planned', post.slot_status || 'open']
+           toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta), post.status || 'planned', post.slot_status || (post.assigned_to ? 'picked_up' : 'open')]
         );
       }
     }
@@ -242,11 +242,11 @@ exports.create = async (req, res) => {
       for (const shoot of shoots) {
         await conn.query(
           `INSERT INTO content_calendar_shoots 
-            (plan_id, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status, slot_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [planId, toInt(shoot.linked_shoot_id), toNull(shoot.shoot_date), toNull(shoot.location),
+            (plan_id, assigned_to, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status, slot_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [planId, shoot.assigned_to || null, toInt(shoot.linked_shoot_id), toNull(shoot.shoot_date), toNull(shoot.location),
            toNull(shoot.description), shoot.num_videos || 0, shoot.num_photos || 0,
-           toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned', shoot.slot_status || 'open']
+           toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned', shoot.slot_status || (shoot.assigned_to ? 'picked_up' : 'open')]
         );
       }
     }
