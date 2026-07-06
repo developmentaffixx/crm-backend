@@ -137,7 +137,8 @@ exports.list = async (req, res) => {
     if (taskIds.length > 0) {
       const [assigneeRows] = await db.query(
         `SELECT ta.task_id, ta.user_id, ta.role,
-                CONCAT(u.first_name, ' ', u.last_name) AS name
+                CONCAT(u.first_name, ' ', u.last_name) AS name,
+                u.avatar_url AS avatar
          FROM task_assignees ta
          JOIN users u ON u.id = ta.user_id
          WHERE ta.task_id IN (?)`,
@@ -145,7 +146,7 @@ exports.list = async (req, res) => {
       );
       for (const row of assigneeRows) {
         if (!assigneesMap[row.task_id]) assigneesMap[row.task_id] = [];
-        assigneesMap[row.task_id].push({ user_id: row.user_id, role: row.role, name: row.name });
+        assigneesMap[row.task_id].push({ user_id: row.user_id, role: row.role, name: row.name, avatar: row.avatar });
       }
     }
 
