@@ -505,9 +505,14 @@ exports.calendarView = async (req, res) => {
       planParams.push(cycle_id);
     } else if (month) {
       // Month-based view: match plans whose plan_month falls in the same month
-      // month param is like '2026-07-01', match any plan_month in that month
-      planWhere += ' AND DATE_FORMAT(p.plan_month, "%Y-%m") = ?';
-      planParams.push(month.substring(0, 7)); // '2026-07'
+      // OR plans that have items scheduled in this month
+      const monthStr = month.substring(0, 7); // '2026-07'
+      planWhere += ` AND (DATE_FORMAT(p.plan_month, "%Y-%m") = ? OR p.id IN (
+        SELECT plan_id FROM content_calendar_posts WHERE DATE_FORMAT(posting_date, "%Y-%m") = ?
+        UNION SELECT plan_id FROM content_calendar_shoots WHERE DATE_FORMAT(shoot_date, "%Y-%m") = ?
+        UNION SELECT plan_id FROM content_calendar_ads WHERE DATE_FORMAT(start_date, "%Y-%m") = ?
+      ))`;
+      planParams.push(monthStr, monthStr, monthStr, monthStr);
     } else {
       return res.status(400).json({ message: 'Either month or cycle_id parameter is required' });
     }
