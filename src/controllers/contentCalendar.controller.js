@@ -504,9 +504,10 @@ exports.calendarView = async (req, res) => {
       planWhere += ' AND p.cycle_id = ?';
       planParams.push(cycle_id);
     } else if (month) {
-      // Legacy month-based view
-      planWhere += ' AND p.plan_month = ?';
-      planParams.push(month);
+      // Month-based view: match plans whose plan_month falls in the same month
+      // month param is like '2026-07-01', match any plan_month in that month
+      planWhere += ' AND DATE_FORMAT(p.plan_month, "%Y-%m") = ?';
+      planParams.push(month.substring(0, 7)); // '2026-07'
     } else {
       return res.status(400).json({ message: 'Either month or cycle_id parameter is required' });
     }
