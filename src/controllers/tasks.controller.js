@@ -52,7 +52,7 @@ exports.list = async (req, res) => {
     const {
       status, is_active, priority, search, exclude_done, assigned_to,
       page = 1, limit = 25,
-      sort_by = 'created_at', sort_order = 'DESC'
+      sort_by = 'deadline', sort_order = 'ASC'
     } = req.query;
 
     const pageNum  = Math.max(1, parseInt(page));
@@ -61,18 +61,29 @@ exports.list = async (req, res) => {
 
     // Allowed sort columns (prevent SQL injection)
     const allowedSorts = ['created_at', 'deadline', 'priority', 'title', 'time_spent', 'updated_at'];
-    const sortCol = allowedSorts.includes(sort_by) ? `t.${sort_by}` : 't.created_at';
+    const sortCol = allowedSorts.includes(sort_by) ? `t.${sort_by}` : 't.deadline';
     const sortDir = sort_order.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    // When sorting by deadline, push NULLs to the bottom regardless of direction
+    const orderClause = sort_by === 'deadline'
+      ? `t.deadline IS NULL, t.deadline ${sortDir}`
+      : `${sortCol} ${sortDir}`;
 
     let where = 't.deleted = 0';
     const params = [];
 
     if (!req.user.is_admin) {
-      // Team member sees tasks where they are assigned_to, created_by, or a collaborator
-      where += ` AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
-        SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
-      )) AND t.is_active >= 1`;
-      params.push(req.user.id, req.user.id, req.user.id);
+      // Team member sees:
+      // 1. Active tasks (is_active >= 1) where they are assigned_to, created_by, or collaborator
+      // 2. Rejected tasks (is_active = 4) that THEY created, within 8 hours of rejection
+      where += ` AND (
+        (t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
+          SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
+        )))
+        OR
+        (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
+      )`;
+      params.push(req.user.id, req.user.id, req.user.id, req.user.id);
     }
 
     if (status)    { where += ' AND t.status = ?';    params.push(status); }
@@ -101,7 +112,7 @@ exports.list = async (req, res) => {
     const [rows] = await db.query(
       `SELECT t.id, t.task_id_code, t.title, t.description, t.assigned_to, t.created_by,
               t.start_date, t.deadline, t.priority, t.status, t.is_active,
-              t.deleted, t.created_at, t.updated_at,
+              t.deleted, t.created_at, t.updated_at, t.rejected_at,
               COALESCE((SELECT SUM(tl.duration) FROM task_time_logs tl WHERE tl.task_id = t.id), 0) AS time_spent,
               t.timer_started_at,
               CONCAT(u_assigned.first_name, ' ', u_assigned.last_name) AS assigned_to_name,
@@ -115,7 +126,7 @@ exports.list = async (req, res) => {
        LEFT JOIN users u_assigned ON u_assigned.id = t.assigned_to
        LEFT JOIN users u_created  ON u_created.id  = t.created_by
        WHERE ${where}
-       ORDER BY ${sortCol} ${sortDir}
+       ORDER BY ${orderClause}
        LIMIT ? OFFSET ?`,
       [...params, limitNum, offset]
     );
@@ -146,11 +157,15 @@ exports.list = async (req, res) => {
     // Summary counts (over ALL matching tasks, not just current page)
     // We need a separate query for accurate counts
     const summaryWhere = 't.deleted = 0' + (!req.user.is_admin
-      ? ` AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
+      ? ` AND (
+        (t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
           SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
-        )) AND t.is_active >= 1`
+        )))
+        OR
+        (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
+      )`
       : '');
-    const summaryParams = !req.user.is_admin ? [req.user.id, req.user.id, req.user.id] : [];
+    const summaryParams = !req.user.is_admin ? [req.user.id, req.user.id, req.user.id, req.user.id] : [];
 
     const [allRows] = await db.query(
       `SELECT t.status, t.is_active FROM tasks t WHERE ${summaryWhere}`,
@@ -162,7 +177,7 @@ exports.list = async (req, res) => {
       in_progress:      allRows.filter(r => r.status === 'in_progress' && r.is_active === 1).length,
       done:             allRows.filter(r => r.is_active === 3).length,
       pending_approval: req.user.is_admin ? allRows.filter(r => r.is_active === 0).length : 0,
-      rejected:         req.user.is_admin ? allRows.filter(r => r.is_active === 4).length : 0,
+      rejected:         allRows.filter(r => r.is_active === 4).length,
     };
 
     return res.json({
@@ -479,8 +494,8 @@ exports.reject = async (req, res) => {
     const reason = req.body.reason || null;
 
     if (task.is_active === 0) {
-      // Instead of deleting, set to rejected state (is_active = 4)
-      await db.query("UPDATE tasks SET is_active = 4 WHERE id = ?", [task.id]);
+      // Instead of deleting, set to rejected state (is_active = 4) with timestamp
+      await db.query("UPDATE tasks SET is_active = 4, rejected_at = NOW() WHERE id = ?", [task.id]);
       await logActivity(task.id, req.user.id, 'rejected', { note: reason || 'Task creation rejected' });
 
       const [updated] = await db.query('SELECT * FROM tasks WHERE id = ?', [task.id]);
@@ -533,6 +548,7 @@ exports.resubmit = async (req, res) => {
     if (priority)    updates.priority = priority;
 
     updates.is_active = 0; // Back to pending approval
+    updates.rejected_at = null; // Clear rejection timestamp
 
     const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
     const values     = [...Object.values(updates), task.id];
