@@ -350,8 +350,8 @@ exports.update = async (req, res) => {
 
     const task = rows[0];
 
-    // Closed tasks cannot be edited
-    if (task.is_active === 3) {
+    // Closed tasks cannot be edited (except by admin)
+    if (task.is_active === 3 && !req.user.is_admin) {
       return res.status(400).json({ message: 'Closed tasks cannot be edited' });
     }
 
