@@ -201,11 +201,11 @@ exports.create = async (req, res) => {
       for (const post of posts) {
         await conn.query(
           `INSERT INTO content_calendar_posts 
-            (plan_id, linked_brief_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (plan_id, linked_brief_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status, slot_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [planId, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform),
            toNull(post.format), toNull(post.topic), post.ad_target || 'organic',
-           toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta), post.status || 'planned']
+           toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta), post.status || 'planned', post.slot_status || 'open']
         );
       }
     }
@@ -215,11 +215,11 @@ exports.create = async (req, res) => {
       for (const shoot of shoots) {
         await conn.query(
           `INSERT INTO content_calendar_shoots 
-            (plan_id, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            (plan_id, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status, slot_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [planId, toInt(shoot.linked_shoot_id), toNull(shoot.shoot_date), toNull(shoot.location),
            toNull(shoot.description), shoot.num_videos || 0, shoot.num_photos || 0,
-           toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned']
+           toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned', shoot.slot_status || 'open']
         );
       }
     }
@@ -517,11 +517,13 @@ exports.calendarView = async (req, res) => {
     const [posts] = await db.query(
       `SELECT cp.*, p.client_id, l.business_name AS client_name,
               cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
-              cwr.content_type AS brief_content_type, cwr.platform AS brief_platform
+              cwr.content_type AS brief_content_type, cwr.platform AS brief_platform,
+              CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
        FROM content_calendar_posts cp
        JOIN content_calendar_plans p ON p.id = cp.plan_id
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
+       LEFT JOIN users au ON au.id = cp.assigned_to
        WHERE cp.plan_id IN (?)
        ORDER BY cp.id ASC`,
       [planIds]
@@ -531,11 +533,13 @@ exports.calendarView = async (req, res) => {
     const [shoots] = await db.query(
       `SELECT cs.*, p.client_id, l.business_name AS client_name,
               s.shoot_id_code AS linked_shoot_code, s.project_campaign_name AS shoot_name,
-              s.shoot_date AS linked_shoot_date, s.city AS shoot_city
+              s.shoot_date AS linked_shoot_date, s.city AS shoot_city,
+              CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
        FROM content_calendar_shoots cs
        JOIN content_calendar_plans p ON p.id = cs.plan_id
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
+       LEFT JOIN users au ON au.id = cs.assigned_to
        WHERE cs.plan_id IN (?)
        ORDER BY cs.id ASC`,
       [planIds]
@@ -543,10 +547,12 @@ exports.calendarView = async (req, res) => {
 
     // Fetch ads for these plans that overlap with the month
     const [ads] = await db.query(
-      `SELECT ca.*, p.client_id, l.business_name AS client_name
+      `SELECT ca.*, p.client_id, l.business_name AS client_name,
+              CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
        FROM content_calendar_ads ca
        JOIN content_calendar_plans p ON p.id = ca.plan_id
        LEFT JOIN leads l ON l.id = p.client_id
+       LEFT JOIN users au ON au.id = ca.assigned_to
        WHERE ca.plan_id IN (?)
        ORDER BY ca.start_date ASC`,
       [planIds]

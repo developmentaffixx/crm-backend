@@ -38,6 +38,13 @@ router.get('/milestones', ctrl.authenticateClient, v2.getMilestones);
 router.put('/milestones/:id/celebrate', ctrl.authenticateClient, v2.celebrateMilestone);
 router.get('/behind-the-scenes', ctrl.authenticateClient, v2.getBehindTheScenes);
 
+// Content Calendar — client views shared calendar
+const calendarSlotsCtrl = require('../controllers/contentCalendarSlots.controller');
+router.get('/content-calendar', ctrl.authenticateClient, (req, res) => {
+  req.clientId = req.clientUser.client_id;
+  calendarSlotsCtrl.clientViewCalendar(req, res);
+});
+
 // ═══════════════════════════════════════════════════════════════
 // CRM-SIDE routes (requires CRM authentication)
 // ═══════════════════════════════════════════════════════════════
