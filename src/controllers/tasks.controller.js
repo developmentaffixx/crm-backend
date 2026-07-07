@@ -683,3 +683,108 @@ exports.getActivity = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK PINS (per-user, max 3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/tasks/pinned
+ * Returns the current user's pinned tasks (full task data).
+ */
+exports.getPinnedTasks = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT t.id, t.task_id_code, t.title, t.description, t.assigned_to, t.created_by,
+              t.start_date, t.deadline, t.priority, t.status, t.is_active,
+              t.created_at, t.updated_at,
+              CONCAT(u_assigned.first_name, ' ', u_assigned.last_name) AS assigned_to_name,
+              u_assigned.avatar_url AS assigned_to_avatar,
+              CONCAT(u_created.first_name, ' ', u_created.last_name) AS created_by_name,
+              tp.pinned_at
+       FROM task_pins tp
+       JOIN tasks t ON t.id = tp.task_id AND t.deleted = 0
+       LEFT JOIN users u_assigned ON u_assigned.id = t.assigned_to
+       LEFT JOIN users u_created ON u_created.id = t.created_by
+       WHERE tp.user_id = ?
+       ORDER BY tp.pinned_at DESC`,
+      [req.user.id]
+    );
+
+    return res.json({ pinned: rows });
+  } catch (err) {
+    console.error('Get pinned tasks error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/tasks/:id/pin
+ * Pin a task for the current user (max 3 pins).
+ */
+exports.pinTask = async (req, res) => {
+  try {
+    const taskId = req.params.id;
+
+    // Verify task exists
+    const [task] = await db.query('SELECT id FROM tasks WHERE id = ? AND deleted = 0', [taskId]);
+    if (task.length === 0) {
+      return res.status(404).json({ message: 'Task not found' });
+    }
+
+    // Check current pin count
+    const [[{ count }]] = await db.query(
+      'SELECT COUNT(*) AS count FROM task_pins WHERE user_id = ?',
+      [req.user.id]
+    );
+
+    if (count >= 3) {
+      return res.status(400).json({ message: 'Maximum 3 pinned tasks allowed. Unpin a task first.' });
+    }
+
+    // Check if already pinned
+    const [existing] = await db.query(
+      'SELECT id FROM task_pins WHERE user_id = ? AND task_id = ?',
+      [req.user.id, taskId]
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'Task is already pinned' });
+    }
+
+    await db.query(
+      'INSERT INTO task_pins (user_id, task_id) VALUES (?, ?)',
+      [req.user.id, taskId]
+    );
+
+    return res.json({ message: 'Task pinned', task_id: Number(taskId) });
+  } catch (err) {
+    console.error('Pin task error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/tasks/:id/pin
+ * Unpin a task for the current user.
+ */
+exports.unpinTask = async (req, res) => {
+  try {
+    const taskId = req.params.id;
+
+    const [result] = await db.query(
+      'DELETE FROM task_pins WHERE user_id = ? AND task_id = ?',
+      [req.user.id, taskId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: 'Pin not found' });
+    }
+
+    return res.json({ message: 'Task unpinned', task_id: Number(taskId) });
+  } catch (err) {
+    console.error('Unpin task error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};

@@ -10,6 +10,15 @@ router.use(authenticate);
 // GET  /api/tasks          — list tasks (filtered by role, paginated, searchable, sortable)
 router.get('/', tasksController.list);
 
+// GET  /api/tasks/pinned          — get current user's pinned tasks
+router.get('/pinned', tasksController.getPinnedTasks);
+
+// POST /api/tasks/:id/pin         — pin a task (max 3 per user)
+router.post('/:id/pin', param('id').isInt(), tasksController.pinTask);
+
+// DELETE /api/tasks/:id/pin       — unpin a task
+router.delete('/:id/pin', param('id').isInt(), tasksController.unpinTask);
+
 // GET  /api/tasks/my-active-timer — get current user's running timer (if any)
 router.get('/my-active-timer', async (req, res) => {
   try {
