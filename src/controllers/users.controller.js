@@ -311,20 +311,30 @@ exports.myLeaves = async (req, res) => {
  */
 exports.applyLeave = async (req, res) => {
   try {
-    const { leave_type, from_date, to_date, reason } = req.body;
+    const { leave_type, from_date, to_date, duration, reason } = req.body;
     if (!leave_type || !from_date || !to_date || !reason) {
       return res.status(400).json({ message: 'All fields are required' });
     }
 
+    const validDurations = ['full_day', 'first_half', 'second_half'];
+    const leaveDuration = validDurations.includes(duration) ? duration : 'full_day';
+
     const start = new Date(from_date);
     const end = new Date(to_date);
-    const days = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
+    const fullDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
 
-    if (days <= 0) return res.status(400).json({ message: 'Invalid date range' });
+    if (fullDays <= 0) return res.status(400).json({ message: 'Invalid date range' });
+
+    // Half-day is only valid for single-day leaves
+    if (leaveDuration !== 'full_day' && fullDays > 1) {
+      return res.status(400).json({ message: 'Half-day leave can only be applied for a single day' });
+    }
+
+    const days = leaveDuration !== 'full_day' ? 0.5 : fullDays;
 
     const [result] = await db.query(
-      `INSERT INTO leaves (user_id, leave_type, from_date, to_date, days, reason) VALUES (?, ?, ?, ?, ?, ?)`,
-      [req.user.id, leave_type, from_date, to_date, days, reason]
+      `INSERT INTO leaves (user_id, leave_type, from_date, to_date, duration, days, reason) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [req.user.id, leave_type, from_date, to_date, leaveDuration, days, reason]
     );
 
     return res.status(201).json({ message: 'Leave applied', id: result.insertId });
