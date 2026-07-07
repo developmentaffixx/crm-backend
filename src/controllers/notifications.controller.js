@@ -280,6 +280,89 @@ exports.getUnifiedNotifications = async (req, res) => {
       });
     }
 
+    // ─── 8. Content Calendar Slot Assignments ─────────────────────────────────────
+    try {
+      let slotWhere = "cp.slot_status IN ('picked_up','rejected') AND cp.assigned_to = ?";
+      const slotParams = [userId];
+
+      const [postSlots] = await db.query(
+        `SELECT cp.id, cp.format, cp.posting_date, cp.slot_status, cp.rejection_reason, cp.assigned_to,
+                p.plan_month, pr.title AS project_title
+         FROM content_calendar_posts cp
+         JOIN content_calendar_plans p ON p.id = cp.plan_id AND p.deleted = 0
+         LEFT JOIN projects pr ON pr.id = p.project_id
+         WHERE ${slotWhere}`,
+        slotParams
+      );
+
+      postSlots.forEach(r => {
+        notifications.push({
+          id: `slot-post-${r.id}`,
+          category: 'content_slot',
+          priority: r.slot_status === 'rejected' ? 'high' : 'medium',
+          title: r.slot_status === 'rejected' ? `Post Slot rejected — needs re-edit` : `Post Slot assigned to you`,
+          subtitle: r.project_title || 'Content Calendar',
+          message: r.slot_status === 'rejected' ? `❌ ${r.rejection_reason || 'Please re-edit'}` : `📝 ${(r.format || 'post').replace('_', ' ')} — ${r.posting_date ? r.posting_date.toISOString().split('T')[0] : ''}`,
+          link: '/social/content-calendar',
+          date: r.posting_date || new Date(),
+          days_overdue: 0,
+        });
+      });
+
+      const [shootSlots] = await db.query(
+        `SELECT cs.id, cs.shoot_date, cs.slot_status, cs.rejection_reason,
+                p.plan_month, pr.title AS project_title
+         FROM content_calendar_shoots cs
+         JOIN content_calendar_plans p ON p.id = cs.plan_id AND p.deleted = 0
+         LEFT JOIN projects pr ON pr.id = p.project_id
+         WHERE cs.slot_status IN ('picked_up','rejected') AND cs.assigned_to = ?`,
+        [userId]
+      );
+
+      shootSlots.forEach(r => {
+        notifications.push({
+          id: `slot-shoot-${r.id}`,
+          category: 'content_slot',
+          priority: r.slot_status === 'rejected' ? 'high' : 'medium',
+          title: r.slot_status === 'rejected' ? `Shoot Slot rejected — needs re-edit` : `Shoot Slot assigned to you`,
+          subtitle: r.project_title || 'Content Calendar',
+          message: r.slot_status === 'rejected' ? `❌ ${r.rejection_reason || 'Please re-edit'}` : `📸 Shoot — ${r.shoot_date ? r.shoot_date.toISOString().split('T')[0] : ''}`,
+          link: '/social/content-calendar',
+          date: r.shoot_date || new Date(),
+          days_overdue: 0,
+        });
+      });
+
+      const [adSlots] = await db.query(
+        `SELECT ca.id, ca.platform, ca.start_date, ca.slot_status, ca.rejection_reason,
+                p.plan_month, pr.title AS project_title
+         FROM content_calendar_ads ca
+         JOIN content_calendar_plans p ON p.id = ca.plan_id AND p.deleted = 0
+         LEFT JOIN projects pr ON pr.id = p.project_id
+         WHERE ca.slot_status IN ('picked_up','rejected') AND ca.assigned_to = ?`,
+        [userId]
+      );
+
+      adSlots.forEach(r => {
+        notifications.push({
+          id: `slot-ad-${r.id}`,
+          category: 'content_slot',
+          priority: r.slot_status === 'rejected' ? 'high' : 'medium',
+          title: r.slot_status === 'rejected' ? `Ad Slot rejected — needs re-edit` : `Ad Slot assigned to you`,
+          subtitle: r.project_title || 'Content Calendar',
+          message: r.slot_status === 'rejected' ? `❌ ${r.rejection_reason || 'Please re-edit'}` : `💰 Ad — ${r.platform || ''}`,
+          link: '/social/content-calendar',
+          date: r.start_date || new Date(),
+          days_overdue: 0,
+        });
+      });
+    } catch (slotErr) {
+      // Silently skip if slot columns don't exist yet
+      if (slotErr.code !== 'ER_BAD_FIELD_ERROR' && slotErr.code !== 'ER_NO_SUCH_TABLE') {
+        console.error('Slot notifications error:', slotErr.message);
+      }
+    }
+
     // ─── Sort: high priority first, then by date ────────────────────────────────
     const priorityOrder = { high: 0, medium: 1, low: 2 };
     notifications.sort((a, b) => {
@@ -302,6 +385,7 @@ exports.getUnifiedNotifications = async (req, res) => {
         leave_approval: notifications.filter(n => n.category === 'leave_approval').length,
         invoice_overdue: notifications.filter(n => n.category === 'invoice_overdue').length,
         announcement: notifications.filter(n => n.category === 'announcement').length,
+        content_slot: notifications.filter(n => n.category === 'content_slot').length,
       },
     };
 
