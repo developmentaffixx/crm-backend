@@ -18,6 +18,9 @@ router.get('/:afid',             ctrl.getOne);
 // PATCH /api/onboarding/:afid/status — update status (admin only)
 router.patch('/:afid/status',    requireAdmin, ctrl.updateStatus);
 
+// PATCH /api/onboarding/:afid/details — update section data (admin only)
+router.patch('/:afid/details',   requireAdmin, ctrl.updateDetails);
+
 // PATCH /api/onboarding/:afid       — update candidate name/email (admin only)
 router.patch('/:afid',           requireAdmin, ctrl.update);
 

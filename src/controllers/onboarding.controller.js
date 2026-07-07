@@ -329,6 +329,46 @@ exports.update = async (req, res) => {
   }
 };
 
+// ── PATCH /api/onboarding/:afid/details ──────────────────────────────────────
+exports.updateDetails = async (req, res) => {
+  try {
+    const { afid } = req.params;
+    const { section, data } = req.body;
+
+    const allowedSections = [
+      'applicant_data', 'personal_data', 'address_data',
+      'education_data', 'experience_data', 'emergency_data'
+    ];
+
+    if (!section || !allowedSections.includes(section)) {
+      return res.status(400).json({ message: 'Invalid section. Allowed: ' + allowedSections.join(', ') });
+    }
+    if (!data || typeof data !== 'object') {
+      return res.status(400).json({ message: 'Data object is required' });
+    }
+
+    // Check candidate exists
+    const [rows] = await db.query(
+      `SELECT id FROM pillars_candidate_details WHERE afid = ? AND deleted = 0`,
+      [afid]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Candidate details not found' });
+    }
+
+    // Update the specific section (stored as JSON)
+    await db.query(
+      `UPDATE pillars_candidate_details SET ${section} = ?, updated_at = NOW() WHERE afid = ? AND deleted = 0`,
+      [JSON.stringify(data), afid]
+    );
+
+    return res.json({ message: 'Details updated successfully', section });
+  } catch (err) {
+    console.error('onboarding updateDetails error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ── POST /api/onboarding/:afid/extend ────────────────────────────────────────
 exports.extendAccess = async (req, res) => {
   try {
