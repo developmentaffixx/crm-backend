@@ -117,6 +117,59 @@ exports.approve = async (req, res) => {
 };
 
 /**
+ * POST /api/leaves/admin-apply
+ * Admin applies leave on behalf of an employee (auto-approved, allows past dates)
+ */
+exports.adminApply = async (req, res) => {
+  try {
+    const { user_id, leave_type, from_date, to_date, duration, reason } = req.body;
+    if (!user_id || !leave_type || !from_date || !to_date || !reason) {
+      return res.status(400).json({ message: 'All fields are required' });
+    }
+
+    // Validate user exists
+    const [users] = await db.query('SELECT id FROM users WHERE id = ? AND deleted = 0', [user_id]);
+    if (!users.length) return res.status(404).json({ message: 'Employee not found' });
+
+    const validDurations = ['full_day', 'first_half', 'second_half'];
+    const leaveDuration = validDurations.includes(duration) ? duration : 'full_day';
+
+    const start = new Date(from_date);
+    const end = new Date(to_date);
+    const fullDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
+
+    if (fullDays <= 0) return res.status(400).json({ message: 'Invalid date range' });
+
+    if (leaveDuration !== 'full_day' && fullDays > 1) {
+      return res.status(400).json({ message: 'Half-day leave can only be applied for a single day' });
+    }
+
+    const days = leaveDuration !== 'full_day' ? 0.5 : fullDays;
+
+    // Insert as approved directly
+    const [result] = await db.query(
+      `INSERT INTO leaves (user_id, leave_type, from_date, to_date, duration, days, reason, status, approved_by, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, NOW())`,
+      [user_id, leave_type, from_date, to_date, leaveDuration, days, reason, req.user.id]
+    );
+
+    // Update leave balance
+    await db.query(
+      `INSERT INTO leave_balances (user_id, leave_type, total, used, year)
+       VALUES (?, ?, 12, ?, YEAR(?))
+       ON DUPLICATE KEY UPDATE used = used + ?`,
+      [user_id, leave_type === 'unpaid' ? 'casual' : leave_type, days, from_date, days]
+    );
+
+    res.emitSocket('leaves:updated', { id: result.insertId, status: 'approved' });
+    return res.status(201).json({ message: 'Leave applied and approved successfully', id: result.insertId });
+  } catch (err) {
+    console.error('Admin apply leave error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * PUT /api/leaves/:id/reject
  * Admin rejects a leave
  */

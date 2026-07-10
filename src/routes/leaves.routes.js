@@ -11,6 +11,9 @@ router.get('/', ctrl.list);
 // Stats (admin only)
 router.get('/stats', requireAdmin, ctrl.stats);
 
+// Admin apply leave on behalf of employee (auto-approved, past dates allowed)
+router.post('/admin-apply', requireAdmin, ctrl.adminApply);
+
 // Approve / Reject (admin only)
 router.put('/:id/approve', requireAdmin, ctrl.approve);
 router.put('/:id/reject', requireAdmin, ctrl.reject);
