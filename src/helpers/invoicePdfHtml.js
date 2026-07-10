@@ -74,15 +74,8 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
       <span>- ₹${formatINR(invoice.discount)}</span>
     </div>` : '';
 
-  // Status watermark
+  // Status watermark removed for consistent design across all views
   let statusStamp = '';
-  if (invoice.status === 'Paid') {
-    statusStamp = '<div class="status-stamp" style="color:#16a34a;border-color:#16a34a;">Paid</div>';
-  } else if (invoice.status === 'Partial') {
-    statusStamp = '<div class="status-stamp" style="color:#d97706;border-color:#d97706;font-size:36px;">Partially Paid</div>';
-  } else if (invoice.status === 'Overdue') {
-    statusStamp = '<div class="status-stamp" style="color:#dc2626;border-color:#dc2626;">Overdue</div>';
-  }
 
   // Logo
   const logoHtml = logoBase64
