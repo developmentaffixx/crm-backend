@@ -597,39 +597,66 @@ exports.pendingCount = async (req, res) => {
     const userId = req.user.id;
 
     // Unread SMM notifications count
-    const [unread] = await db.query(
-      `SELECT COUNT(*) AS count FROM smm_notifications WHERE user_id = ? AND is_read = 0`,
-      [userId]
-    );
+    let unreadCount = 0;
+    try {
+      const [unread] = await db.query(
+        `SELECT COUNT(*) AS count FROM smm_notifications WHERE user_id = ? AND is_read = 0`,
+        [userId]
+      );
+      unreadCount = unread[0]?.count || 0;
+    } catch (e) {
+      // Table may not exist yet
+    }
 
     // Pending approval count (for admin/SMM leads)
     let pendingApproval = 0;
-    if (req.user.is_admin || req.socialAccessLevel >= 2) {
-      const [pc] = await db.query(
-        `SELECT 
-          (SELECT COUNT(*) FROM content_calendar_posts cp JOIN content_calendar_plans p ON p.id = cp.plan_id WHERE cp.slot_status = 'submitted' AND p.deleted = 0) +
-          (SELECT COUNT(*) FROM content_calendar_shoots cs JOIN content_calendar_plans p ON p.id = cs.plan_id WHERE cs.slot_status = 'submitted' AND p.deleted = 0) +
-          (SELECT COUNT(*) FROM content_calendar_ads ca JOIN content_calendar_plans p ON p.id = ca.plan_id WHERE ca.slot_status = 'submitted' AND p.deleted = 0)
-          AS total`
-      );
-      pendingApproval = pc[0]?.total || 0;
+    if (req.user.is_admin || (req.socialAccessLevel && req.socialAccessLevel >= 2)) {
+      try {
+        const [pc] = await db.query(
+          `SELECT 
+            (SELECT COUNT(*) FROM content_calendar_posts cp JOIN content_calendar_plans p ON p.id = cp.plan_id WHERE cp.slot_status = 'submitted' AND p.deleted = 0) +
+            (SELECT COUNT(*) FROM content_calendar_shoots cs JOIN content_calendar_plans p ON p.id = cs.plan_id WHERE cs.slot_status = 'submitted' AND p.deleted = 0) +
+            (SELECT COUNT(*) FROM content_calendar_ads ca JOIN content_calendar_plans p ON p.id = ca.plan_id WHERE ca.slot_status = 'submitted' AND p.deleted = 0)
+            AS total`
+        );
+        pendingApproval = pc[0]?.total || 0;
+      } catch (e) {
+        // Columns may not exist yet
+      }
     }
 
-    // My assigned pending work
-    const [myPending] = await db.query(
-      `SELECT 
-        (SELECT COUNT(*) FROM content_calendar_posts WHERE assigned_to = ? AND slot_status IN ('assigned','rejected')) +
-        (SELECT COUNT(*) FROM content_calendar_shoots WHERE assigned_to = ? AND slot_status IN ('assigned','rejected')) +
-        (SELECT COUNT(*) FROM content_calendar_ads WHERE assigned_to = ? AND slot_status IN ('assigned','rejected'))
-        AS total`,
-      [userId, userId, userId]
-    );
+    // My assigned pending work (slots assigned to me or rejected back to me)
+    let myPending = 0;
+    try {
+      const [mp] = await db.query(
+        `SELECT 
+          (SELECT COUNT(*) FROM content_calendar_posts WHERE assigned_to = ? AND slot_status IN ('assigned','rejected')) +
+          (SELECT COUNT(*) FROM content_calendar_shoots WHERE assigned_to = ? AND slot_status IN ('assigned','rejected')) +
+          (SELECT COUNT(*) FROM content_calendar_ads WHERE assigned_to = ? AND slot_status IN ('assigned','rejected'))
+          AS total`,
+        [userId, userId, userId]
+      );
+      myPending = mp[0]?.total || 0;
+    } catch (e) {
+      // Fallback: try old enum values
+      try {
+        const [mp] = await db.query(
+          `SELECT 
+            (SELECT COUNT(*) FROM content_calendar_posts WHERE assigned_to = ? AND slot_status IN ('picked_up','rejected')) +
+            (SELECT COUNT(*) FROM content_calendar_shoots WHERE assigned_to = ? AND slot_status IN ('picked_up','rejected')) +
+            (SELECT COUNT(*) FROM content_calendar_ads WHERE assigned_to = ? AND slot_status IN ('picked_up','rejected'))
+            AS total`,
+          [userId, userId, userId]
+        );
+        myPending = mp[0]?.total || 0;
+      } catch (e2) { /* ignore */ }
+    }
 
     return res.json({
-      unread_notifications: unread[0]?.count || 0,
+      unread_notifications: unreadCount,
       pending_approval: pendingApproval,
-      my_pending_work: myPending[0]?.total || 0,
-      total_badge: (unread[0]?.count || 0),
+      my_pending_work: myPending,
+      total_badge: unreadCount + myPending,
     });
   } catch (err) {
     console.error('Pending count error:', err);

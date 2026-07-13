@@ -5,6 +5,13 @@ const { requireSocialAccess } = require('../middleware/socialAccess');
 const controller = require('../controllers/contentCalendarSlots.controller');
 
 router.use(authenticate);
+
+// These routes don't need social access check (badge + notifications for any user)
+router.get('/pending-count', controller.pendingCount);
+router.get('/notifications', controller.getSmmNotifications);
+router.put('/notifications/read', controller.markNotificationRead);
+
+// All other routes require content_calendar access
 router.use(requireSocialAccess('content_calendar'));
 
 // GET  /api/content-calendar-slots              — list slots (with filters)
@@ -27,15 +34,6 @@ router.put('/complete', controller.completeSlot);
 
 // PUT  /api/content-calendar-slots/bulk-approve — bulk approve multiple slots
 router.put('/bulk-approve', controller.bulkApprove);
-
-// GET  /api/content-calendar-slots/pending-count — badge counts
-router.get('/pending-count', controller.pendingCount);
-
-// GET  /api/content-calendar-slots/notifications — get SMM notifications
-router.get('/notifications', controller.getSmmNotifications);
-
-// PUT  /api/content-calendar-slots/notifications/read — mark as read
-router.put('/notifications/read', controller.markNotificationRead);
 
 // POST /api/content-calendar-slots/share        — share calendar with client
 router.post('/share', controller.shareWithClient);
