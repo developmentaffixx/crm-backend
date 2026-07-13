@@ -190,16 +190,16 @@ exports.create = async (req, res) => {
       if (proj.length > 0) resolvedClientId = proj[0].client_id;
     }
 
-    // Check for duplicate project+cycle
+    // Check for duplicate project+cycle — reuse existing plan if found
+    let planId = null;
+
     if (cycle_id) {
       const [existing] = await conn.query(
         'SELECT id FROM content_calendar_plans WHERE cycle_id = ? AND deleted = 0',
         [cycle_id]
       );
       if (existing.length > 0) {
-        await conn.rollback();
-        conn.release();
-        return res.status(400).json({ message: 'A plan already exists for this cycle' });
+        planId = existing[0].id;
       }
     } else {
       // Legacy: check for duplicate project+month
@@ -208,20 +208,31 @@ exports.create = async (req, res) => {
         [project_id || null, plan_month]
       );
       if (existing.length > 0) {
-        await conn.rollback();
-        conn.release();
-        return res.status(400).json({ message: 'A plan already exists for this project and month' });
+        planId = existing[0].id;
       }
     }
 
-    const [result] = await conn.query(
-      `INSERT INTO content_calendar_plans 
-        (client_id, project_id, cycle_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
-      [resolvedClientId, project_id || null, cycle_id || null, plan_month, toNull(primary_goal), toNull(target_audience), toNull(budget_allocation), toNull(hero_offer), req.user.id]
-    );
-
-    const planId = result.insertId;
+    // Create new plan only if none exists
+    if (!planId) {
+      const [result] = await conn.query(
+        `INSERT INTO content_calendar_plans 
+          (client_id, project_id, cycle_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)`,
+        [resolvedClientId, project_id || null, cycle_id || null, plan_month, toNull(primary_goal), toNull(target_audience), toNull(budget_allocation), toNull(hero_offer), req.user.id]
+      );
+      planId = result.insertId;
+    } else {
+      // Update plan fields if provided
+      const updateFields = [];
+      const updateVals = [];
+      if (primary_goal) { updateFields.push('primary_goal = ?'); updateVals.push(primary_goal); }
+      if (target_audience) { updateFields.push('target_audience = ?'); updateVals.push(target_audience); }
+      if (budget_allocation) { updateFields.push('budget_allocation = ?'); updateVals.push(budget_allocation); }
+      if (hero_offer) { updateFields.push('hero_offer = ?'); updateVals.push(hero_offer); }
+      if (updateFields.length > 0) {
+        await conn.query(`UPDATE content_calendar_plans SET ${updateFields.join(', ')} WHERE id = ?`, [...updateVals, planId]);
+      }
+    }
 
     // Insert posts
     if (posts && posts.length > 0) {
