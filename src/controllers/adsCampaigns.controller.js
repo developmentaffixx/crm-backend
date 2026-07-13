@@ -129,6 +129,56 @@ exports.update = async (req, res) => {
       await db.query(`UPDATE ad_campaigns SET ${setClauses} WHERE id = ?`, [...Object.values(updates), req.params.id]);
     }
 
+    // ─── Sync to calendar slot when status changes ────────────────────────────
+    const campaign = existing[0];
+    if (campaign.calendar_slot_id && updates.status) {
+      if (updates.status === 'pending_approval') {
+        // Submitted for review
+        await db.query(
+          `UPDATE content_calendar_ads SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+          [campaign.calendar_slot_id]
+        );
+        res.emitSocket('content-calendar:slot-submitted', { item_type: 'ad', item_id: campaign.calendar_slot_id });
+
+        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_ads WHERE id = ?', [campaign.calendar_slot_id]);
+        if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+          await db.query(
+            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+             VALUES (?, ?, 'slot_submitted', 'ad', ?, 'Ad slot submitted for approval', 'Campaign details filled. Please review.', '/social/content-calendar')`,
+            [slotInfo[0].assigned_by, req.user.id, campaign.calendar_slot_id]
+          );
+          res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+        }
+      } else if (updates.status === 'approved' || updates.status === 'active') {
+        await db.query(
+          `UPDATE content_calendar_ads SET slot_status = 'approved', approved_at = NOW(), approved_by = ?, rejection_reason = NULL WHERE id = ?`,
+          [req.user.id, campaign.calendar_slot_id]
+        );
+        if (campaign.created_by) {
+          await db.query(
+            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+             VALUES (?, ?, 'slot_approved', 'ad', ?, 'Your ad slot was approved! 🎉', 'Campaign is now live.', '/social/ads-planning')`,
+            [campaign.created_by, req.user.id, campaign.calendar_slot_id]
+          );
+          res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_approved' });
+        }
+      } else if (updates.status === 'rejected') {
+        await db.query(
+          `UPDATE content_calendar_ads SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
+          [updates.notes || 'Rejected', campaign.calendar_slot_id]
+        );
+        if (campaign.created_by) {
+          await db.query(
+            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+             VALUES (?, ?, 'slot_rejected', 'ad', ?, 'Your ad slot was rejected', ?, '/social/ads-planning')`,
+            [campaign.created_by, req.user.id, campaign.calendar_slot_id, `Reason: ${updates.notes || 'Please re-edit'}`]
+          );
+          res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_rejected' });
+        }
+      }
+      res.emitSocket('content-calendar:updated', { slot_id: campaign.calendar_slot_id });
+    }
+
     const [updated] = await db.query('SELECT * FROM ad_campaigns WHERE id = ?', [req.params.id]);
     res.emitSocket('ads:updated', updated[0]);
     return res.json(updated[0]);

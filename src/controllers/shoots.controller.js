@@ -264,6 +264,26 @@ exports.update = async (req, res) => {
     const values = [...Object.values(updates), req.params.id];
     await db.query(`UPDATE shoots SET ${setClauses} WHERE id = ?`, values);
 
+    // ─── Sync to calendar slot: submit when shoot details are filled ──────────
+    if (shoot.calendar_slot_id && (shoot.status === 'rejected' || updates.status === 'pending_approval')) {
+      await db.query(
+        `UPDATE content_calendar_shoots SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+        [shoot.calendar_slot_id]
+      );
+      res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: shoot.calendar_slot_id });
+
+      // Notify the assigner
+      const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_shoots WHERE id = ?', [shoot.calendar_slot_id]);
+      if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+        await db.query(
+          `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+           VALUES (?, ?, 'slot_submitted', 'shoot', ?, 'Shoot slot submitted for approval', 'Shoot details filled. Please review.', '/social/content-calendar')`,
+          [slotInfo[0].assigned_by, req.user.id, shoot.calendar_slot_id]
+        );
+        res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+      }
+    }
+
     const [updated] = await db.query(
       `SELECT s.*, l.business_name AS client_brand_name,
               CONCAT(um.first_name, ' ', um.last_name) AS shoot_manager_name
@@ -287,8 +307,8 @@ exports.update = async (req, res) => {
  */
 exports.approve = async (req, res) => {
   try {
-    if (!req.user.is_admin) {
-      return res.status(403).json({ message: 'Only admin can approve/reject' });
+    if (!req.user.is_admin && req.socialAccessLevel < 2) {
+      return res.status(403).json({ message: 'Only admin or SMM leads can approve/reject' });
     }
 
     const [rows] = await db.query('SELECT * FROM shoots WHERE id = ? AND deleted = 0', [req.params.id]);
@@ -308,6 +328,38 @@ exports.approve = async (req, res) => {
         `UPDATE shoots SET status = ?, approved_by = ?, approved_at = NOW(), approval_remarks = ? WHERE id = ?`,
         [newStatus, req.user.id, remarks || null, req.params.id]
       );
+
+      // ─── Sync to calendar slot ──────────────────────────────────────────────
+      if (shoot.calendar_slot_id) {
+        if (action === 'approve') {
+          await db.query(
+            `UPDATE content_calendar_shoots SET slot_status = 'approved', approved_at = NOW(), approved_by = ?, rejection_reason = NULL WHERE id = ?`,
+            [req.user.id, shoot.calendar_slot_id]
+          );
+          if (shoot.created_by) {
+            await db.query(
+              `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+               VALUES (?, ?, 'slot_approved', 'shoot', ?, 'Your shoot slot was approved! 🎉', 'Shoot is now live on the calendar.', '/social/shoots')`,
+              [shoot.created_by, req.user.id, shoot.calendar_slot_id]
+            );
+            res.emitSocket('smm:notification', { user_id: shoot.created_by, type: 'slot_approved' });
+          }
+        } else {
+          await db.query(
+            `UPDATE content_calendar_shoots SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
+            [remarks || 'Rejected', shoot.calendar_slot_id]
+          );
+          if (shoot.created_by) {
+            await db.query(
+              `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+               VALUES (?, ?, 'slot_rejected', 'shoot', ?, 'Your shoot slot was rejected', ?, '/social/shoots')`,
+              [shoot.created_by, req.user.id, shoot.calendar_slot_id, `Reason: ${remarks || 'Please re-edit'}`]
+            );
+            res.emitSocket('smm:notification', { user_id: shoot.created_by, type: 'slot_rejected' });
+          }
+        }
+        res.emitSocket('content-calendar:updated', { slot_id: shoot.calendar_slot_id });
+      }
     }
     // Stage 2: pending_completion (close request approval)
     else if (shoot.status === 'pending_completion') {

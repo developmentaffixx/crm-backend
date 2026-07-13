@@ -219,6 +219,30 @@ exports.update = async (req, res) => {
     const values = [...Object.values(updates), req.params.id];
     await db.query(`UPDATE content_write_requests SET ${setClauses} WHERE id = ?`, values);
 
+    // ─── Sync to calendar slot: auto-submit when content is filled ────────────
+    if (request.calendar_slot_id) {
+      const newStatus = updates.status || request.status;
+      if (newStatus === 'pending') {
+        // Content was filled/re-submitted → mark slot as submitted
+        await db.query(
+          `UPDATE content_calendar_posts SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+          [request.calendar_slot_id]
+        );
+        res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: request.calendar_slot_id });
+
+        // Notify the assigner
+        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [request.calendar_slot_id]);
+        if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+          await db.query(
+            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+             VALUES (?, ?, 'slot_submitted', 'post', ?, 'Post slot submitted for approval', 'Content has been filled and submitted.', '/social/content-calendar')`,
+            [slotInfo[0].assigned_by, req.user.id, request.calendar_slot_id]
+          );
+          res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+        }
+      }
+    }
+
     const [updated] = await db.query(
       `SELECT cwr.*, l.business_name AS client_brand_name, p.title AS project_title
        FROM content_write_requests cwr
@@ -241,8 +265,8 @@ exports.update = async (req, res) => {
  */
 exports.approve = async (req, res) => {
   try {
-    if (!req.user.is_admin) {
-      return res.status(403).json({ message: 'Only admin can approve/reject requests' });
+    if (!req.user.is_admin && req.socialAccessLevel < 2) {
+      return res.status(403).json({ message: 'Only admin or SMM leads can approve/reject requests' });
     }
 
     const [rows] = await db.query('SELECT * FROM content_write_requests WHERE id = ? AND deleted = 0', [req.params.id]);
@@ -262,6 +286,41 @@ exports.approve = async (req, res) => {
        WHERE id = ?`,
       [newStatus, admin_remarks || null, req.user.id, req.params.id]
     );
+
+    // ─── Sync to calendar slot ────────────────────────────────────────────────
+    const request = rows[0];
+    if (request.calendar_slot_id) {
+      if (action === 'approve') {
+        await db.query(
+          `UPDATE content_calendar_posts SET slot_status = 'approved', approved_at = NOW(), approved_by = ?, rejection_reason = NULL WHERE id = ?`,
+          [req.user.id, request.calendar_slot_id]
+        );
+        // Notify assignee
+        if (request.created_by) {
+          await db.query(
+            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+             VALUES (?, ?, 'slot_approved', 'post', ?, 'Your post slot was approved! 🎉', 'Your content is now live on the calendar.', '/social/write-content')`,
+            [request.created_by, req.user.id, request.calendar_slot_id]
+          );
+          res.emitSocket('smm:notification', { user_id: request.created_by, type: 'slot_approved' });
+        }
+      } else {
+        await db.query(
+          `UPDATE content_calendar_posts SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
+          [admin_remarks || 'Rejected', request.calendar_slot_id]
+        );
+        // Notify assignee
+        if (request.created_by) {
+          await db.query(
+            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+             VALUES (?, ?, 'slot_rejected', 'post', ?, 'Your post slot was rejected', ?, '/social/write-content')`,
+            [request.created_by, req.user.id, request.calendar_slot_id, `Reason: ${admin_remarks || 'Please re-edit'}`]
+          );
+          res.emitSocket('smm:notification', { user_id: request.created_by, type: 'slot_rejected' });
+        }
+      }
+      res.emitSocket('content-calendar:updated', { slot_id: request.calendar_slot_id });
+    }
 
     const [updated] = await db.query(
       `SELECT cwr.*, l.business_name AS client_brand_name,

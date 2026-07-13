@@ -10,23 +10,32 @@ router.use(requireSocialAccess('content_calendar'));
 // GET  /api/content-calendar-slots              — list slots (with filters)
 router.get('/', controller.listSlots);
 
-// POST /api/content-calendar-slots/pickup       — pick up an open slot
-router.post('/pickup', controller.pickupSlot);
+// POST /api/content-calendar-slots/assign       — assign a slot to a user (admin/SMM)
+router.post('/assign', controller.assignSlot);
 
-// PUT  /api/content-calendar-slots/fill         — fill a slot and submit for approval
-router.put('/fill', controller.fillSlot);
+// PUT  /api/content-calendar-slots/submit       — submit filled slot for approval
+router.put('/submit', controller.submitSlot);
 
-// PUT  /api/content-calendar-slots/approve      — admin approves a slot
+// PUT  /api/content-calendar-slots/approve      — approve a submitted slot
 router.put('/approve', controller.approveSlot);
 
-// PUT  /api/content-calendar-slots/reject       — admin rejects a slot (with reason)
+// PUT  /api/content-calendar-slots/reject       — reject a slot (with reason)
 router.put('/reject', controller.rejectSlot);
 
-// PUT  /api/content-calendar-slots/bulk-approve — admin bulk approves multiple slots
+// PUT  /api/content-calendar-slots/complete     — mark approved slot as completed
+router.put('/complete', controller.completeSlot);
+
+// PUT  /api/content-calendar-slots/bulk-approve — bulk approve multiple slots
 router.put('/bulk-approve', controller.bulkApprove);
 
-// GET  /api/content-calendar-slots/pending-count — count of pending approvals (admin)
+// GET  /api/content-calendar-slots/pending-count — badge counts
 router.get('/pending-count', controller.pendingCount);
+
+// GET  /api/content-calendar-slots/notifications — get SMM notifications
+router.get('/notifications', controller.getSmmNotifications);
+
+// PUT  /api/content-calendar-slots/notifications/read — mark as read
+router.put('/notifications/read', controller.markNotificationRead);
 
 // POST /api/content-calendar-slots/share        — share calendar with client
 router.post('/share', controller.shareWithClient);
