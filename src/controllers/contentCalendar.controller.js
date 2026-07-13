@@ -758,25 +758,11 @@ exports.reschedule = async (req, res) => {
     }
 
     if (item_type === 'post') {
-      // Validate that the new date falls within the plan's month
       const [postRows] = await db.query(
-        `SELECT cp.plan_id, p.plan_month
-         FROM content_calendar_posts cp
-         JOIN content_calendar_plans p ON p.id = cp.plan_id
-         WHERE cp.id = ?`,
+        `SELECT cp.plan_id FROM content_calendar_posts cp WHERE cp.id = ?`,
         [item_id]
       );
       if (postRows.length === 0) return res.status(404).json({ message: 'Post not found' });
-
-      const planMonth = postRows[0].plan_month;
-      if (planMonth) {
-        const planDate = new Date(planMonth);
-        const planMonthStr = `${planDate.getFullYear()}-${String(planDate.getMonth() + 1).padStart(2, '0')}`;
-        const newDateMonth = new_date.substring(0, 7);
-        if (planMonthStr !== newDateMonth) {
-          return res.status(400).json({ message: `Cannot reschedule outside the plan month (${planMonthStr}). Update the plan to move to a different month.` });
-        }
-      }
 
       await db.query(
         'UPDATE content_calendar_posts SET posting_date = ? WHERE id = ?',
