@@ -239,11 +239,11 @@ exports.create = async (req, res) => {
       for (const post of posts) {
         await conn.query(
           `INSERT INTO content_calendar_posts 
-            (plan_id, assigned_to, linked_brief_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status, slot_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [planId, post.assigned_to || null, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform),
+            (plan_id, assigned_to, assigned_by, linked_brief_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status, slot_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [planId, post.assigned_to || null, post.assigned_to ? req.user.id : null, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform),
            toNull(post.format), toNull(post.topic), post.ad_target || 'organic',
-           toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta), post.status || 'planned', post.slot_status || (post.assigned_to ? 'picked_up' : 'open')]
+           toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta), post.status || 'planned', post.slot_status || (post.assigned_to ? 'assigned' : 'open')]
         );
       }
     }
@@ -253,11 +253,11 @@ exports.create = async (req, res) => {
       for (const shoot of shoots) {
         await conn.query(
           `INSERT INTO content_calendar_shoots 
-            (plan_id, assigned_to, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status, slot_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [planId, shoot.assigned_to || null, toInt(shoot.linked_shoot_id), toNull(shoot.shoot_date), toNull(shoot.location),
+            (plan_id, assigned_to, assigned_by, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status, slot_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [planId, shoot.assigned_to || null, shoot.assigned_to ? req.user.id : null, toInt(shoot.linked_shoot_id), toNull(shoot.shoot_date), toNull(shoot.location),
            toNull(shoot.description), shoot.num_videos || 0, shoot.num_photos || 0,
-           toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned', shoot.slot_status || (shoot.assigned_to ? 'picked_up' : 'open')]
+           toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned', shoot.slot_status || (shoot.assigned_to ? 'assigned' : 'open')]
         );
       }
     }
@@ -295,10 +295,10 @@ exports.create = async (req, res) => {
 
         await conn.query(
           `INSERT INTO content_calendar_ads 
-            (plan_id, linked_campaign_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [planId, linkedCampaignId, adNo, creativeName, campaignObjective, platform,
-           adStatus, targetAudience, budget, startDate, endDate, expectedOutcomes]
+            (plan_id, assigned_to, assigned_by, linked_campaign_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes, slot_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [planId, ad.assigned_to || null, ad.assigned_to ? req.user.id : null, linkedCampaignId, adNo, creativeName, campaignObjective, platform,
+           adStatus, targetAudience, budget, startDate, endDate, expectedOutcomes, ad.slot_status || (ad.assigned_to ? 'assigned' : 'open')]
         );
 
         // Update the ad_campaign with the linked calendar ad reference
@@ -309,6 +309,39 @@ exports.create = async (req, res) => {
     }
 
     await conn.commit();
+
+    // Create notifications for assigned slots
+    try {
+      // Fetch newly created slots that are assigned
+      const [assignedPosts] = await conn.query(
+        'SELECT id, assigned_to FROM content_calendar_posts WHERE plan_id = ? AND assigned_to IS NOT NULL',
+        [planId]
+      );
+      const [assignedShoots] = await conn.query(
+        'SELECT id, assigned_to FROM content_calendar_shoots WHERE plan_id = ? AND assigned_to IS NOT NULL',
+        [planId]
+      );
+      const [assignedAds] = await conn.query(
+        'SELECT id, assigned_to FROM content_calendar_ads WHERE plan_id = ? AND assigned_to IS NOT NULL',
+        [planId]
+      );
+
+      const notifs = [];
+      assignedPosts.forEach(s => notifs.push([s.assigned_to, req.user.id, 'slot_assigned', 'post', s.id, 'New post slot assigned to you', 'Fill the content details on Write Content page.', '/social/write-content']));
+      assignedShoots.forEach(s => notifs.push([s.assigned_to, req.user.id, 'slot_assigned', 'shoot', s.id, 'New shoot slot assigned to you', 'Fill shoot details on Shoots page.', '/social/shoots']));
+      assignedAds.forEach(s => notifs.push([s.assigned_to, req.user.id, 'slot_assigned', 'ad', s.id, 'New ad slot assigned to you', 'Fill campaign details on Ads page.', '/social/ads']));
+
+      for (const n of notifs) {
+        await conn.query(
+          `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          n
+        );
+        res.emitSocket('smm:notification', { user_id: n[0], type: 'slot_assigned' });
+      }
+    } catch (notifErr) {
+      // Non-critical — don't fail if notifications table doesn't exist yet
+      console.log('Notification creation skipped:', notifErr.message);
+    }
 
     // Fetch full plan
     const [plans] = await conn.query(
