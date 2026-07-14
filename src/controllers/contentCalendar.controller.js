@@ -34,12 +34,16 @@ exports.list = async (req, res) => {
     if (status) { where += ' AND p.status = ?'; params.push(status); }
 
     if (!req.user.is_admin) {
-      where += ` AND (p.created_by = ? OR p.id IN (
-        SELECT plan_id FROM content_calendar_posts WHERE assigned_to = ?
-        UNION SELECT plan_id FROM content_calendar_shoots WHERE assigned_to = ?
-        UNION SELECT plan_id FROM content_calendar_ads WHERE assigned_to = ?
-      ))`;
-      params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+      if (req.socialAccessLevel >= 2) {
+        // SMM lead with full access — see all plans (no extra filter)
+      } else {
+        where += ` AND (p.created_by = ? OR p.id IN (
+          SELECT plan_id FROM content_calendar_posts WHERE assigned_to = ?
+          UNION SELECT plan_id FROM content_calendar_shoots WHERE assigned_to = ?
+          UNION SELECT plan_id FROM content_calendar_ads WHERE assigned_to = ?
+        ))`;
+        params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+      }
     }
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -129,7 +133,21 @@ exports.getOne = async (req, res) => {
     const plan = plans[0];
 
     if (!req.user.is_admin && plan.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+      // Allow if user is assigned to any slot in this plan or has full social access
+      if (req.socialAccessLevel >= 2) {
+        // SMM lead — allow
+      } else {
+        const [assigned] = await db.query(
+          `SELECT 1 FROM content_calendar_posts WHERE plan_id = ? AND assigned_to = ?
+           UNION SELECT 1 FROM content_calendar_shoots WHERE plan_id = ? AND assigned_to = ?
+           UNION SELECT 1 FROM content_calendar_ads WHERE plan_id = ? AND assigned_to = ?
+           LIMIT 1`,
+          [plan.id, req.user.id, plan.id, req.user.id, plan.id, req.user.id]
+        );
+        if (assigned.length === 0) {
+          return res.status(403).json({ message: 'Access denied' });
+        }
+      }
     }
 
     // Fetch children
