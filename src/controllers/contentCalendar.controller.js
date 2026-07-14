@@ -795,12 +795,6 @@ exports.reschedule = async (req, res) => {
       return res.status(400).json({ message: 'new_date is required' });
     }
 
-    // Validate new_date is not in the past
-    const today = new Date().toISOString().split('T')[0];
-    if (new_date < today) {
-      return res.status(400).json({ message: 'Cannot reschedule to a past date' });
-    }
-
     if (item_type === 'post') {
       const [postRows] = await db.query(
         `SELECT cp.plan_id FROM content_calendar_posts cp WHERE cp.id = ?`,
