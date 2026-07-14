@@ -3,7 +3,7 @@ const router  = express.Router();
 const { body, param } = require('express-validator');
 const multer  = require('multer');
 const path    = require('path');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requireAdmin } = require('../middleware/auth');
 const ticketsController = require('../controllers/tickets.controller');
 
 // Multer config for ticket attachments
@@ -120,6 +120,56 @@ router.delete(
   '/:id/attachments/:attachmentId',
   [param('id').isInt(), param('attachmentId').isInt()],
   ticketsController.removeAttachment
+);
+
+// ── Mark as Done / Approve / Reject ──────────────────────────────────────────
+
+// POST /api/tickets/:id/mark-done  — assigned user or reporter marks ticket done (pending approval)
+router.post('/:id/mark-done', param('id').isInt(), ticketsController.markDone);
+
+// POST /api/tickets/:id/approve-done  — admin approves completion
+router.post('/:id/approve-done', param('id').isInt(), requireAdmin, ticketsController.approveDone);
+
+// POST /api/tickets/:id/reject-done   — admin rejects completion
+router.post('/:id/reject-done', param('id').isInt(), requireAdmin, ticketsController.rejectDone);
+
+// ── Deadline Extension Requests ──────────────────────────────────────────────
+
+// GET /api/tickets/:id/extension-requests — list extension requests for a ticket
+router.get('/:id/extension-requests', param('id').isInt(), ticketsController.getExtensionRequests);
+
+// POST /api/tickets/:id/extension-request — create new extension request
+router.post(
+  '/:id/extension-request',
+  [
+    param('id').isInt(),
+    body('requested_deadline').isDate().withMessage('requested_deadline (YYYY-MM-DD) required'),
+    body('reason').notEmpty().withMessage('reason required'),
+  ],
+  ticketsController.createExtensionRequest
+);
+
+// POST /api/tickets/:id/extension-request/:extId/approve  (admin)
+router.post(
+  '/:id/extension-request/:extId/approve',
+  [param('id').isInt(), param('extId').isInt()],
+  requireAdmin,
+  ticketsController.approveExtensionRequest
+);
+
+// POST /api/tickets/:id/extension-request/:extId/reject   (admin)
+router.post(
+  '/:id/extension-request/:extId/reject',
+  [param('id').isInt(), param('extId').isInt()],
+  requireAdmin,
+  ticketsController.rejectExtensionRequest
+);
+
+// DELETE /api/tickets/:id/extension-request/:extId/cancel  (requester cancels own)
+router.delete(
+  '/:id/extension-request/:extId/cancel',
+  [param('id').isInt(), param('extId').isInt()],
+  ticketsController.cancelExtensionRequest
 );
 
 module.exports = router;

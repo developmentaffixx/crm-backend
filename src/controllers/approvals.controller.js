@@ -415,10 +415,47 @@ exports.getApprovalsPage = async (req, res) => {
       fwdParams
     );
 
+    // Pending ticket completions (pending_done status)
+    let pendingTicketsWhere = "tk.deleted = 0 AND tk.status = 'pending_done'";
+    if (!isAdmin) {
+      pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
+    }
+    const pendingTicketsParams = isAdmin ? [] : [userId, userId];
+    const [pendingTickets] = await db.query(
+      `SELECT tk.id, tk.title, tk.status, tk.due_date, tk.priority, tk.mode,
+              CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
+              CONCAT(u2.first_name, ' ', u2.last_name) AS marked_done_by_name
+       FROM tickets tk
+       LEFT JOIN users u ON u.id = tk.assigned_to
+       LEFT JOIN users u2 ON u2.id = tk.marked_done_by
+       WHERE ${pendingTicketsWhere}
+       ORDER BY tk.marked_done_at DESC`,
+      pendingTicketsParams
+    );
+
+    // Ticket extension requests
+    let ticketExtWhere = "ter.deleted = 0";
+    if (!isAdmin) {
+      ticketExtWhere += ' AND ter.requested_by = ?';
+    }
+    const ticketExtParams = isAdmin ? [] : [userId];
+    const [ticketExtensions] = await db.query(
+      `SELECT ter.*, tk.title AS ticket_title,
+              CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
+       FROM ticket_deadline_extension_requests ter
+       LEFT JOIN tickets tk ON tk.id = ter.ticket_id
+       LEFT JOIN users u ON u.id = ter.requested_by
+       WHERE ${ticketExtWhere}
+       ORDER BY ter.created_at DESC`,
+      ticketExtParams
+    );
+
     return res.json({
       pending_tasks: pendingTasks,
       extension_requests: extensions,
       forward_requests: forwards,
+      pending_tickets: pendingTickets,
+      ticket_extension_requests: ticketExtensions,
     });
   } catch (err) {
     console.error('Approvals page error:', err);
@@ -452,7 +489,13 @@ exports.getBadgeCount = async (req, res) => {
       const [[{ fwd_count }]] = await db.query(
         "SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending'"
       );
-      count = task_count + ext_count + fwd_count;
+      const [[{ ticket_pending_count }]] = await db.query(
+        "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done'"
+      );
+      const [[{ ticket_ext_count }]] = await db.query(
+        "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'"
+      );
+      count = task_count + ext_count + fwd_count + ticket_pending_count + ticket_ext_count;
     } else {
       const [[{ task_count }]] = await db.query(
         "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND (created_by = ? OR assigned_to = ?)",
@@ -466,7 +509,15 @@ exports.getBadgeCount = async (req, res) => {
         "SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending' AND (forwarded_by = ? OR forwarded_to = ?)",
         [userId, userId]
       );
-      count = task_count + ext_count + fwd_count;
+      const [[{ ticket_pending_count }]] = await db.query(
+        "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)",
+        [userId, userId]
+      );
+      const [[{ ticket_ext_count }]] = await db.query(
+        "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
+        [userId]
+      );
+      count = task_count + ext_count + fwd_count + ticket_pending_count + ticket_ext_count;
     }
 
     return res.json({ count });

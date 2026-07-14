@@ -49,6 +49,7 @@ exports.list = async (req, res) => {
       open: rows.filter(r => r.status === 'open').length,
       in_progress: rows.filter(r => r.status === 'in_progress').length,
       hold: rows.filter(r => r.status === 'hold').length,
+      pending_done: rows.filter(r => r.status === 'pending_done').length,
       resolved: rows.filter(r => r.status === 'resolved').length,
       closed: rows.filter(r => r.status === 'closed').length,
     };
@@ -819,6 +820,336 @@ exports.removeAttachment = async (req, res) => {
     return res.json({ message: 'Attachment removed' });
   } catch (err) {
     console.error('Ticket remove attachment error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARK AS DONE / APPROVE / REJECT (like tasks)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/tickets/:id/mark-done
+ * Assigned user or reporter marks ticket as done → status becomes 'pending_done' (awaiting admin approval)
+ */
+exports.markDone = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM tickets WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Ticket not found' });
+
+    const ticket = rows[0];
+
+    // Only assigned user, reporter, or admin can mark done
+    if (ticket.assigned_to !== req.user.id && ticket.reported_by !== req.user.id && !req.user.is_admin) {
+      return res.status(403).json({ message: 'Only the assigned user or reporter can mark this ticket as done' });
+    }
+
+    // Must be in a workable state
+    if (!['open', 'in_progress', 'hold'].includes(ticket.status)) {
+      return res.status(400).json({ message: 'Ticket must be open, in progress, or on hold to mark as done' });
+    }
+
+    await db.query(
+      "UPDATE tickets SET status = 'pending_done', marked_done_by = ?, marked_done_at = NOW() WHERE id = ?",
+      [req.user.id, ticket.id]
+    );
+
+    // Log activity
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, old_value, new_value, comment)
+       VALUES (?, ?, 'status_change', ?, 'pending_done', 'Marked as done — awaiting approval')`,
+      [ticket.id, req.user.id, ticket.status]
+    );
+
+    const [updated] = await db.query('SELECT * FROM tickets WHERE id = ?', [ticket.id]);
+    res.emitSocket('tickets:updated', updated[0]);
+    return res.json(updated[0]);
+  } catch (err) {
+    console.error('Ticket markDone error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/tickets/:id/approve-done
+ * Admin approves the "mark as done" → status becomes 'resolved'
+ */
+exports.approveDone = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM tickets WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Ticket not found' });
+
+    const ticket = rows[0];
+
+    if (ticket.status !== 'pending_done') {
+      return res.status(400).json({ message: 'Ticket is not pending approval' });
+    }
+
+    await db.query(
+      "UPDATE tickets SET status = 'resolved', resolved_at = NOW() WHERE id = ?",
+      [ticket.id]
+    );
+
+    // Log activity
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, old_value, new_value, comment)
+       VALUES (?, ?, 'status_change', 'pending_done', 'resolved', 'Completion approved by admin')`,
+      [ticket.id, req.user.id]
+    );
+
+    const [updated] = await db.query('SELECT * FROM tickets WHERE id = ?', [ticket.id]);
+    res.emitSocket('tickets:updated', updated[0]);
+    return res.json(updated[0]);
+  } catch (err) {
+    console.error('Ticket approveDone error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/tickets/:id/reject-done
+ * Admin rejects the "mark as done" → status goes back to 'in_progress'
+ */
+exports.rejectDone = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM tickets WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Ticket not found' });
+
+    const ticket = rows[0];
+
+    if (ticket.status !== 'pending_done') {
+      return res.status(400).json({ message: 'Ticket is not pending approval' });
+    }
+
+    const { reason } = req.body;
+
+    await db.query(
+      "UPDATE tickets SET status = 'in_progress', marked_done_by = NULL, marked_done_at = NULL WHERE id = ?",
+      [ticket.id]
+    );
+
+    // Log activity
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, old_value, new_value, comment)
+       VALUES (?, ?, 'status_change', 'pending_done', 'in_progress', ?)`,
+      [ticket.id, req.user.id, reason ? `Rejected: ${reason}` : 'Completion rejected by admin']
+    );
+
+    const [updated] = await db.query('SELECT * FROM tickets WHERE id = ?', [ticket.id]);
+    res.emitSocket('tickets:updated', updated[0]);
+    return res.json(updated[0]);
+  } catch (err) {
+    console.error('Ticket rejectDone error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEADLINE EXTENSION REQUESTS (for tickets)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/tickets/:id/extension-request
+ * Assigned user or reporter requests a deadline extension
+ */
+exports.createExtensionRequest = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM tickets WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Ticket not found' });
+
+    const ticket = rows[0];
+
+    // Only assigned user, reporter, or admin can request extension
+    if (ticket.assigned_to !== req.user.id && ticket.reported_by !== req.user.id && !req.user.is_admin) {
+      return res.status(403).json({ message: 'Only the assigned user or reporter can request an extension' });
+    }
+
+    // Must be in a workable state
+    if (['resolved', 'closed'].includes(ticket.status)) {
+      return res.status(400).json({ message: 'Cannot request extension for resolved/closed tickets' });
+    }
+
+    const { requested_deadline, reason } = req.body;
+
+    if (!requested_deadline) {
+      return res.status(400).json({ message: 'Requested deadline is required' });
+    }
+    if (!reason) {
+      return res.status(400).json({ message: 'Reason is required' });
+    }
+
+    // Block duplicate pending extension
+    const [existing] = await db.query(
+      "SELECT id FROM ticket_deadline_extension_requests WHERE ticket_id = ? AND status = 'pending' AND deleted = 0",
+      [ticket.id]
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({ message: 'A pending extension request already exists for this ticket' });
+    }
+
+    const [result] = await db.query(
+      'INSERT INTO ticket_deadline_extension_requests (ticket_id, requested_by, requested_deadline, reason) VALUES (?, ?, ?, ?)',
+      [ticket.id, req.user.id, requested_deadline, reason]
+    );
+
+    // Log activity
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, new_value, comment)
+       VALUES (?, ?, 'extension_requested', ?, ?)`,
+      [ticket.id, req.user.id, requested_deadline, `Requested new deadline: ${reason}`]
+    );
+
+    const [ext] = await db.query(
+      `SELECT er.*, t.title AS ticket_title,
+              CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
+       FROM ticket_deadline_extension_requests er
+       LEFT JOIN tickets t ON t.id = er.ticket_id
+       LEFT JOIN users u ON u.id = er.requested_by
+       WHERE er.id = ?`,
+      [result.insertId]
+    );
+
+    res.emitSocket('tickets:extension_requested', ext[0]);
+    return res.status(201).json(ext[0]);
+  } catch (err) {
+    console.error('Ticket createExtensionRequest error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/tickets/:id/extension-request/:extId/approve  (admin)
+ */
+exports.approveExtensionRequest = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM ticket_deadline_extension_requests WHERE id = ? AND ticket_id = ? AND deleted = 0',
+      [req.params.extId, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ message: 'Extension request not found' });
+
+    const ext = rows[0];
+    if (ext.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending requests can be approved' });
+    }
+
+    // Update request status
+    await db.query(
+      "UPDATE ticket_deadline_extension_requests SET status = 'approved', actioned_by = ? WHERE id = ?",
+      [req.user.id, ext.id]
+    );
+
+    // Update ticket due_date
+    await db.query(
+      'UPDATE tickets SET due_date = ? WHERE id = ?',
+      [ext.requested_deadline, ext.ticket_id]
+    );
+
+    // Log activity
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, new_value, comment)
+       VALUES (?, ?, 'extension_approved', ?, 'Deadline extension approved')`,
+      [ext.ticket_id, req.user.id, ext.requested_deadline]
+    );
+
+    res.emitSocket('tickets:extension_approved', { ticket_id: ext.ticket_id, new_due_date: ext.requested_deadline });
+    return res.json({ message: 'Extension approved', new_due_date: ext.requested_deadline });
+  } catch (err) {
+    console.error('Ticket approveExtensionRequest error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/tickets/:id/extension-request/:extId/reject  (admin)
+ */
+exports.rejectExtensionRequest = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM ticket_deadline_extension_requests WHERE id = ? AND ticket_id = ? AND deleted = 0',
+      [req.params.extId, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ message: 'Extension request not found' });
+
+    const ext = rows[0];
+    if (ext.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending requests can be rejected' });
+    }
+
+    await db.query(
+      "UPDATE ticket_deadline_extension_requests SET status = 'rejected', actioned_by = ? WHERE id = ?",
+      [req.user.id, ext.id]
+    );
+
+    // Log activity
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, comment)
+       VALUES (?, ?, 'extension_rejected', 'Deadline extension rejected')`,
+      [ext.ticket_id, req.user.id]
+    );
+
+    res.emitSocket('tickets:extension_rejected', { ticket_id: ext.ticket_id });
+    return res.json({ message: 'Extension rejected' });
+  } catch (err) {
+    console.error('Ticket rejectExtensionRequest error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/tickets/:id/extension-request/:extId/cancel
+ * Requester cancels their own pending extension request
+ */
+exports.cancelExtensionRequest = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM ticket_deadline_extension_requests WHERE id = ? AND ticket_id = ? AND deleted = 0',
+      [req.params.extId, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ message: 'Extension request not found' });
+
+    const ext = rows[0];
+
+    if (ext.requested_by !== req.user.id && !req.user.is_admin) {
+      return res.status(403).json({ message: 'You can only cancel your own requests' });
+    }
+
+    if (ext.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending requests can be cancelled' });
+    }
+
+    await db.query(
+      'UPDATE ticket_deadline_extension_requests SET deleted = 1 WHERE id = ?',
+      [ext.id]
+    );
+
+    return res.json({ message: 'Extension request cancelled' });
+  } catch (err) {
+    console.error('Ticket cancelExtensionRequest error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/tickets/:id/extension-requests
+ * Get all extension requests for a ticket
+ */
+exports.getExtensionRequests = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT er.*, CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name,
+              CONCAT(a.first_name, ' ', a.last_name) AS actioned_by_name
+       FROM ticket_deadline_extension_requests er
+       LEFT JOIN users u ON u.id = er.requested_by
+       LEFT JOIN users a ON a.id = er.actioned_by
+       WHERE er.ticket_id = ? AND er.deleted = 0
+       ORDER BY er.created_at DESC`,
+      [req.params.id]
+    );
+
+    return res.json(rows);
+  } catch (err) {
+    console.error('Ticket getExtensionRequests error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
