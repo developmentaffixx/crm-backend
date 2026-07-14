@@ -476,13 +476,13 @@ exports.getMemberPerformanceScore = async (req, res) => {
       ? Math.round((attendanceResult[0].on_time_days / attendanceResult[0].total_days) * 100)
       : 0;
 
-    // Task completion score (done / total assigned this month)
+    // Task completion score — tasks assigned to user that were completed (is_active=3) this month
     const [taskResult] = await db.query(
       `SELECT
         COUNT(*) AS total,
-        SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS completed
+        SUM(CASE WHEN is_active = 3 THEN 1 ELSE 0 END) AS completed
        FROM tasks
-       WHERE assigned_to = ? AND deleted = 0 AND is_active = 1
+       WHERE assigned_to = ? AND deleted = 0 AND is_active IN (1, 2, 3)
        AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())`,
       [userId]
     );
@@ -490,15 +490,24 @@ exports.getMemberPerformanceScore = async (req, res) => {
       ? Math.round((taskResult[0].completed / taskResult[0].total) * 100)
       : 0;
 
-    // Productivity score (hours logged vs expected)
-    const [hoursResult] = await db.query(
+    // Productivity score (hours logged in tasks + tickets vs expected)
+    const [taskHoursResult] = await db.query(
       `SELECT COALESCE(SUM(duration), 0) AS total_seconds
        FROM task_time_logs
        WHERE user_id = ? AND MONTH(started_at) = MONTH(CURDATE())
        AND YEAR(started_at) = YEAR(CURDATE())`,
       [userId]
     );
-    const hoursLogged = hoursResult[0].total_seconds / 3600;
+    const [ticketHoursResult] = await db.query(
+      `SELECT COALESCE(SUM(duration), 0) AS total_seconds
+       FROM ticket_time_logs
+       WHERE user_id = ? AND duration IS NOT NULL
+       AND MONTH(created_at) = MONTH(CURDATE())
+       AND YEAR(created_at) = YEAR(CURDATE())`,
+      [userId]
+    );
+    const totalSeconds = (taskHoursResult[0].total_seconds || 0) + (ticketHoursResult[0].total_seconds || 0);
+    const hoursLogged = totalSeconds / 3600;
     const workingDaysThisMonth = attendanceResult[0].total_days || 1;
     const expectedHours = workingDaysThisMonth * 8;
     const productivityScore = Math.min(100, Math.round((hoursLogged / expectedHours) * 100));
