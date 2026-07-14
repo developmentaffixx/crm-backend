@@ -38,6 +38,7 @@ router.get('/admin/approvals', requireAdmin, advCtrl.getAdminApprovals);
 router.get('/admin/overdue', requireAdmin, advCtrl.getAdminOverdue);
 router.get('/admin/workload', requireAdmin, advCtrl.getAdminWorkload);
 router.get('/admin/top-performers', requireAdmin, advCtrl.getAdminTopPerformers);
+router.get('/admin/top-revenue-clients', requireAdmin, advCtrl.getAdminTopRevenueClients);
 router.get('/admin/project-health', requireAdmin, advCtrl.getAdminProjectHealth);
 router.get('/admin/expense-breakdown', requireAdmin, advCtrl.getAdminExpenseBreakdown);
 router.get('/admin/lead-funnel', requireAdmin, advCtrl.getAdminLeadFunnel);

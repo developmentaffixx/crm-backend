@@ -827,3 +827,37 @@ exports.getMemberMonthlyCalendar = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+/**
+ * GET /api/dashboard/admin/top-revenue-clients
+ * Top clients ordered by total revenue (invoices)
+ */
+exports.getAdminTopRevenueClients = async (req, res) => {
+  try {
+    const [clients] = await db.query(
+      `SELECT 
+        l.id,
+        l.name,
+        l.business_name,
+        COALESCE(SUM(i.total_amount), 0) AS total_revenue,
+        COALESCE(SUM(i.paid_amount), 0) AS paid_amount,
+        COALESCE(SUM(i.balance_amount), 0) AS outstanding,
+        COUNT(DISTINCT i.id) AS invoice_count,
+        COUNT(DISTINCT p.id) AS project_count
+       FROM leads l
+       LEFT JOIN invoices i ON i.lead_id = l.id AND i.deleted = 0
+       LEFT JOIN projects p ON p.client_id = l.id AND p.deleted = 0
+       WHERE l.deleted = 0 AND (l.status = 'Won' OR l.lead_stage = 'Won')
+       GROUP BY l.id, l.name, l.business_name
+       HAVING total_revenue > 0
+       ORDER BY total_revenue DESC
+       LIMIT 20`
+    );
+
+    return res.json(clients);
+  } catch (err) {
+    console.error('Top revenue clients error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
