@@ -15,6 +15,9 @@ router.use(authenticate);
 // GET  /api/invoices/preview-number — preview next invoice number (must be before /:id)
 router.get('/preview-number', invoicesController.previewNumber);
 
+// GET  /api/invoices/expected-cost — total expected cost from active client plans
+router.get('/expected-cost', invoicesController.getExpectedCost);
+
 // GET  /api/invoices — list all invoices
 router.get('/', invoicesController.list);
 
