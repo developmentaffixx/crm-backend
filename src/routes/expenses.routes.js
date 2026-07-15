@@ -24,6 +24,9 @@ router.post('/', upload.single('bill_copy'), expensesController.create);
 // PUT  /api/expenses/:id — update expense (with optional bill upload)
 router.put('/:id', param('id').isInt(), upload.single('bill_copy'), expensesController.update);
 
+// GET  /api/expenses/:id/download — proxy download bill copy
+router.get('/:id/download', param('id').isInt(), expensesController.downloadBill);
+
 // DELETE /api/expenses/:id — soft delete
 router.delete('/:id', param('id').isInt(), expensesController.remove);
 

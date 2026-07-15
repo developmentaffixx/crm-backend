@@ -234,3 +234,48 @@ exports.remove = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+// ─── GET /api/expenses/:id/download — proxy download bill ─────────────────────
+exports.downloadBill = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT bill_copy, title FROM expenses WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Expense not found' });
+
+    const { bill_copy, title } = rows[0];
+    if (!bill_copy) return res.status(404).json({ message: 'No bill attached' });
+
+    // Fetch the file from Cloudinary
+    const https = require('https');
+    const url = new URL(bill_copy);
+    
+    https.get(url, (fileRes) => {
+      if (fileRes.statusCode !== 200) {
+        return res.status(502).json({ message: 'Failed to fetch file from storage' });
+      }
+
+      // Determine filename and content type
+      const ext = bill_copy.split('.').pop().toLowerCase();
+      const mimeTypes = {
+        pdf: 'application/pdf',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        png: 'image/png',
+        gif: 'image/gif',
+        webp: 'image/webp',
+      };
+      const contentType = mimeTypes[ext] || 'application/octet-stream';
+      const filename = `${title || 'bill'}.${ext}`;
+
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+      
+      fileRes.pipe(res);
+    }).on('error', (err) => {
+      console.error('Bill download error:', err);
+      return res.status(500).json({ message: 'Failed to download file' });
+    });
+  } catch (err) {
+    console.error('Bill download error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
