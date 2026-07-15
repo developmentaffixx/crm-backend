@@ -1896,6 +1896,112 @@ exports.adminMonthBalanceReport = async (req, res) => {
 };
 
 /**
+ * GET /api/attendance/admin/timesheet/team?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+ * Admin: Returns timesheet summary for ALL employees for a given period.
+ */
+exports.adminTimesheetTeam = async (req, res) => {
+  try {
+    const { start_date, end_date } = req.query;
+
+    // Default to current week
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(now);
+    monday.setDate(now.getDate() + mondayOffset);
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+
+    const startStr = start_date || monday.toISOString().split('T')[0];
+    const endStr = end_date || sunday.toISOString().split('T')[0];
+
+    // Get all active non-admin users
+    const [users] = await db.query(
+      'SELECT id, first_name, last_name, department, designation FROM users WHERE is_active = 1 AND deleted = 0 AND is_admin = 0'
+    );
+
+    const results = [];
+
+    for (const user of users) {
+      // Attendance
+      const [attendance] = await db.query(
+        `SELECT COUNT(*) AS days_present, 
+                COALESCE(SUM(total_served_seconds), 0) AS total_served_seconds,
+                COALESCE(SUM(total_afs_seconds), 0) AS total_afs_seconds
+         FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ?`,
+        [user.id, startStr, endStr]
+      );
+
+      // Task time
+      const [taskTime] = await db.query(
+        `SELECT COALESCE(SUM(duration), 0) AS total_seconds
+         FROM task_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+         AND ended_at IS NOT NULL AND duration > 0`,
+        [user.id, startStr, endStr]
+      );
+
+      // Ticket time
+      const [ticketTime] = await db.query(
+        `SELECT COALESCE(SUM(minutes), 0) AS total_minutes
+         FROM ticket_time_logs WHERE user_id = ? AND log_date BETWEEN ? AND ?`,
+        [user.id, startStr, endStr]
+      );
+
+      // Meeting time
+      const [meetingTime] = await db.query(
+        `SELECT COALESCE(SUM(duration), 0) AS total_seconds
+         FROM meeting_time_logs
+         WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+         AND ended_at IS NOT NULL AND duration > 0`,
+        [user.id, startStr, endStr]
+      );
+
+      const totalServed = Number(attendance[0].total_served_seconds) || 0;
+      const totalAfs = Number(attendance[0].total_afs_seconds) || 0;
+      const totalTaskSeconds = Number(taskTime[0].total_seconds) || 0;
+      const totalTicketSeconds = (Number(ticketTime[0].total_minutes) || 0) * 60;
+      const totalMeetingSeconds = Number(meetingTime[0].total_seconds) || 0;
+      const rawProductiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
+      const productiveSeconds = Math.min(rawProductiveSeconds, totalServed);
+      const productivityPercent = totalServed > 0 ? Math.round((productiveSeconds / totalServed) * 100) : 0;
+
+      // Idle calc (same as individual timesheet)
+      const unaccountedSeconds = Math.max(0, totalServed - productiveSeconds - totalAfs);
+      const daysPresent = Number(attendance[0].days_present) || 0;
+      // Deduct lunch per day
+      const lunchSeconds = 60 * 60; // default 1hr
+      const totalLunchDeduction = Math.min(lunchSeconds * daysPresent, unaccountedSeconds);
+      const idleSeconds = Math.max(0, unaccountedSeconds - totalLunchDeduction);
+
+      results.push({
+        user_id: user.id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        department: user.department,
+        designation: user.designation,
+        days_present: daysPresent,
+        total_served_seconds: totalServed,
+        productive_seconds: productiveSeconds,
+        idle_seconds: idleSeconds,
+        total_afs_seconds: totalAfs,
+        total_task_seconds: totalTaskSeconds,
+        total_ticket_seconds: totalTicketSeconds,
+        total_meeting_seconds: totalMeetingSeconds,
+        productivity_percent: productivityPercent,
+      });
+    }
+
+    // Sort by productivity descending
+    results.sort((a, b) => b.productivity_percent - a.productivity_percent);
+
+    return res.json({ period: { start: startStr, end: endStr }, employees: results });
+  } catch (err) {
+    console.error('Admin timesheet team error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * GET /api/attendance/admin/timesheet?user_id=X&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
  * Admin: Returns timesheet data for any employee for a given period.
  */

@@ -29,6 +29,7 @@ router.put('/settings', requireAdmin, ctrl.updateSettings);
 
 // ── Admin routes ──────────────────────────────────────────────────────────────
 router.get('/admin/today', requireAdmin, ctrl.adminGetToday);
+router.get('/admin/timesheet/team', requireAdmin, ctrl.adminTimesheetTeam);
 router.get('/admin/timesheet', requireAdmin, ctrl.adminTimesheet);
 router.get('/admin/timesheet/day', requireAdmin, ctrl.adminTimesheetDay);
 router.get('/admin/week-report', requireAdmin, ctrl.adminWeekReport);
