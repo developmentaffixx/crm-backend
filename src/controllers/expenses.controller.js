@@ -83,7 +83,10 @@ exports.create = async (req, res) => {
     // Handle file upload
     let bill_copy = null;
     if (req.file) {
-      const { url } = await uploadToCloudinary(req.file.buffer, 'crm/expenses', 'auto');
+      // Use 'raw' for PDFs/documents so they can be directly downloaded, 'image' for images
+      const isImage = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(req.file.originalname);
+      const resourceType = isImage ? 'image' : 'raw';
+      const { url } = await uploadToCloudinary(req.file.buffer, 'crm/expenses', resourceType);
       bill_copy = url;
     }
 
@@ -161,9 +164,15 @@ exports.update = async (req, res) => {
     if (req.file) {
       if (existing.bill_copy) {
         const oldPublicId = extractPublicId(existing.bill_copy);
-        if (oldPublicId) await deleteFromCloudinary(oldPublicId, 'raw');
+        // Try deleting from both resource types since old files may be 'image' or 'raw'
+        if (oldPublicId) {
+          await deleteFromCloudinary(oldPublicId, 'raw');
+          await deleteFromCloudinary(oldPublicId, 'image');
+        }
       }
-      const { url } = await uploadToCloudinary(req.file.buffer, 'crm/expenses', 'auto');
+      const isImage = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(req.file.originalname);
+      const resourceType = isImage ? 'image' : 'raw';
+      const { url } = await uploadToCloudinary(req.file.buffer, 'crm/expenses', resourceType);
       bill_copy = url;
     }
 
