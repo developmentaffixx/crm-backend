@@ -306,8 +306,8 @@ exports.list = async (req, res) => {
     if (year)   { where += ' AND p.pay_year = ?';  params.push(parseInt(year)); }
     if (status) { where += ' AND p.status = ?';    params.push(status); }
     if (search) {
-      where += ' AND (CONCAT(u.first_name," ",u.last_name) LIKE ? OR u.department LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
+      where += ' AND (CONCAT(u.first_name," ",u.last_name) LIKE ? OR u.department LIKE ? OR p.freelancer_name LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     const [rows] = await db.query(
       `SELECT p.*,
@@ -319,6 +319,13 @@ exports.list = async (req, res) => {
        ORDER BY p.pay_year DESC, p.pay_month DESC, u.first_name ASC`,
       params
     );
+    // For freelancer records, set employee_name from freelancer_name
+    rows.forEach(r => {
+      if (r.is_freelancer) {
+        r.employee_name = r.freelancer_name;
+        r.department = r.freelancer_role || 'Freelancer';
+      }
+    });
     const summary = {
       total:        rows.length,
       total_net:    rows.reduce((s, r) => s + parseFloat(r.net_salary || 0), 0),
@@ -411,44 +418,75 @@ exports.markPaid = async (req, res) => {
 exports.createManual = async (req, res) => {
   try {
     const {
-      employee_id, pay_month, pay_year,
+      employee_id, is_freelancer, freelancer_name, freelancer_role,
+      pay_month, pay_year,
       net_salary, bonus, advance_deduction, other_deduction,
       payment_mode, payment_date, notes,
     } = req.body;
 
-    if (!employee_id || !pay_month || !pay_year || !net_salary) {
-      return res.status(400).json({ message: 'employee_id, pay_month, pay_year and net_salary are required' });
+    const isFreelancer = is_freelancer === 1 || is_freelancer === true;
+
+    if (!isFreelancer && !employee_id) {
+      return res.status(400).json({ message: 'employee_id is required for employee payroll' });
+    }
+    if (isFreelancer && !freelancer_name) {
+      return res.status(400).json({ message: 'freelancer_name is required' });
+    }
+    if (!pay_month || !pay_year || !net_salary) {
+      return res.status(400).json({ message: 'pay_month, pay_year and net_salary are required' });
     }
 
-    // Check duplicate
-    const [existing] = await db.query(
-      'SELECT id FROM payroll WHERE employee_id = ? AND pay_month = ? AND pay_year = ? AND deleted = 0',
-      [employee_id, pay_month, pay_year]
-    );
-    if (existing.length > 0) {
-      return res.status(400).json({ message: 'Payroll already exists for this employee in the selected month' });
+    // Check duplicate (only for employees, freelancers can have multiple entries)
+    if (!isFreelancer) {
+      const [existing] = await db.query(
+        'SELECT id FROM payroll WHERE employee_id = ? AND pay_month = ? AND pay_year = ? AND deleted = 0',
+        [employee_id, pay_month, pay_year]
+      );
+      if (existing.length > 0) {
+        return res.status(400).json({ message: 'Payroll already exists for this employee in the selected month' });
+      }
     }
 
-    // Get employee salary for reference (optional — may not exist for old months)
-    const [salRows] = await db.query(
-      `SELECT es.monthly_salary, u.employment_status, u.emp_code
-       FROM users u
-       LEFT JOIN employee_salary es ON es.id = (
-         SELECT id FROM employee_salary WHERE employee_id = u.id
-         ORDER BY effective_from DESC LIMIT 1
-       )
-       WHERE u.id = ?`,
-      [employee_id]
-    );
-    const monthlySalary = salRows[0]?.monthly_salary || parseFloat(net_salary);
-    const empStatus     = salRows[0]?.employment_status || 'probation';
+    let monthlySalary, empStatus, payrollCode;
+
+    if (isFreelancer) {
+      monthlySalary = parseFloat(net_salary);
+      empStatus = 'probation';
+      // Generate a freelancer payroll code
+      const yy = String(pay_year).slice(-2);
+      const mm = String(pay_month).padStart(2, '0');
+      const prefix = `PAY-${yy}${mm}-FRL`;
+      const [last] = await db.query(
+        `SELECT payroll_code FROM payroll WHERE payroll_code LIKE ? ORDER BY id DESC LIMIT 1`,
+        [`${prefix}-%`]
+      );
+      let seq = 1;
+      if (last.length > 0 && last[0].payroll_code) {
+        const parts = last[0].payroll_code.split('-');
+        seq = parseInt(parts[parts.length - 1], 10) + 1;
+      }
+      payrollCode = `${prefix}-${String(seq).padStart(3, '0')}`;
+    } else {
+      // Get employee salary for reference
+      const [salRows] = await db.query(
+        `SELECT es.monthly_salary, u.employment_status, u.emp_code
+         FROM users u
+         LEFT JOIN employee_salary es ON es.id = (
+           SELECT id FROM employee_salary WHERE employee_id = u.id
+           ORDER BY effective_from DESC LIMIT 1
+         )
+         WHERE u.id = ?`,
+        [employee_id]
+      );
+      monthlySalary = salRows[0]?.monthly_salary || parseFloat(net_salary);
+      empStatus     = salRows[0]?.employment_status || 'probation';
+      payrollCode   = await generatePayrollCode(pay_year, pay_month, employee_id);
+    }
 
     const bonusAmt   = parseFloat(bonus             || 0);
     const advAmt     = parseFloat(advance_deduction || 0);
     const otherAmt   = parseFloat(other_deduction   || 0);
     const netAmt     = parseFloat(net_salary);
-
-    const payrollCode = await generatePayrollCode(pay_year, pay_month, employee_id);
 
     const [result] = await db.query(
       `INSERT INTO payroll (
@@ -456,13 +494,16 @@ exports.createManual = async (req, res) => {
          working_days, days_present, absent_days, paid_leave_used, lop_days,
          monthly_salary, per_day_salary, lop_deduction,
          bonus, advance_deduction, other_deduction, net_salary,
-         payment_mode, payment_date, status, auto_generated, notes, created_by
-       ) VALUES (?,?,?,?,?,30,0,0,0,0,?,?,0,?,?,?,?,'Bank','Draft',1,0,?,?)`,
+         payment_mode, payment_date, status, auto_generated,
+         is_freelancer, freelancer_name, freelancer_role,
+         notes, created_by
+       ) VALUES (?,?,?,?,?,30,0,0,0,0,?,?,0,?,?,?,?,'Bank','Draft',0,?,?,?,?,?)`,
       [
-        payrollCode, employee_id, pay_month, pay_year, empStatus,
+        payrollCode, isFreelancer ? null : employee_id, pay_month, pay_year, empStatus,
         monthlySalary, parseFloat((monthlySalary / 30).toFixed(2)),
         bonusAmt, advAmt, otherAmt, netAmt,
-        notes || 'Manual entry — pre CRM',
+        isFreelancer ? 1 : 0, isFreelancer ? freelancer_name : null, isFreelancer ? (freelancer_role || null) : null,
+        notes || (isFreelancer ? 'Freelancer payment' : 'Manual entry — pre CRM'),
         req.user.id,
       ]
     );
@@ -481,6 +522,11 @@ exports.createManual = async (req, res) => {
        FROM payroll p LEFT JOIN users u ON u.id = p.employee_id WHERE p.id = ?`,
       [result.insertId]
     );
+    // For freelancers, set employee_name from freelancer_name
+    if (isFreelancer && created[0]) {
+      created[0].employee_name = freelancer_name;
+      created[0].department = freelancer_role || 'Freelancer';
+    }
     res.emitSocket('payroll:created', created[0]);
     return res.status(201).json(created[0]);
   } catch (err) {

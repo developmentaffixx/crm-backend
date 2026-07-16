@@ -235,6 +235,20 @@ exports.remove = async (req, res) => {
   }
 };
 
+// ─── GET /api/expenses/custom-categories ──────────────────────────────────────
+exports.getCustomCategories = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT DISTINCT other_category FROM expenses WHERE other_category IS NOT NULL AND other_category != '' AND deleted = 0 ORDER BY other_category ASC`
+    );
+    const categories = rows.map(r => r.other_category);
+    return res.json({ categories });
+  } catch (err) {
+    console.error('Custom categories error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── GET /api/expenses/:id/download — proxy download bill ─────────────────────
 exports.downloadBill = async (req, res) => {
   try {
