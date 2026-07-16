@@ -61,6 +61,8 @@ const socialOverviewRoutes     = require('./src/routes/socialOverview.routes');
 const clientPortalRoutes       = require('./src/routes/clientPortal.routes');
 const contentCalendarSlotsRoutes = require('./src/routes/contentCalendarSlots.routes');
 const revenueIntroDocumentsRoutes = require('./src/routes/revenueIntroDocuments.routes');
+const softwareLicensesRoutes = require('./src/routes/softwareLicenses.routes');
+const inventoriesRoutes      = require('./src/routes/inventories.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -152,6 +154,8 @@ app.use('/api/social-overview',       socialOverviewRoutes);
 app.use('/api/client-portal',        clientPortalRoutes);
 app.use('/api/content-calendar-slots', contentCalendarSlotsRoutes);
 app.use('/api/revenue-intro-documents', revenueIntroDocumentsRoutes);
+app.use('/api/software-licenses',      softwareLicensesRoutes);
+app.use('/api/inventories',            inventoriesRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
 const { authenticate: authMiddleware } = require('./src/middleware/auth');

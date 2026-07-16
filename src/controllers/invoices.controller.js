@@ -50,13 +50,13 @@ exports.previewNumber = async (req, res) => {
   }
 };
 
-// ─── GET /api/invoices/expected-cost — Total expected cost from clients
+// ─── GET /api/invoices/expected-cost — Total pending amount clients still owe
 exports.getExpectedCost = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT COALESCE(SUM(l.expected_revenue), 0) AS total_expected_cost
-       FROM leads l
-       WHERE l.deleted = 0 AND (l.status = 'Won' OR l.lead_stage = 'Won')`
+      `SELECT COALESCE(SUM(i.balance_amount), 0) AS total_expected_cost
+       FROM invoices i
+       WHERE i.deleted = 0 AND i.status IN ('New', 'Partial', 'Overdue')`
     );
     return res.json({ total_expected_cost: parseFloat(rows[0].total_expected_cost || 0) });
   } catch (err) {
