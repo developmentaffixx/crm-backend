@@ -26,14 +26,14 @@ CREATE TABLE IF NOT EXISTS software_licenses (
 ) ENGINE=InnoDB;
 
 -- ============================================================
--- Software License Renewal History
+-- Software License Renewal History (period-wise cost tracking)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS software_license_renewals (
   id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   license_id          INT UNSIGNED NOT NULL,
-  previous_expiry     DATE DEFAULT NULL,
-  new_expiry          DATE NOT NULL,
+  period_start        DATE NOT NULL,
+  period_end          DATE NOT NULL,
   cost_at_renewal     DECIMAL(12,2) NOT NULL DEFAULT 0,
   notes               TEXT DEFAULT NULL,
   renewed_by          INT UNSIGNED NOT NULL,

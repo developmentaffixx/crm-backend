@@ -181,24 +181,24 @@ exports.renew = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'License not found' });
 
     const existing = rows[0];
-    const { new_expiry, cost, notes } = req.body;
+    const { period_start, period_end, cost, notes } = req.body;
 
-    if (!new_expiry) return res.status(400).json({ message: 'New expiry date is required' });
+    if (!period_start) return res.status(400).json({ message: 'Period start date is required' });
+    if (!period_end) return res.status(400).json({ message: 'Period end date is required' });
 
-    const previousExpiry = existing.expiry_date;
-    const newCost = cost !== undefined ? parseFloat(cost) : parseFloat(existing.cost);
+    const renewalCost = cost !== undefined ? parseFloat(cost) : parseFloat(existing.cost);
 
-    // Insert renewal history record
+    // Insert renewal history record with period
     await db.query(
-      `INSERT INTO software_license_renewals (license_id, previous_expiry, new_expiry, cost_at_renewal, notes, renewed_by)
+      `INSERT INTO software_license_renewals (license_id, period_start, period_end, cost_at_renewal, notes, renewed_by)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [req.params.id, previousExpiry, new_expiry, newCost, notes || null, req.user.id]
+      [req.params.id, period_start, period_end, renewalCost, notes || null, req.user.id]
     );
 
-    // Update the license with new expiry and cost
+    // Update the license: expiry = period_end, cost = latest cost, status = Active
     await db.query(
       `UPDATE software_licenses SET expiry_date = ?, cost = ?, status = 'Active' WHERE id = ?`,
-      [new_expiry, newCost, req.params.id]
+      [period_end, renewalCost, req.params.id]
     );
 
     const [updated] = await db.query(
@@ -224,7 +224,7 @@ exports.getHistory = async (req, res) => {
        FROM software_license_renewals r
        LEFT JOIN users u ON u.id = r.renewed_by
        WHERE r.license_id = ?
-       ORDER BY r.renewed_at DESC`,
+       ORDER BY r.period_start DESC`,
       [req.params.id]
     );
     return res.json(rows);
