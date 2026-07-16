@@ -27,12 +27,21 @@ exports.list = async (req, res) => {
 
     const summary = {
       total_count: rows.length,
-      total_cost: rows.reduce((sum, r) => sum + parseFloat(r.cost || 0), 0),
+      total_monthly_cost: rows.filter(r => r.status === 'Active').reduce((sum, r) => sum + parseFloat(r.cost || 0), 0),
       active: rows.filter(r => r.status === 'Active').length,
       expired: rows.filter(r => r.status === 'Expired').length,
       cancelled: rows.filter(r => r.status === 'Cancelled').length,
       trial: rows.filter(r => r.status === 'Trial').length,
     };
+
+    // Get total spent from all renewal history
+    const [spentRows] = await db.query(
+      `SELECT COALESCE(SUM(r.cost_at_renewal), 0) AS total_spent
+       FROM software_license_renewals r
+       INNER JOIN software_licenses sl ON sl.id = r.license_id
+       WHERE sl.deleted = 0`
+    );
+    summary.total_spent = parseFloat(spentRows[0]?.total_spent || 0);
 
     return res.json({ licenses: rows, summary });
   } catch (err) {
@@ -95,6 +104,15 @@ exports.create = async (req, res) => {
         req.user.id
       ]
     );
+
+    // Auto-create initial period in renewal history if expiry_date is provided
+    if (expiry_date) {
+      await db.query(
+        `INSERT INTO software_license_renewals (license_id, period_start, period_end, cost_at_renewal, notes, renewed_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [result.insertId, start_date, expiry_date, parseFloat(cost || 0), 'Initial period', req.user.id]
+      );
+    }
 
     const [created] = await db.query(
       `SELECT sl.*, CONCAT(cu.first_name, ' ', cu.last_name) AS created_by_name
