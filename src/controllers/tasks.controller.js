@@ -121,7 +121,9 @@ exports.list = async (req, res) => {
               u_assigned.last_name AS assigned_to_last_name,
               CONCAT(u_created.first_name,  ' ', u_created.last_name)  AS created_by_name,
               (SELECT pt2.project_id FROM project_tasks pt2 WHERE pt2.task_id = t.id LIMIT 1) AS project_id,
-              (SELECT p2.title FROM project_tasks pt2 JOIN projects p2 ON p2.id = pt2.project_id AND p2.deleted = 0 WHERE pt2.task_id = t.id LIMIT 1) AS project_name
+              (SELECT p2.title FROM project_tasks pt2 JOIN projects p2 ON p2.id = pt2.project_id AND p2.deleted = 0 WHERE pt2.task_id = t.id LIMIT 1) AS project_name,
+              (SELECT pt2.service_id FROM project_tasks pt2 WHERE pt2.task_id = t.id LIMIT 1) AS service_id,
+              (SELECT s2.name FROM project_tasks pt2 JOIN services s2 ON s2.id = pt2.service_id WHERE pt2.task_id = t.id LIMIT 1) AS service_name
        FROM tasks t
        LEFT JOIN users u_assigned ON u_assigned.id = t.assigned_to
        LEFT JOIN users u_created  ON u_created.id  = t.created_by
@@ -214,7 +216,9 @@ exports.getOne = async (req, res) => {
               fwd.id   AS pending_forward_id,
               fwd.forwarded_to AS forwarded_to_user_id,
               pt.project_id,
-              p.title AS project_name
+              p.title AS project_name,
+              pt.service_id,
+              sv.name AS service_name
        FROM tasks t
        LEFT JOIN users u_assigned ON u_assigned.id = t.assigned_to
        LEFT JOIN users u_created  ON u_created.id  = t.created_by
@@ -224,6 +228,7 @@ exports.getOne = async (req, res) => {
               ON fwd.task_id = t.id AND fwd.status = 'pending' AND fwd.deleted = 0
        LEFT JOIN project_tasks pt ON pt.task_id = t.id
        LEFT JOIN projects p ON p.id = pt.project_id AND p.deleted = 0
+       LEFT JOIN services sv ON sv.id = pt.service_id
        WHERE t.id = ? AND t.deleted = 0`,
       [req.params.id]
     );
@@ -274,7 +279,7 @@ exports.create = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { title, description, assigned_to, start_date, deadline, priority, project_id, collaborators } = req.body;
+  const { title, description, assigned_to, start_date, deadline, priority, project_id, service_id, collaborators } = req.body;
 
   try {
     const assignee  = assigned_to || req.user.id;
@@ -318,8 +323,8 @@ exports.create = async (req, res) => {
     // Link task to project if project_id provided
     if (project_id) {
       await db.query(
-        'INSERT IGNORE INTO project_tasks (project_id, task_id) VALUES (?, ?)',
-        [project_id, taskId]
+        'INSERT IGNORE INTO project_tasks (project_id, task_id, service_id) VALUES (?, ?, ?)',
+        [project_id, taskId, service_id || null]
       );
     }
 
@@ -365,7 +370,7 @@ exports.update = async (req, res) => {
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
 
-    if (Object.keys(updates).length === 0 && req.body.project_id === undefined && req.body.collaborators === undefined) {
+    if (Object.keys(updates).length === 0 && req.body.project_id === undefined && req.body.service_id === undefined && req.body.collaborators === undefined) {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
@@ -392,10 +397,16 @@ exports.update = async (req, res) => {
       await db.query('DELETE FROM project_tasks WHERE task_id = ?', [req.params.id]);
       if (req.body.project_id) {
         await db.query(
-          'INSERT IGNORE INTO project_tasks (project_id, task_id) VALUES (?, ?)',
-          [req.body.project_id, req.params.id]
+          'INSERT IGNORE INTO project_tasks (project_id, task_id, service_id) VALUES (?, ?, ?)',
+          [req.body.project_id, req.params.id, req.body.service_id || null]
         );
       }
+    } else if (req.body.service_id !== undefined) {
+      // Update only the service_id on existing project_tasks link
+      await db.query(
+        'UPDATE project_tasks SET service_id = ? WHERE task_id = ?',
+        [req.body.service_id || null, req.params.id]
+      );
     }
 
     // Update collaborators if provided
@@ -556,6 +567,17 @@ exports.resubmit = async (req, res) => {
     await db.query(`UPDATE tasks SET ${setClauses} WHERE id = ?`, values);
 
     await logActivity(task.id, req.user.id, 'resubmitted', { note: 'Task resubmitted for approval' });
+
+    // Update project/service link during resubmit
+    if (req.body.project_id !== undefined) {
+      await db.query('DELETE FROM project_tasks WHERE task_id = ?', [task.id]);
+      if (req.body.project_id) {
+        await db.query(
+          'INSERT IGNORE INTO project_tasks (project_id, task_id, service_id) VALUES (?, ?, ?)',
+          [req.body.project_id, task.id, req.body.service_id || null]
+        );
+      }
+    }
 
     const [updated] = await db.query('SELECT * FROM tasks WHERE id = ?', [task.id]);
     res.emitSocket('tasks:updated', updated[0]);
