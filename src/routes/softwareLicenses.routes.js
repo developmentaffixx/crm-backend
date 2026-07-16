@@ -21,4 +21,10 @@ router.put('/:id', param('id').isInt(), ctrl.update);
 // DELETE /api/software-licenses/:id — soft delete
 router.delete('/:id', param('id').isInt(), ctrl.remove);
 
+// POST /api/software-licenses/:id/renew — renew a license
+router.post('/:id/renew', param('id').isInt(), ctrl.renew);
+
+// GET /api/software-licenses/:id/history — get renewal history
+router.get('/:id/history', param('id').isInt(), ctrl.getHistory);
+
 module.exports = router;

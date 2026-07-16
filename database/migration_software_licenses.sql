@@ -24,3 +24,20 @@ CREATE TABLE IF NOT EXISTS software_licenses (
   updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_sl_created FOREIGN KEY (created_by) REFERENCES users(id)
 ) ENGINE=InnoDB;
+
+-- ============================================================
+-- Software License Renewal History
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS software_license_renewals (
+  id                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  license_id          INT UNSIGNED NOT NULL,
+  previous_expiry     DATE DEFAULT NULL,
+  new_expiry          DATE NOT NULL,
+  cost_at_renewal     DECIMAL(12,2) NOT NULL DEFAULT 0,
+  notes               TEXT DEFAULT NULL,
+  renewed_by          INT UNSIGNED NOT NULL,
+  renewed_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_slr_license FOREIGN KEY (license_id) REFERENCES software_licenses(id) ON DELETE CASCADE,
+  CONSTRAINT fk_slr_user    FOREIGN KEY (renewed_by) REFERENCES users(id)
+) ENGINE=InnoDB;
