@@ -364,26 +364,72 @@ exports.update = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM payroll WHERE id = ? AND deleted = 0', [req.params.id]);
     if (!rows.length) return res.status(404).json({ message: 'Payroll record not found' });
     const ex = rows[0];
-    const { bonus, advance_deduction, other_deduction, notes, payment_mode } = req.body;
+    const {
+      bonus, advance_deduction, other_deduction, notes, payment_mode,
+      net_salary, pay_month, pay_year, payment_date,
+      is_freelancer, freelancer_name, freelancer_role, employee_id
+    } = req.body;
 
-    const bonusAmt   = bonus            !== undefined ? parseFloat(bonus)            : parseFloat(ex.bonus);
-    const advAmt     = advance_deduction!== undefined ? parseFloat(advance_deduction): parseFloat(ex.advance_deduction);
-    const otherAmt   = other_deduction  !== undefined ? parseFloat(other_deduction)  : parseFloat(ex.other_deduction);
+    // If net_salary is provided directly (manual/freelancer edit), use it as-is
+    if (net_salary !== undefined) {
+      const bonusAmt = bonus !== undefined ? parseFloat(bonus) : parseFloat(ex.bonus);
+      const advAmt   = advance_deduction !== undefined ? parseFloat(advance_deduction) : parseFloat(ex.advance_deduction);
+      const otherAmt = other_deduction !== undefined ? parseFloat(other_deduction) : parseFloat(ex.other_deduction);
+      const netAmt   = parseFloat(net_salary);
 
-    // Recalculate net: (workingDays × perDay) - lopDeduction + bonus - advance - other
-    const netSalary = parseFloat(
-      (ex.working_days * ex.per_day_salary - parseFloat(ex.lop_deduction) + bonusAmt - advAmt - otherAmt).toFixed(2)
-    );
+      await db.query(
+        `UPDATE payroll SET
+          net_salary=?, monthly_salary=?, per_day_salary=?,
+          bonus=?, advance_deduction=?, other_deduction=?,
+          notes=?, payment_mode=?,
+          pay_month=?, pay_year=?,
+          is_freelancer=?, freelancer_name=?, freelancer_role=?, employee_id=?
+         WHERE id=?`,
+        [
+          netAmt, netAmt, parseFloat((netAmt / 30).toFixed(2)),
+          bonusAmt, advAmt, otherAmt,
+          notes !== undefined ? notes : ex.notes, payment_mode || ex.payment_mode,
+          pay_month || ex.pay_month, pay_year || ex.pay_year,
+          is_freelancer !== undefined ? (is_freelancer ? 1 : 0) : ex.is_freelancer,
+          freelancer_name !== undefined ? freelancer_name : ex.freelancer_name,
+          freelancer_role !== undefined ? freelancer_role : ex.freelancer_role,
+          is_freelancer ? null : (employee_id || ex.employee_id),
+          req.params.id
+        ]
+      );
 
-    await db.query(
-      `UPDATE payroll SET bonus=?, advance_deduction=?, other_deduction=?, net_salary=?, notes=?, payment_mode=? WHERE id=?`,
-      [bonusAmt, advAmt, otherAmt, netSalary, notes ?? ex.notes, payment_mode || ex.payment_mode, req.params.id]
-    );
+      // Handle payment_date / mark paid
+      if (payment_date) {
+        await db.query(
+          `UPDATE payroll SET status = 'Paid', payment_date = ?, payment_mode = ? WHERE id = ?`,
+          [payment_date, payment_mode || ex.payment_mode, req.params.id]
+        );
+      }
+    } else {
+      // Original behavior: recalculate from attendance-based data
+      const bonusAmt   = bonus            !== undefined ? parseFloat(bonus)            : parseFloat(ex.bonus);
+      const advAmt     = advance_deduction!== undefined ? parseFloat(advance_deduction): parseFloat(ex.advance_deduction);
+      const otherAmt   = other_deduction  !== undefined ? parseFloat(other_deduction)  : parseFloat(ex.other_deduction);
+
+      const netSalary = parseFloat(
+        (ex.working_days * ex.per_day_salary - parseFloat(ex.lop_deduction) + bonusAmt - advAmt - otherAmt).toFixed(2)
+      );
+
+      await db.query(
+        `UPDATE payroll SET bonus=?, advance_deduction=?, other_deduction=?, net_salary=?, notes=?, payment_mode=? WHERE id=?`,
+        [bonusAmt, advAmt, otherAmt, netSalary, notes ?? ex.notes, payment_mode || ex.payment_mode, req.params.id]
+      );
+    }
+
     const [updated] = await db.query(
       `SELECT p.*, CONCAT(u.first_name,' ',u.last_name) AS employee_name, u.department, u.designation
        FROM payroll p LEFT JOIN users u ON u.id = p.employee_id WHERE p.id = ?`,
       [req.params.id]
     );
+    if (updated[0]?.is_freelancer) {
+      updated[0].employee_name = updated[0].freelancer_name;
+      updated[0].department = updated[0].freelancer_role || 'Freelancer';
+    }
     res.emitSocket('payroll:updated', updated[0]);
     return res.json(updated[0]);
   } catch (err) {
