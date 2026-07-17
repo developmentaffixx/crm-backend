@@ -1,7 +1,7 @@
 USE crm_task_module;
 
 -- ============================================================
--- Assets Module - Fresh Database Schema
+-- Assets Module - Fresh Database Schema (Phase 1)
 -- Drop existing tables and recreate from scratch
 -- ============================================================
 
@@ -23,15 +23,16 @@ CREATE TABLE asset_categories (
   updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
--- Default categories from requirements
+-- Categories from Phase 1 document
 INSERT INTO asset_categories (name) VALUES
   ('IT Equipment'),
   ('Production Equipment'),
-  ('Audio Equipment'),
   ('Lighting Equipment'),
-  ('Accessories'),
+  ('Audio Equipment'),
+  ('IT Accessories'),
   ('Office Equipment'),
-  ('Communication Devices');
+  ('Communication'),
+  ('Production Accessories');
 
 -- ============================================================
 -- 2. Assets (Main Table)
@@ -54,7 +55,7 @@ CREATE TABLE assets (
   condition_status    ENUM('Working','Non-functional','Damaged','Lost') NOT NULL DEFAULT 'Working',
   notes               TEXT DEFAULT NULL,
 
-  -- Extra fields (carried over from existing implementation)
+  -- Extra fields (purchase tracking)
   purchase_type       ENUM('Online','Offline') DEFAULT NULL,
   platform_name       VARCHAR(255) DEFAULT NULL,
   received_by         INT UNSIGNED DEFAULT NULL,
@@ -110,119 +111,257 @@ CREATE TABLE asset_assignment_history (
 ) ENGINE=InnoDB;
 
 -- ============================================================
--- 5. Initial Seed Data (from requirements)
+-- 5. Phase 1 - Initial Asset Data
 -- ============================================================
+-- Note: Replace '1' with actual admin user ID if different.
+-- Category IDs: 1=IT Equipment, 2=Production Equipment, 3=Lighting Equipment,
+--               4=Audio Equipment, 5=IT Accessories, 6=Office Equipment,
+--               7=Communication, 8=Production Accessories
 
--- Note: These INSERT statements require a valid created_by user ID.
--- Replace '1' with the actual admin user ID in your system.
+-- ──────────────────────────────────────────────────────────────
+-- PRODUCTION EQUIPMENT (category_id = 2)
+-- ──────────────────────────────────────────────────────────────
 
--- Production Equipment: Sony ZV-E10 Mark II (Camera Kit)
+-- Sony ZV-E10 Mark II Camera Kit
 INSERT INTO assets (asset_id, asset_name, category_id, brand, model, status, created_by)
-VALUES ('AST-001', 'Sony ZV-E10 Mark II (Camera Kit)', 2, 'Sony', 'ZV-E10 Mark II', 'Available', 1);
+VALUES ('AST-001', 'Sony ZV-E10 Mark II Camera Kit', 2, 'Sony', 'ZV-E10 Mark II', 'Available', 1);
 
-SET @camera_id = LAST_INSERT_ID();
+SET @id = LAST_INSERT_ID();
 INSERT INTO asset_components (asset_id, item_name, quantity) VALUES
-  (@camera_id, 'Sony ZV-E10 Mark II Camera', 1),
-  (@camera_id, 'Sony E-Mount Lens (with Lens Cap)', 1),
-  (@camera_id, 'Sony Camera Battery', 1),
-  (@camera_id, 'Sony Camera Battery Charger', 1),
-  (@camera_id, 'Camera Wind Muff', 1),
-  (@camera_id, '64 GB SD Card', 1),
-  (@camera_id, 'Camera Bag', 1);
+  (@id, 'Sony ZV-E10 Mark II Camera', 1),
+  (@id, 'Sony E-Mount Lens (with Lens Cap)', 1),
+  (@id, 'Sony Camera Battery', 1),
+  (@id, 'Sony Camera Battery Charger', 1),
+  (@id, 'Camera Wind Muff', 1),
+  (@id, '64 GB SD Card', 1),
+  (@id, 'Camera Bag', 1);
 
--- Lighting Equipment: Softbox Kit
+-- ──────────────────────────────────────────────────────────────
+-- LIGHTING EQUIPMENT (category_id = 3)
+-- ──────────────────────────────────────────────────────────────
+
+-- Softbox Kit
 INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
-VALUES ('AST-002', 'Softbox Kit', 4, 'Available', 1);
+VALUES ('AST-002', 'Softbox Kit', 3, 'Available', 1);
 
-SET @softbox_id = LAST_INSERT_ID();
+SET @id = LAST_INSERT_ID();
 INSERT INTO asset_components (asset_id, item_name, quantity) VALUES
-  (@softbox_id, 'Umbrella', 1),
-  (@softbox_id, 'White Diffusion Cloth', 2),
-  (@softbox_id, 'Steel Ring', 1),
-  (@softbox_id, 'Grid Cloth', 1);
+  (@id, 'Umbrella', 1),
+  (@id, 'White Diffusion Cloth', 2),
+  (@id, 'Steel Ring', 1),
+  (@id, 'Grid Cloth', 1);
 
--- Lighting Equipment: Velbon Panel Light
+-- Velbon Panel Light
 INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
-VALUES ('AST-003', 'Velbon Panel Light', 4, 'Velbon', 'Available', 1);
+VALUES ('AST-003', 'Velbon Panel Light', 3, 'Velbon', 'Available', 1);
 
-SET @velbon_light_id = LAST_INSERT_ID();
+SET @id = LAST_INSERT_ID();
 INSERT INTO asset_components (asset_id, item_name, quantity) VALUES
-  (@velbon_light_id, 'Battery', 2),
-  (@velbon_light_id, 'Charger', 1);
+  (@id, 'Batteries', 2),
+  (@id, 'Charger', 1);
 
--- Lighting Equipment: Godox SL200
+-- Godox SL200
 INSERT INTO assets (asset_id, asset_name, category_id, brand, model, status, created_by)
-VALUES ('AST-004', 'Godox SL200', 4, 'Godox', 'SL200', 'Available', 1);
+VALUES ('AST-004', 'Godox SL200', 3, 'Godox', 'SL200', 'Available', 1);
 
-SET @godox_id = LAST_INSERT_ID();
+SET @id = LAST_INSERT_ID();
 INSERT INTO asset_components (asset_id, item_name, quantity) VALUES
-  (@godox_id, 'Reflector', 1),
-  (@godox_id, 'Power Cable', 1),
-  (@godox_id, 'LED Protective Cap', 1);
+  (@id, 'Reflector', 1),
+  (@id, 'Power Cable', 1),
+  (@id, 'LED Protective Cap', 1);
 
--- Lighting Equipment: LC500R RGB Light
+-- LC500R RGB Light
 INSERT INTO assets (asset_id, asset_name, category_id, model, status, created_by)
-VALUES ('AST-005', 'LC500R RGB Light', 4, 'LC500R', 'Available', 1);
+VALUES ('AST-005', 'LC500R RGB Light', 3, 'LC500R', 'Available', 1);
 
-SET @lc500r_id = LAST_INSERT_ID();
+SET @id = LAST_INSERT_ID();
 INSERT INTO asset_components (asset_id, item_name, quantity) VALUES
-  (@lc500r_id, 'Remote', 1),
-  (@lc500r_id, 'Charger', 1);
+  (@id, 'Remote', 1),
+  (@id, 'Charger', 1);
 
--- Audio Equipment: Hollyland Lark M2
+-- ──────────────────────────────────────────────────────────────
+-- AUDIO EQUIPMENT (category_id = 4)
+-- ──────────────────────────────────────────────────────────────
+
+-- Hollyland Lark M2
 INSERT INTO assets (asset_id, asset_name, category_id, brand, model, status, created_by)
-VALUES ('AST-006', 'Hollyland Lark M2', 3, 'Hollyland', 'Lark M2', 'Available', 1);
+VALUES ('AST-006', 'Hollyland Lark M2', 4, 'Hollyland', 'Lark M2', 'Available', 1);
 
-SET @lark_id = LAST_INSERT_ID();
+SET @id = LAST_INSERT_ID();
 INSERT INTO asset_components (asset_id, item_name, quantity) VALUES
-  (@lark_id, 'Wireless Microphones', 2),
-  (@lark_id, 'Camera Receiver', 1),
-  (@lark_id, 'USB-C Receiver', 1),
-  (@lark_id, 'Lightning Receiver', 1),
-  (@lark_id, 'Magnetic Clips', 2),
-  (@lark_id, 'Wind Muffs', 2),
-  (@lark_id, 'Charging Case', 1),
-  (@lark_id, 'USB Cable', 1),
-  (@lark_id, 'Carrying Pouch', 1);
+  (@id, 'Wireless Microphones', 2),
+  (@id, 'Camera Receiver', 1),
+  (@id, 'USB-C Receiver', 1),
+  (@id, 'Lightning Receiver', 1),
+  (@id, 'Magnetic Clips', 2),
+  (@id, 'Wind Muffs', 2),
+  (@id, 'Charging Case', 1),
+  (@id, 'USB Cable', 1),
+  (@id, 'Carrying Pouch', 1);
 
--- Audio Equipment: Lavalier Microphone Kit
+-- Lavalier Microphone Kit
 INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
-VALUES ('AST-007', 'Lavalier Microphone Kit', 3, 'Available', 1);
+VALUES ('AST-007', 'Lavalier Microphone Kit', 4, 'Available', 1);
 
-SET @lav_id = LAST_INSERT_ID();
+SET @id = LAST_INSERT_ID();
 INSERT INTO asset_components (asset_id, item_name, quantity) VALUES
-  (@lav_id, 'Lavalier Microphones', 2),
-  (@lav_id, 'Lightning Cable', 1),
-  (@lav_id, 'USB-C Connector', 1),
-  (@lav_id, 'Carrying Pouch', 1);
+  (@id, 'Lavalier Microphones', 2),
+  (@id, 'Lightning Cable', 1),
+  (@id, 'USB-C Connector', 1),
+  (@id, 'Carrying Pouch', 1);
 
--- Accessories: Digitek Camera Tripod
+-- ──────────────────────────────────────────────────────────────
+-- EQUIPMENT STANDS (using Production Accessories = 8)
+-- ──────────────────────────────────────────────────────────────
+
+-- Digitek Camera Tripod
 INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
-VALUES ('AST-008', 'Digitek Camera Tripod', 5, 'Digitek', 'Available', 1);
+VALUES ('AST-008', 'Digitek Camera Tripod', 8, 'Digitek', 'Available', 1);
 
-SET @tripod_id = LAST_INSERT_ID();
+SET @id = LAST_INSERT_ID();
 INSERT INTO asset_components (asset_id, item_name, quantity) VALUES
-  (@tripod_id, 'Carry Bag', 1);
+  (@id, 'Carry Bag', 1);
 
--- Accessories: Velbon Light Stand
+-- Velbon Light Stand
 INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
-VALUES ('AST-009', 'Velbon Light Stand', 5, 'Velbon', 'Available', 1);
+VALUES ('AST-009', 'Velbon Light Stand', 8, 'Velbon', 'Available', 1);
 
--- Accessories: HDMI Cable
-INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
-VALUES ('AST-010', 'HDMI Cable', 5, 'Available', 1);
+-- ──────────────────────────────────────────────────────────────
+-- IT EQUIPMENT (category_id = 1)
+-- ──────────────────────────────────────────────────────────────
 
--- Accessories: USB-C Cable
+-- Editing PC
 INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
-VALUES ('AST-011', 'USB-C Cable', 5, 'Available', 1);
+VALUES ('AST-010', 'Editing PC', 1, 'Available', 1);
 
--- Accessories: 3.5 mm Headphones (x2)
-INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
-VALUES ('AST-012', '3.5 mm Headphones', 5, 'Available', 1);
+-- ASUS Laptop (with Charger & Laptop Bag)
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, notes, created_by)
+VALUES ('AST-011', 'ASUS Laptop', 1, 'ASUS', 'Available', 'With Charger & Laptop Bag', 1);
 
-INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
-VALUES ('AST-013', '3.5 mm Headphones', 5, 'Available', 1);
+-- Dell Monitor #1
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
+VALUES ('AST-012', 'Dell Monitor', 1, 'Dell', 'Available', 1);
 
--- Accessories: USB-C Headphones
+-- Dell Monitor #2
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
+VALUES ('AST-013', 'Dell Monitor', 1, 'Dell', 'Available', 1);
+
+-- Logitech Keyboard #1
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
+VALUES ('AST-014', 'Logitech Keyboard', 1, 'Logitech', 'Available', 1);
+
+-- Logitech Keyboard #2
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
+VALUES ('AST-015', 'Logitech Keyboard', 1, 'Logitech', 'Available', 1);
+
+-- Editing Keyboard #1
 INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
-VALUES ('AST-014', 'USB-C Headphones', 5, 'Available', 1);
+VALUES ('AST-016', 'Editing Keyboard', 1, 'Available', 1);
+
+-- Editing Keyboard #2
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-017', 'Editing Keyboard', 1, 'Available', 1);
+
+-- Apple iPad (with Charger, Back Case & Tempered Glass)
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, notes, created_by)
+VALUES ('AST-018', 'Apple iPad', 1, 'Apple', 'Available', 'With Charger, Back Case & Tempered Glass', 1);
+
+-- Realme Office Phone
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
+VALUES ('AST-019', 'Realme Office Phone', 1, 'Realme', 'Available', 1);
+
+-- ──────────────────────────────────────────────────────────────
+-- IT ACCESSORIES (category_id = 5)
+-- ──────────────────────────────────────────────────────────────
+
+-- ASUS Mouse
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
+VALUES ('AST-020', 'ASUS Mouse', 5, 'ASUS', 'Available', 1);
+
+-- Lapcare Mouse
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
+VALUES ('AST-021', 'Lapcare Mouse', 5, 'Lapcare', 'Available', 1);
+
+-- Mouse Pad
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-022', 'Mouse Pad', 5, 'Available', 1);
+
+-- Extension Box
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-023', 'Extension Box', 5, 'Available', 1);
+
+-- HDMI Cable
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-024', 'HDMI Cable', 5, 'Available', 1);
+
+-- USB-C Cable
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-025', 'USB-C Cable', 5, 'Available', 1);
+
+-- Card Reader
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-026', 'Card Reader', 5, 'Available', 1);
+
+-- Card Reader USB-C Adapter
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-027', 'Card Reader USB-C Adapter', 5, 'Available', 1);
+
+-- HP Pen Drive
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
+VALUES ('AST-028', 'HP Pen Drive', 5, 'HP', 'Available', 1);
+
+-- SanDisk Pen Drive
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, created_by)
+VALUES ('AST-029', 'SanDisk Pen Drive', 5, 'SanDisk', 'Available', 1);
+
+-- Samsung 1TB SSD (with Hard Pouch)
+INSERT INTO assets (asset_id, asset_name, category_id, brand, status, notes, created_by)
+VALUES ('AST-030', 'Samsung 1TB SSD', 5, 'Samsung', 'Available', 'With Hard Pouch', 1);
+
+-- 3.5 mm Headphones #1
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-031', '3.5 mm Headphones', 5, 'Available', 1);
+
+-- 3.5 mm Headphones #2
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-032', '3.5 mm Headphones', 5, 'Available', 1);
+
+-- USB-C Headphones
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-033', 'USB-C Headphones', 5, 'Available', 1);
+
+-- ──────────────────────────────────────────────────────────────
+-- COMMUNICATION (category_id = 7)
+-- ──────────────────────────────────────────────────────────────
+
+-- Office SIM Card #1
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-034', 'Office SIM Card', 7, 'Available', 1);
+
+-- Office SIM Card #2
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-035', 'Office SIM Card', 7, 'Available', 1);
+
+-- Office SIM Card #3
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-036', 'Office SIM Card', 7, 'Available', 1);
+
+-- ──────────────────────────────────────────────────────────────
+-- OFFICE EQUIPMENT (category_id = 6)
+-- ──────────────────────────────────────────────────────────────
+
+-- Whiteboard
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-037', 'Whiteboard', 6, 'Available', 1);
+
+-- Plastic Mini Stool
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-038', 'Plastic Mini Stool', 6, 'Available', 1);
+
+-- ──────────────────────────────────────────────────────────────
+-- PRODUCTION ACCESSORIES (category_id = 8)
+-- ──────────────────────────────────────────────────────────────
+
+-- Clapboard
+INSERT INTO assets (asset_id, asset_name, category_id, status, created_by)
+VALUES ('AST-039', 'Clapboard', 8, 'Available', 1);

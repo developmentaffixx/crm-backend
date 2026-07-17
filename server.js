@@ -63,6 +63,7 @@ const contentCalendarSlotsRoutes = require('./src/routes/contentCalendarSlots.ro
 const revenueIntroDocumentsRoutes = require('./src/routes/revenueIntroDocuments.routes');
 const softwareLicensesRoutes = require('./src/routes/softwareLicenses.routes');
 const inventoriesRoutes      = require('./src/routes/inventories.routes');
+const aiLabsRoutes           = require('./src/routes/aiLabs.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -156,6 +157,7 @@ app.use('/api/content-calendar-slots', contentCalendarSlotsRoutes);
 app.use('/api/revenue-intro-documents', revenueIntroDocumentsRoutes);
 app.use('/api/software-licenses',      softwareLicensesRoutes);
 app.use('/api/inventories',            inventoriesRoutes);
+app.use('/api/ai-labs',                aiLabsRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
 const { authenticate: authMiddleware } = require('./src/middleware/auth');
