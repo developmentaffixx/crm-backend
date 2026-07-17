@@ -494,7 +494,7 @@ exports.createManual = async (req, res) => {
          working_days, days_present, absent_days, paid_leave_used, lop_days,
          monthly_salary, per_day_salary, lop_deduction,
          bonus, advance_deduction, other_deduction, net_salary,
-         payment_mode, payment_date, status, auto_generated,
+         payment_mode, status, auto_generated,
          is_freelancer, freelancer_name, freelancer_role,
          notes, created_by
        ) VALUES (?,?,?,?,?,30,0,0,0,0,?,?,0,?,?,?,?,'Bank','Draft',0,?,?,?,?,?)`,
