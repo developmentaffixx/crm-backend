@@ -279,7 +279,7 @@ exports.create = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { title, description, assigned_to, start_date, deadline, priority, project_id, service_id, collaborators } = req.body;
+  const { title, description, assigned_to, start_date, deadline, priority, project_id, service_id, collaborators, cycle_id } = req.body;
 
   try {
     const assignee  = assigned_to || req.user.id;
@@ -325,6 +325,20 @@ exports.create = async (req, res) => {
       await db.query(
         'INSERT IGNORE INTO project_tasks (project_id, task_id, service_id) VALUES (?, ?, ?)',
         [project_id, taskId, service_id || null]
+      );
+
+      // Log project activity for task creation
+      await db.query(
+        `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
+        [project_id, `Task created: ${title}`, req.user.id]
+      );
+    }
+
+    // Link task to cycle if cycle_id provided
+    if (cycle_id) {
+      await db.query(
+        'INSERT IGNORE INTO cycle_tasks (cycle_id, task_id) VALUES (?, ?)',
+        [cycle_id, taskId]
       );
     }
 

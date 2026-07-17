@@ -63,14 +63,27 @@ exports.list = async (req, res) => {
       `SELECT p.*,
               l.business_name AS client_name,
               s.name AS service_name,
-              CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name
+              CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
+              CASE
+                WHEN EXISTS (
+                  SELECT 1 FROM project_services ps2
+                  WHERE ps2.project_id = p.id AND ps2.status = 'active'
+                ) THEN 1
+                WHEN EXISTS (
+                  SELECT 1 FROM service_cycles sc2
+                  JOIN project_services ps3 ON ps3.id = sc2.project_service_id
+                  WHERE ps3.project_id = p.id AND sc2.status = 'active'
+                ) THEN 1
+                WHEN p.status IN ('open', 'in_progress') THEN 1
+                ELSE 0
+              END AS is_active
        FROM projects p
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN services s ON s.id = p.service_id
        LEFT JOIN users uc ON uc.id = p.created_by
        ${!req.user.is_admin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ' + req.user.id : ''}
        WHERE ${where}
-       ORDER BY p.created_at DESC`,
+       ORDER BY is_active DESC, p.created_at DESC`,
       params
     );
 
@@ -265,25 +278,29 @@ exports.create = async (req, res) => {
   const { title, description, project_type, client_id, service_id, start_date, end_date, status, members } = req.body;
 
   try {
-    // Generate project_id_code: PRJ-CLIENT-###
-    let clientCode = 'INT';
+    // Generate project_id_code: ACC-YYMMDD-### (sequence resets per Financial Year: April–March)
     const actualClientId = project_type === 'external' ? (client_id || null) : null;
-    if (actualClientId) {
-      const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [actualClientId]);
-      if (clientRows.length > 0 && clientRows[0].client_code) {
-        clientCode = clientRows[0].client_code;
-      }
-    }
+    const now = new Date();
+    const yy = String(now.getFullYear()).slice(-2);
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const datePrefix = `ACC-${yy}${mm}${dd}`;
+
+    // Determine FY start: if month >= April, FY started this year's April 1; else last year's April 1
+    const fyStartYear = (now.getMonth() + 1) >= 4 ? now.getFullYear() : now.getFullYear() - 1;
+    const fyStart = `${fyStartYear}-04-01`;
+
+    // Get the max sequence number used in the current FY
     const [lastProject] = await db.query(
-      `SELECT project_id_code FROM projects WHERE project_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
-      [`PRJ-${clientCode}-%`]
+      `SELECT project_id_code FROM projects WHERE project_id_code LIKE 'ACC-%' AND created_at >= ? ORDER BY id DESC LIMIT 1`,
+      [fyStart]
     );
     let projectSeq = 1;
     if (lastProject.length > 0 && lastProject[0].project_id_code) {
       const parts = lastProject[0].project_id_code.split('-');
       projectSeq = parseInt(parts[parts.length - 1], 10) + 1;
     }
-    const project_id_code = `PRJ-${clientCode}-${String(projectSeq).padStart(3, '0')}`;
+    const project_id_code = `${datePrefix}-${String(projectSeq).padStart(3, '0')}`;
 
     const [result] = await db.query(
       `INSERT INTO projects (project_id_code, title, description, project_type, client_id, service_id, start_date, end_date, status, created_by)

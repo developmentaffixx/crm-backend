@@ -144,6 +144,12 @@ exports.generateCycles = async (req, res) => {
 
     const cycle = await generateNextCycleForProject(projectId, start_date, end_date, req.user.id, psId);
 
+    // Log activity
+    await db.query(
+      `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
+      [projectId, `New cycle created: ${cycle.title}`, req.user.id]
+    );
+
     return res.status(201).json({ message: `${cycle.title} created`, cycle });
   } catch (err) {
     console.error('Generate cycles error:', err);
@@ -341,6 +347,12 @@ exports.updateCycle = async (req, res) => {
     // If cycle status changed to 'completed', check if all cycles for this service are completed
     // If so, mark the service as completed and recalculate project status
     if (status === 'completed' && currentCycle.project_service_id) {
+      // Log activity
+      await db.query(
+        `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'milestone', ?, ?)`,
+        [projectId, `Cycle completed: ${currentCycle.title}`, req.user.id]
+      );
+
       const [remainingActive] = await db.query(
         `SELECT id FROM service_cycles WHERE project_service_id = ? AND status IN ('active', 'paused') AND id != ?`,
         [currentCycle.project_service_id, cycleId]
@@ -544,6 +556,13 @@ exports.generateNextCycle = async (req, res) => {
     }
 
     const cycle = await generateNextCycleForProject(projectId, start_date, end_date, req.user.id, psId);
+
+    // Log activity
+    await db.query(
+      `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
+      [projectId, `New cycle created: ${cycle.title}`, req.user.id]
+    );
+
     return res.status(201).json({ message: `${cycle.title} created`, cycle });
   } catch (err) {
     console.error('Generate next cycle error:', err);

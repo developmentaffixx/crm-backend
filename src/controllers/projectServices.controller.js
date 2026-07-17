@@ -122,6 +122,12 @@ exports.add = async (req, res) => {
     // Auto-recalculate project status
     await recalculateProjectStatus(projectId);
 
+    // Log activity
+    await db.query(
+      `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
+      [projectId, `Service added: ${newRow[0].service_name}`, req.user.id]
+    );
+
     return res.status(201).json(newRow[0]);
   } catch (err) {
     console.error('Project services add error:', err);

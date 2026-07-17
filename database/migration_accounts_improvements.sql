@@ -1,0 +1,35 @@
+-- ============================================================
+-- Accounts Module Improvements - Migration
+-- SAFE: No destructive changes. All additive.
+-- Existing data and columns remain untouched.
+-- ============================================================
+-- 
+-- Changes made (code-level, no DB schema changes needed):
+-- 
+-- 1. Account ID Code Format Change:
+--    - NEW accounts will now get: ACC-YYMMDD-### (e.g., ACC-260717-001)
+--    - Old accounts keep their existing PRJ-xxx-### codes untouched
+--    - Both formats supported in parallel (no migration of existing IDs needed)
+--
+-- 2. Active/Inactive Auto-Status:
+--    - Computed at query time using subqueries (no new column needed)
+--    - Logic: is_active = 1 if ANY project_service is 'active' 
+--            OR ANY service_cycle linked to project is 'active'
+--            OR project status is 'open'/'in_progress'
+--    - List sorted: active accounts first, then inactive
+--
+-- 3. Task → Cycle Linking:
+--    - Tasks API now accepts optional `cycle_id` in POST /api/tasks
+--    - When provided, auto-inserts into cycle_tasks junction table
+--    - No schema change needed (cycle_tasks table already exists)
+--
+-- 4. Activities Auto-Logging:
+--    - Service add/pause/complete/cancel now logs to project_activities
+--    - Cycle create/complete now logs to project_activities
+--    - Task creation (linked to project) now logs to project_activities
+--    - No schema change needed (project_activities table already exists)
+--
+-- NOTE: If you ever want to add an explicit is_active column for performance:
+-- ALTER TABLE projects ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER status;
+-- UPDATE projects SET is_active = 0 WHERE status IN ('completed', 'cancelled');
+-- (Optional, current subquery approach is fine for < 10,000 projects)
