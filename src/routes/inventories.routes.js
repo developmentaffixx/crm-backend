@@ -6,19 +6,23 @@ const ctrl = require('../controllers/inventories.controller');
 
 router.use(authenticate);
 
-// GET  /api/inventories — list all
+// ─── Categories ───────────────────────────────────────────────────────────────
+router.get('/categories', ctrl.getCategories);
+router.post('/categories', ctrl.createCategory);
+
+// ─── Recent Transactions (dashboard) ──────────────────────────────────────────
+router.get('/recent-transactions', ctrl.recentTransactions);
+
+// ─── CRUD ─────────────────────────────────────────────────────────────────────
 router.get('/', ctrl.list);
-
-// GET  /api/inventories/:id — get single
 router.get('/:id', param('id').isInt(), ctrl.getOne);
-
-// POST /api/inventories — create
 router.post('/', ctrl.create);
-
-// PUT  /api/inventories/:id — update
 router.put('/:id', param('id').isInt(), ctrl.update);
-
-// DELETE /api/inventories/:id — soft delete
 router.delete('/:id', param('id').isInt(), ctrl.remove);
+
+// ─── Stock Actions ────────────────────────────────────────────────────────────
+router.post('/:id/stock-in', param('id').isInt(), ctrl.stockIn);
+router.post('/:id/stock-out', param('id').isInt(), ctrl.stockOut);
+router.get('/:id/history', param('id').isInt(), ctrl.getHistory);
 
 module.exports = router;
