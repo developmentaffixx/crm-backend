@@ -1,35 +1,58 @@
 -- ============================================================
 -- Accounts Module Improvements - Migration
--- SAFE: No destructive changes. All additive.
--- Existing data and columns remain untouched.
+-- SAFE: Only updates display-field project_id_code (not a FK anywhere)
 -- ============================================================
+
+USE crm_task_module;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DATA MIGRATION: Convert existing PRJ-xxx-### codes to ACC-YYMMDD-###
+-- Uses each project's created_at date to generate the YYMMDD portion
+-- Sequential numbering resets per Financial Year (April–March)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Step 1: Assign new ACC-YYMMDD-### codes to ALL existing projects
+-- We use a session variable to generate sequential numbers ordered by created_at
+
+SET @seq := 0;
+SET @prev_fy := '';
+
+UPDATE projects p
+JOIN (
+  SELECT 
+    id,
+    created_at,
+    DATE_FORMAT(created_at, '%y%m%d') AS date_part,
+    -- Determine FY: if month >= 4 (April), FY = that year; else FY = prev year
+    CASE 
+      WHEN MONTH(created_at) >= 4 THEN YEAR(created_at)
+      ELSE YEAR(created_at) - 1
+    END AS fy_year,
+    @seq := IF(
+      @prev_fy = CASE WHEN MONTH(created_at) >= 4 THEN YEAR(created_at) ELSE YEAR(created_at) - 1 END,
+      @seq + 1,
+      1
+    ) AS seq_num,
+    @prev_fy := CASE WHEN MONTH(created_at) >= 4 THEN YEAR(created_at) ELSE YEAR(created_at) - 1 END AS fy_track
+  FROM projects
+  WHERE deleted = 0
+  ORDER BY created_at ASC
+) AS numbered ON numbered.id = p.id
+SET p.project_id_code = CONCAT('ACC-', numbered.date_part, '-', LPAD(numbered.seq_num, 3, '0'));
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- NOTES:
+-- ─────────────────────────────────────────────────────────────────────────────
 -- 
--- Changes made (code-level, no DB schema changes needed):
--- 
--- 1. Account ID Code Format Change:
---    - NEW accounts will now get: ACC-YYMMDD-### (e.g., ACC-260717-001)
---    - Old accounts keep their existing PRJ-xxx-### codes untouched
---    - Both formats supported in parallel (no migration of existing IDs needed)
+-- After running this migration:
+-- - All existing projects will have codes like: ACC-250415-001, ACC-250420-002, etc.
+-- - New projects created by the app will continue with ACC-YYMMDD-### format
+-- - The unique index on project_id_code ensures no duplicates
 --
--- 2. Active/Inactive Auto-Status:
---    - Computed at query time using subqueries (no new column needed)
---    - Logic: is_active = 1 if ANY project_service is 'active' 
---            OR ANY service_cycle linked to project is 'active'
---            OR project status is 'open'/'in_progress'
---    - List sorted: active accounts first, then inactive
+-- If you need to VERIFY before running:
+-- SELECT id, project_id_code, created_at FROM projects WHERE deleted = 0 ORDER BY created_at;
 --
--- 3. Task → Cycle Linking:
---    - Tasks API now accepts optional `cycle_id` in POST /api/tasks
---    - When provided, auto-inserts into cycle_tasks junction table
---    - No schema change needed (cycle_tasks table already exists)
---
--- 4. Activities Auto-Logging:
---    - Service add/pause/complete/cancel now logs to project_activities
---    - Cycle create/complete now logs to project_activities
---    - Task creation (linked to project) now logs to project_activities
---    - No schema change needed (project_activities table already exists)
---
--- NOTE: If you ever want to add an explicit is_active column for performance:
--- ALTER TABLE projects ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER status;
--- UPDATE projects SET is_active = 0 WHERE status IN ('completed', 'cancelled');
--- (Optional, current subquery approach is fine for < 10,000 projects)
+-- If you need to ROLLBACK (restore old codes):
+-- This is one-way. Keep a backup of the old codes if needed:
+-- SELECT id, project_id_code FROM projects WHERE deleted = 0;
+-- (Save this result before running the UPDATE)

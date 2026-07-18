@@ -57,21 +57,22 @@ exports.getOne = async (req, res) => {
 // ─── POST /api/capital ────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
   try {
-    const { title, amount, capital_date, source, payment_mode, note } = req.body;
+    const { title, amount, capital_date, source, payment_mode, transaction_id, note } = req.body;
 
     if (!title || !amount) {
       return res.status(400).json({ message: 'Title and amount are required' });
     }
 
     const [result] = await db.query(
-      `INSERT INTO capital (title, amount, capital_date, source, payment_mode, note, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO capital (title, amount, capital_date, source, payment_mode, transaction_id, note, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         title,
         parseFloat(amount),
         capital_date || new Date().toISOString().split('T')[0],
         source || 'Founder',
         payment_mode || 'Bank',
+        transaction_id || null,
         note || null,
         req.user.id
       ]
@@ -96,10 +97,10 @@ exports.update = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Capital entry not found' });
 
     const existing = rows[0];
-    const { title, amount, capital_date, source, payment_mode, note } = req.body;
+    const { title, amount, capital_date, source, payment_mode, transaction_id, note } = req.body;
 
     await db.query(
-      `UPDATE capital SET title = ?, amount = ?, capital_date = ?, source = ?, payment_mode = ?, note = ?
+      `UPDATE capital SET title = ?, amount = ?, capital_date = ?, source = ?, payment_mode = ?, transaction_id = ?, note = ?
        WHERE id = ?`,
       [
         title !== undefined ? title : existing.title,
@@ -107,6 +108,7 @@ exports.update = async (req, res) => {
         capital_date || existing.capital_date,
         source || existing.source,
         payment_mode || existing.payment_mode,
+        transaction_id !== undefined ? transaction_id : existing.transaction_id,
         note !== undefined ? note : existing.note,
         req.params.id
       ]
