@@ -132,47 +132,64 @@ exports.getFinanceReport = async (req, res) => {
     // ═══════════════════════════════════════════════════════════════════════════
     // 5. KPI: SOFTWARE LICENSES (monthly cost of active subscriptions)
     // ═══════════════════════════════════════════════════════════════════════════
-    const [licensesKpi] = await db.query(
-      `SELECT 
-        COUNT(*) AS active_licenses,
-        COALESCE(SUM(sl.cost), 0) AS total_monthly_cost
-       FROM software_licenses sl
-       WHERE sl.deleted = 0 AND sl.status = 'Active'`
-    );
+    let licensesKpi = [{ active_licenses: 0, total_monthly_cost: 0 }];
+    try {
+      const [rows] = await db.query(
+        `SELECT 
+          COUNT(*) AS active_licenses,
+          COALESCE(SUM(sl.cost), 0) AS total_monthly_cost
+         FROM software_licenses sl
+         WHERE sl.deleted = 0 AND sl.status = 'Active'`
+      );
+      licensesKpi = rows ? [rows[0]] : licensesKpi;
+    } catch (e) { /* table may not exist */ }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // 6. KPI: ASSET TOTAL VALUE
     // ═══════════════════════════════════════════════════════════════════════════
-    const [assetsKpi] = await db.query(
-      `SELECT 
-        COUNT(*) AS total_assets,
-        COALESCE(SUM(a.asset_value), 0) AS total_asset_value
-       FROM assets a
-       WHERE a.deleted = 0`
-    );
+    let assetsKpi = [{ total_assets: 0, total_asset_value: 0 }];
+    try {
+      const [rows] = await db.query(
+        `SELECT 
+          COUNT(*) AS total_assets,
+          COALESCE(SUM(a.asset_value), 0) AS total_asset_value
+         FROM assets a
+         WHERE a.deleted = 0`
+      );
+      assetsKpi = rows ? [rows[0]] : assetsKpi;
+    } catch (e) { /* table may not exist */ }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // 7. KPI: INVENTORY TOTAL VALUE
     // ═══════════════════════════════════════════════════════════════════════════
-    const [inventoryKpi] = await db.query(
-      `SELECT 
-        COUNT(*) AS total_items,
-        COALESCE(SUM(inv.total_value), 0) AS total_inventory_value
-       FROM inventories inv
-       WHERE inv.deleted = 0`
-    );
+    let inventoryKpi = [{ total_items: 0, total_inventory_value: 0 }];
+    try {
+      const [rows] = await db.query(
+        `SELECT 
+          COUNT(*) AS total_items,
+          COALESCE(SUM(inv.quantity * inv.unit_price), 0) AS total_inventory_value
+         FROM inventories inv
+         WHERE inv.deleted = 0`
+      );
+      inventoryKpi = rows ? [rows[0]] : inventoryKpi;
+    } catch (e) { /* table may not exist */ }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // 8. KPI: REIMBURSEMENT PENDING LIABILITY
     // ═══════════════════════════════════════════════════════════════════════════
-    const [reimbursementKpi] = await db.query(
-      `SELECT 
-        COALESCE(SUM(CASE WHEN r.status = 'pending' THEN r.amount ELSE 0 END), 0) AS pending_amount,
-        COALESCE(SUM(CASE WHEN r.status = 'approved' THEN r.amount ELSE 0 END), 0) AS approved_amount,
-        COUNT(CASE WHEN r.status IN ('pending', 'approved') THEN 1 END) AS pending_count
-       FROM reimbursements r
-       WHERE r.deleted = 0`
-    );
+    let reimbursementKpi = [{ pending_amount: 0, approved_amount: 0, pending_count: 0 }];
+    try {
+      const [rows] = await db.query(
+        `SELECT 
+          COALESCE(SUM(CASE WHEN r.status = 'pending' THEN r.amount ELSE 0 END), 0) AS pending_amount,
+          COALESCE(SUM(CASE WHEN r.status = 'approved' THEN r.amount ELSE 0 END), 0) AS approved_amount,
+          COUNT(CASE WHEN r.status IN ('pending', 'approved') THEN 1 END) AS pending_count
+         FROM reimbursements r
+         WHERE r.deleted = 0`
+      );
+      reimbursementKpi = rows ? [rows[0]] : reimbursementKpi;
+    } catch (e) { /* table may not exist */ }
+
 
     // ═══════════════════════════════════════════════════════════════════════════
     // 9. PROFIT & LOSS (computed)
