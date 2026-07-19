@@ -97,7 +97,7 @@ exports.getFinanceReport = async (req, res) => {
         COALESCE(SUM(i.total_amount), 0) AS total_invoiced,
         COALESCE(SUM(i.paid_amount), 0) AS total_collected,
         COALESCE(SUM(i.balance_amount), 0) AS total_outstanding,
-        SUM(CASE WHEN i.status = 'Overdue' THEN 1 ELSE 0 END) AS overdue_count
+        SUM(CASE WHEN i.balance_amount > 0 AND i.due_date < CURDATE() THEN 1 ELSE 0 END) AS overdue_count
        FROM invoices i
        WHERE i.deleted = 0 ${invoiceDateFilter}`,
       [...invoiceDateParams]
