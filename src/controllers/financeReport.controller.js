@@ -116,11 +116,13 @@ exports.getFinanceReport = async (req, res) => {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 4. KPI: PAYROLL
+    // 4. KPI: PAYROLL (with breakdown)
     // ═══════════════════════════════════════════════════════════════════════════
     const [payrollKpi] = await db.query(
       `SELECT 
+        COALESCE(SUM(p.gross_salary), 0) AS total_gross,
         COALESCE(SUM(p.net_salary), 0) AS total_net_salary,
+        COALESCE(SUM(p.total_deductions), 0) AS total_deductions,
         COUNT(DISTINCT p.employee_id) AS employees_paid
        FROM payroll p
        WHERE p.deleted = 0 AND p.status = 'Paid' ${payrollFilter}`,
@@ -128,7 +130,52 @@ exports.getFinanceReport = async (req, res) => {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 5. PROFIT & LOSS (computed)
+    // 5. KPI: SOFTWARE LICENSES (monthly cost of active subscriptions)
+    // ═══════════════════════════════════════════════════════════════════════════
+    const [licensesKpi] = await db.query(
+      `SELECT 
+        COUNT(*) AS active_licenses,
+        COALESCE(SUM(sl.cost), 0) AS total_monthly_cost
+       FROM software_licenses sl
+       WHERE sl.deleted = 0 AND sl.status = 'Active'`
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 6. KPI: ASSET TOTAL VALUE
+    // ═══════════════════════════════════════════════════════════════════════════
+    const [assetsKpi] = await db.query(
+      `SELECT 
+        COUNT(*) AS total_assets,
+        COALESCE(SUM(a.asset_value), 0) AS total_asset_value
+       FROM assets a
+       WHERE a.deleted = 0`
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 7. KPI: INVENTORY TOTAL VALUE
+    // ═══════════════════════════════════════════════════════════════════════════
+    const [inventoryKpi] = await db.query(
+      `SELECT 
+        COUNT(*) AS total_items,
+        COALESCE(SUM(inv.total_value), 0) AS total_inventory_value
+       FROM inventories inv
+       WHERE inv.deleted = 0`
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 8. KPI: REIMBURSEMENT PENDING LIABILITY
+    // ═══════════════════════════════════════════════════════════════════════════
+    const [reimbursementKpi] = await db.query(
+      `SELECT 
+        COALESCE(SUM(CASE WHEN r.status = 'pending' THEN r.amount ELSE 0 END), 0) AS pending_amount,
+        COALESCE(SUM(CASE WHEN r.status = 'approved' THEN r.amount ELSE 0 END), 0) AS approved_amount,
+        COUNT(CASE WHEN r.status IN ('pending', 'approved') THEN 1 END) AS pending_count
+       FROM reimbursements r
+       WHERE r.deleted = 0`
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 9. PROFIT & LOSS (computed)
     // ═══════════════════════════════════════════════════════════════════════════
     const totalRevenue = parseFloat(revenueKpi[0].total_collected || 0);
     const totalExpenses = parseFloat(expenseKpi[0].total_expense_amount || 0);
@@ -137,7 +184,7 @@ exports.getFinanceReport = async (req, res) => {
     const netProfit = totalRevenue - totalExpenses - totalPayroll;
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 6. MONTHLY P&L TREND
+    // 10. MONTHLY P&L TREND
     // ═══════════════════════════════════════════════════════════════════════════
     const [monthlyPnL] = await db.query(
       `SELECT 
@@ -169,7 +216,7 @@ exports.getFinanceReport = async (req, res) => {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 7. CASH FLOW (Monthly inflow vs outflow)
+    // 11. CASH FLOW (Monthly inflow vs outflow)
     // ═══════════════════════════════════════════════════════════════════════════
     const [cashFlowIn] = await db.query(
       `SELECT 
@@ -236,7 +283,7 @@ exports.getFinanceReport = async (req, res) => {
     });
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 8. EXPENSE BY CATEGORY (donut)
+    // 12. EXPENSE BY CATEGORY (donut)
     // ═══════════════════════════════════════════════════════════════════════════
     const [expenseByCategory] = await db.query(
       `SELECT 
@@ -252,7 +299,7 @@ exports.getFinanceReport = async (req, res) => {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 9. TOP CLIENTS (revenue + outstanding)
+    // 13. TOP CLIENTS (revenue + outstanding)
     // ═══════════════════════════════════════════════════════════════════════════
     const [topClients] = await db.query(
       `SELECT 
@@ -272,7 +319,35 @@ exports.getFinanceReport = async (req, res) => {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 10. INVOICE AGING (5 buckets)
+    // 14. CLIENT PROFITABILITY (revenue - expenses per client)
+    // ═══════════════════════════════════════════════════════════════════════════
+    const [clientProfitability] = await db.query(
+      `SELECT 
+        l.id AS client_id,
+        l.name AS client_name,
+        l.business_name,
+        COALESCE(rev.total_paid, 0) AS revenue,
+        COALESCE(exp.total_spent, 0) AS expenses,
+        ROUND(COALESCE(rev.total_paid, 0) - COALESCE(exp.total_spent, 0), 2) AS profit
+       FROM leads l
+       LEFT JOIN (
+         SELECT lead_id, SUM(paid_amount) AS total_paid
+         FROM invoices WHERE deleted = 0 ${invoiceDateFilter.replace(/i\./g, '')}
+         GROUP BY lead_id
+       ) rev ON rev.lead_id = l.id
+       LEFT JOIN (
+         SELECT client_id, SUM(amount) AS total_spent
+         FROM expenses WHERE deleted = 0 ${expenseDateFilter.replace(/e\./g, '')}
+         GROUP BY client_id
+       ) exp ON exp.client_id = l.id
+       WHERE l.deleted = 0 AND (rev.total_paid > 0 OR exp.total_spent > 0)
+       ORDER BY profit DESC
+       LIMIT 15`,
+      [...invoiceDateParams, ...expenseDateParams]
+    );
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 15. INVOICE AGING (5 buckets)
     // ═══════════════════════════════════════════════════════════════════════════
     const [invoiceAging] = await db.query(
       `SELECT 
@@ -288,7 +363,7 @@ exports.getFinanceReport = async (req, res) => {
     );
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 11. OVERDUE INVOICES (table)
+    // 16. OVERDUE INVOICES (table)
     // ═══════════════════════════════════════════════════════════════════════════
     const [overdueInvoices] = await db.query(
       `SELECT 
@@ -318,16 +393,27 @@ exports.getFinanceReport = async (req, res) => {
         total_expenses: totalExpenses,
         net_profit: netProfit,
         total_payroll: totalPayroll,
+        payroll_gross: parseFloat(payrollKpi[0].total_gross || 0),
+        payroll_deductions: parseFloat(payrollKpi[0].total_deductions || 0),
         total_capital: totalCapital,
         total_outstanding: parseFloat(revenueKpi[0].total_outstanding || 0),
         total_invoices: revenueKpi[0].total_invoices,
         overdue_count: revenueKpi[0].overdue_count,
         employees_paid: payrollKpi[0].employees_paid,
+        software_license_cost: parseFloat(licensesKpi[0].total_monthly_cost || 0),
+        active_licenses: licensesKpi[0].active_licenses,
+        total_asset_value: parseFloat(assetsKpi[0].total_asset_value || 0),
+        total_assets: assetsKpi[0].total_assets,
+        total_inventory_value: parseFloat(inventoryKpi[0].total_inventory_value || 0),
+        total_inventory_items: inventoryKpi[0].total_items,
+        reimbursement_pending: parseFloat(reimbursementKpi[0].pending_amount || 0) + parseFloat(reimbursementKpi[0].approved_amount || 0),
+        reimbursement_count: reimbursementKpi[0].pending_count,
       },
       monthlyPnL,
       cashFlow,
       expenseByCategory,
       topClients,
+      clientProfitability,
       invoiceAging: invoiceAging[0],
       overdueInvoices,
     });
