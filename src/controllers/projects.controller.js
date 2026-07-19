@@ -24,6 +24,8 @@ exports.list = async (req, res) => {
     }
 
     // ── Summary query — always runs across ALL statuses ──
+    // For non-admin: JOIN param (user_id) comes first in SQL, followed by WHERE params
+    const summaryParams = !req.user.is_admin ? [req.user.id, ...baseParams] : [...baseParams];
     const [[summaryRow]] = await db.query(
       `SELECT
          COUNT(*)                                AS total,
@@ -33,9 +35,9 @@ exports.list = async (req, res) => {
          SUM(p.status = 'cancelled')            AS cancelled
        FROM projects p
        LEFT JOIN leads l ON l.id = p.client_id
-       ${!req.user.is_admin ? `LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ${req.user.id}` : ''}
+       ${!req.user.is_admin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ?' : ''}
        WHERE ${baseWhere}`,
-      baseParams
+      summaryParams
     );
     const summary = {
       total:       Number(summaryRow.total       || 0),
@@ -59,20 +61,28 @@ exports.list = async (req, res) => {
       where += ` AND p.status IN ('open', 'in_progress')`;
     }
 
+    // Add user_id param for the pm_self join if non-admin
+    const mainParams = [...params];
+    if (!req.user.is_admin) {
+      mainParams.unshift(req.user.id);
+    }
+
     const [rows] = await db.query(
       `SELECT p.*,
               l.business_name AS client_name,
               s.name AS service_name,
               CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
+              (SELECT COUNT(*) FROM project_members pm2 WHERE pm2.project_id = p.id) AS member_count,
+              (SELECT COUNT(*) FROM project_services ps2 WHERE ps2.project_id = p.id) AS service_count,
               CASE
                 WHEN EXISTS (
-                  SELECT 1 FROM project_services ps2
-                  WHERE ps2.project_id = p.id AND ps2.status = 'active'
+                  SELECT 1 FROM project_services ps3
+                  WHERE ps3.project_id = p.id AND ps3.status = 'active'
                 ) THEN 1
                 WHEN EXISTS (
                   SELECT 1 FROM service_cycles sc2
-                  JOIN project_services ps3 ON ps3.id = sc2.project_service_id
-                  WHERE ps3.project_id = p.id AND sc2.status = 'active'
+                  JOIN project_services ps4 ON ps4.id = sc2.project_service_id
+                  WHERE ps4.project_id = p.id AND sc2.status = 'active'
                 ) THEN 1
                 WHEN p.status IN ('open', 'in_progress') THEN 1
                 ELSE 0
@@ -81,32 +91,11 @@ exports.list = async (req, res) => {
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN services s ON s.id = p.service_id
        LEFT JOIN users uc ON uc.id = p.created_by
-       ${!req.user.is_admin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ' + req.user.id : ''}
+       ${!req.user.is_admin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ?' : ''}
        WHERE ${where}
        ORDER BY is_active DESC, p.created_at DESC`,
-      params
+      mainParams
     );
-
-    // Fetch member count for each project
-    if (rows.length > 0) {
-      const projectIds = rows.map(r => r.id);
-      const [memberCounts] = await db.query(
-        `SELECT project_id, COUNT(*) AS member_count FROM project_members WHERE project_id IN (?) GROUP BY project_id`,
-        [projectIds]
-      );
-      const countMap = {};
-      memberCounts.forEach(mc => { countMap[mc.project_id] = mc.member_count; });
-      rows.forEach(r => { r.member_count = countMap[r.id] || 0; });
-
-      // Fetch service count for each project
-      const [serviceCounts] = await db.query(
-        `SELECT project_id, COUNT(*) AS service_count FROM project_services WHERE project_id IN (?) GROUP BY project_id`,
-        [projectIds]
-      );
-      const svcCountMap = {};
-      serviceCounts.forEach(sc => { svcCountMap[sc.project_id] = sc.service_count; });
-      rows.forEach(r => { r.service_count = svcCountMap[r.id] || 0; });
-    }
 
     return res.json({ projects: rows, summary });
   } catch (err) {
@@ -275,7 +264,7 @@ exports.create = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { title, description, project_type, client_id, service_id, start_date, end_date, status, members } = req.body;
+  const { title, description, project_type, client_id, service_id, start_date, end_date, status, members, budget } = req.body;
 
   try {
     // Generate project_id_code: ACC-YYMMDD-### (sequence resets per Financial Year: April–March)
@@ -303,8 +292,8 @@ exports.create = async (req, res) => {
     const project_id_code = `${datePrefix}-${String(projectSeq).padStart(3, '0')}`;
 
     const [result] = await db.query(
-      `INSERT INTO projects (project_id_code, title, description, project_type, client_id, service_id, start_date, end_date, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (project_id_code, title, description, project_type, client_id, service_id, start_date, end_date, budget, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         project_id_code,
         title,
@@ -314,6 +303,7 @@ exports.create = async (req, res) => {
         service_id || null,
         start_date || null,
         end_date || null,
+        budget || null,
         status || 'open',
         req.user.id
       ]
@@ -358,12 +348,12 @@ exports.update = async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    const allowed = ['title', 'description', 'project_type', 'client_id', 'service_id', 'start_date', 'end_date', 'status', 'project_id_code'];
+    const allowed = ['title', 'description', 'project_type', 'client_id', 'service_id', 'start_date', 'end_date', 'budget', 'status', 'project_id_code'];
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
 
     // Normalize empty strings to null for nullable fields
-    const nullableFields = ['description', 'client_id', 'service_id', 'start_date', 'end_date'];
+    const nullableFields = ['description', 'client_id', 'service_id', 'start_date', 'end_date', 'budget'];
     nullableFields.forEach(f => {
       if (updates[f] === '' || updates[f] === 0 || updates[f] === '0') {
         updates[f] = null;
@@ -433,6 +423,10 @@ exports.addTask = async (req, res) => {
     const { task_id } = req.body;
     if (!task_id) return res.status(400).json({ message: 'task_id is required' });
 
+    // Verify task exists
+    const [taskRows] = await db.query('SELECT id FROM tasks WHERE id = ? AND deleted = 0', [task_id]);
+    if (taskRows.length === 0) return res.status(404).json({ message: 'Task not found' });
+
     await db.query(
       'INSERT IGNORE INTO project_tasks (project_id, task_id) VALUES (?, ?)',
       [req.params.id, task_id]
@@ -467,6 +461,7 @@ exports.addActivity = async (req, res) => {
   try {
     const { type, note } = req.body;
     if (!note) return res.status(400).json({ message: 'Note is required' });
+    if (note.length > 5000) return res.status(400).json({ message: 'Note is too long (max 5000 characters)' });
 
     const [result] = await db.query(
       'INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, ?, ?, ?)',

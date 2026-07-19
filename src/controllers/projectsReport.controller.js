@@ -150,9 +150,18 @@ exports.getProjectsReport = async (req, res) => {
         u.id AS user_id,
         CONCAT(u.first_name, ' ', u.last_name) AS name,
         COUNT(DISTINCT pm.project_id) AS project_count,
-        0 AS total_seconds,
-        0 AS tasks_completed,
-        0 AS tasks_total
+        COALESCE((SELECT SUM(ttl.duration) FROM task_time_logs ttl 
+          JOIN project_tasks pt2 ON pt2.task_id = ttl.task_id 
+          JOIN projects p2 ON p2.id = pt2.project_id 
+          WHERE ttl.user_id = u.id AND p2.deleted = 0 ${dateFilter} ${extraFilter}), 0) AS total_seconds,
+        COALESCE((SELECT COUNT(*) FROM project_tasks pt3 
+          JOIN tasks t2 ON t2.id = pt3.task_id 
+          JOIN projects p3 ON p3.id = pt3.project_id
+          WHERE t2.assigned_to = u.id AND t2.deleted = 0 AND t2.status = 'done' AND p3.deleted = 0 ${dateFilter} ${extraFilter}), 0) AS tasks_completed,
+        COALESCE((SELECT COUNT(*) FROM project_tasks pt4 
+          JOIN tasks t3 ON t3.id = pt4.task_id 
+          JOIN projects p4 ON p4.id = pt4.project_id
+          WHERE t3.assigned_to = u.id AND t3.deleted = 0 AND p4.deleted = 0 ${dateFilter} ${extraFilter}), 0) AS tasks_total
        FROM users u
        JOIN project_members pm ON pm.user_id = u.id
        JOIN projects p ON p.id = pm.project_id
@@ -160,7 +169,7 @@ exports.getProjectsReport = async (req, res) => {
        GROUP BY u.id, u.first_name, u.last_name
        ORDER BY project_count DESC
        LIMIT 15`,
-      allParams
+      [...allParams, ...dateParams, ...extraParams, ...dateParams, ...extraParams, ...dateParams, ...extraParams]
     );
 
     // ─── 7. Task Analytics (across all projects) ────────────────────────────────
@@ -185,19 +194,27 @@ exports.getProjectsReport = async (req, res) => {
     );
 
     // ─── 8. Top Projects by Revenue ─────────────────────────────────────────────
+    // Revenue is per-client (shared across projects of same client), expenses are per-project
     const [topByRevenue] = await safeQuery(
       `SELECT 
         p.id, p.title, p.status, p.project_type,
         l.name AS client_name,
-        COALESCE(SUM(i.total_amount), 0) AS revenue,
-        COALESCE(SUM(i.paid_amount), 0) AS collected,
+        COALESCE(client_rev.revenue, 0) AS revenue,
+        COALESCE(client_rev.collected, 0) AS collected,
         (SELECT COALESCE(SUM(e.amount), 0) FROM expenses e WHERE e.project_id = p.id AND e.deleted = 0) AS expenses
        FROM projects p
        LEFT JOIN leads l ON l.id = p.client_id
-       LEFT JOIN invoices i ON i.lead_id = p.client_id AND i.deleted = 0
+       LEFT JOIN (
+         SELECT i.lead_id,
+                SUM(i.total_amount) AS revenue,
+                SUM(i.paid_amount) AS collected
+         FROM invoices i
+         WHERE i.deleted = 0
+         GROUP BY i.lead_id
+       ) client_rev ON client_rev.lead_id = p.client_id
        WHERE ${baseWhere}
-       GROUP BY p.id, p.title, p.status, p.project_type, l.name
-       ORDER BY revenue DESC
+       GROUP BY p.id, p.title, p.status, p.project_type, l.name, client_rev.revenue, client_rev.collected
+       ORDER BY revenue DESC, expenses DESC
        LIMIT 10`,
       allParams
     );
@@ -350,6 +367,14 @@ exports.getSingleProjectReport = async (req, res) => {
     }
     const project = projectRows[0];
 
+    // ─── Budget vs Actual ───────────────────────────────────────────────────────
+    const budgetInfo = {
+      budget: project.budget || null,
+      spent: 0,
+      utilization: null,
+      status: null, // 'under', 'on_track', 'over'
+    };
+
     // ─── Team Members ───────────────────────────────────────────────────────────
     const [teamMembers] = await safeQuery(
       `SELECT u.id, CONCAT(u.first_name, ' ', u.last_name) AS name, u.email,
@@ -431,6 +456,15 @@ exports.getSingleProjectReport = async (req, res) => {
        FROM expenses WHERE project_id = ? AND deleted = 0`,
       [projectId]
     );
+
+    // Populate budget tracking
+    budgetInfo.spent = Number(expenseKpi[0]?.total_expenses || 0);
+    if (budgetInfo.budget) {
+      budgetInfo.utilization = Math.round((budgetInfo.spent / budgetInfo.budget) * 100);
+      if (budgetInfo.utilization > 100) budgetInfo.status = 'over';
+      else if (budgetInfo.utilization > 80) budgetInfo.status = 'on_track';
+      else budgetInfo.status = 'under';
+    }
 
     // ─── Expense by Category ────────────────────────────────────────────────────
     const [expenseByCategory] = await safeQuery(
@@ -532,6 +566,7 @@ exports.getSingleProjectReport = async (req, res) => {
       expenses,
       expenseKpi: expenseKpi[0] || {},
       expenseByCategory,
+      budgetInfo,
       tickets,
       ticketKpi: tkKpi,
       extensions,
