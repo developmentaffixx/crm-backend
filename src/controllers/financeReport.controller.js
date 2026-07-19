@@ -77,10 +77,21 @@ exports.getFinanceReport = async (req, res) => {
       payrollParams.push(eYear, eYear, eMonth);
     }
 
+    // ─── Safe query helper ────────────────────────────────────────────────────
+    async function safeQuery(sql, params = []) {
+      try {
+        const [rows] = await db.query(sql, params);
+        return rows;
+      } catch (err) {
+        console.error('Finance report query failed:', err.message);
+        return null;
+      }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
-    // 1. KPI: REVENUE
+    // 1. REVENUE KPI
     // ═══════════════════════════════════════════════════════════════════════════
-    const [revenueKpi] = await db.query(
+    const revenueRows = await safeQuery(
       `SELECT 
         COUNT(*) AS total_invoices,
         COALESCE(SUM(i.total_amount), 0) AS total_invoiced,
@@ -91,11 +102,12 @@ exports.getFinanceReport = async (req, res) => {
        WHERE i.deleted = 0 ${invoiceDateFilter}`,
       [...invoiceDateParams]
     );
+    const revenueKpi = revenueRows ? revenueRows[0] : { total_invoices: 0, total_invoiced: 0, total_collected: 0, total_outstanding: 0, overdue_count: 0 };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 2. KPI: EXPENSES
+    // 2. EXPENSE KPI
     // ═══════════════════════════════════════════════════════════════════════════
-    const [expenseKpi] = await db.query(
+    const expenseRows = await safeQuery(
       `SELECT 
         COUNT(*) AS total_expenses,
         COALESCE(SUM(e.amount), 0) AS total_expense_amount
@@ -103,22 +115,23 @@ exports.getFinanceReport = async (req, res) => {
        WHERE e.deleted = 0 ${expenseDateFilter}`,
       [...expenseDateParams]
     );
+    const expenseKpi = expenseRows ? expenseRows[0] : { total_expenses: 0, total_expense_amount: 0 };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 3. KPI: CAPITAL
+    // 3. CAPITAL KPI
     // ═══════════════════════════════════════════════════════════════════════════
-    const [capitalKpi] = await db.query(
-      `SELECT 
-        COALESCE(SUM(c.amount), 0) AS total_capital
+    const capitalRows = await safeQuery(
+      `SELECT COALESCE(SUM(c.amount), 0) AS total_capital
        FROM capital c
        WHERE c.deleted = 0 ${capitalDateFilter}`,
       [...capitalDateParams]
     );
+    const capitalKpi = capitalRows ? capitalRows[0] : { total_capital: 0 };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 4. KPI: PAYROLL (with breakdown)
+    // 4. PAYROLL KPI
     // ═══════════════════════════════════════════════════════════════════════════
-    const [payrollKpi] = await db.query(
+    const payrollRows = await safeQuery(
       `SELECT 
         COALESCE(SUM(p.gross_salary), 0) AS total_gross,
         COALESCE(SUM(p.net_salary), 0) AS total_net_salary,
@@ -128,82 +141,60 @@ exports.getFinanceReport = async (req, res) => {
        WHERE p.deleted = 0 AND p.status = 'Paid' ${payrollFilter}`,
       [...payrollParams]
     );
+    const payrollKpi = payrollRows ? payrollRows[0] : { total_gross: 0, total_net_salary: 0, total_deductions: 0, employees_paid: 0 };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 5. KPI: SOFTWARE LICENSES (monthly cost of active subscriptions)
+    // 5. SOFTWARE LICENSES KPI
     // ═══════════════════════════════════════════════════════════════════════════
-    let licensesKpi = [{ active_licenses: 0, total_monthly_cost: 0 }];
-    try {
-      const [rows] = await db.query(
-        `SELECT 
-          COUNT(*) AS active_licenses,
-          COALESCE(SUM(sl.cost), 0) AS total_monthly_cost
-         FROM software_licenses sl
-         WHERE sl.deleted = 0 AND sl.status = 'Active'`
-      );
-      licensesKpi = rows ? [rows[0]] : licensesKpi;
-    } catch (e) { /* table may not exist */ }
+    const licensesRows = await safeQuery(
+      `SELECT COUNT(*) AS active_licenses, COALESCE(SUM(sl.cost), 0) AS total_monthly_cost
+       FROM software_licenses sl WHERE sl.deleted = 0 AND sl.status = 'Active'`
+    );
+    const licensesKpi = licensesRows ? licensesRows[0] : { active_licenses: 0, total_monthly_cost: 0 };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 6. KPI: ASSET TOTAL VALUE
+    // 6. ASSET VALUE KPI
     // ═══════════════════════════════════════════════════════════════════════════
-    let assetsKpi = [{ total_assets: 0, total_asset_value: 0 }];
-    try {
-      const [rows] = await db.query(
-        `SELECT 
-          COUNT(*) AS total_assets,
-          COALESCE(SUM(a.asset_value), 0) AS total_asset_value
-         FROM assets a
-         WHERE a.deleted = 0`
-      );
-      assetsKpi = rows ? [rows[0]] : assetsKpi;
-    } catch (e) { /* table may not exist */ }
+    const assetsRows = await safeQuery(
+      `SELECT COUNT(*) AS total_assets, COALESCE(SUM(a.asset_value), 0) AS total_asset_value
+       FROM assets a WHERE a.deleted = 0`
+    );
+    const assetsKpi = assetsRows ? assetsRows[0] : { total_assets: 0, total_asset_value: 0 };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 7. KPI: INVENTORY TOTAL VALUE
+    // 7. INVENTORY VALUE KPI
     // ═══════════════════════════════════════════════════════════════════════════
-    let inventoryKpi = [{ total_items: 0, total_inventory_value: 0 }];
-    try {
-      const [rows] = await db.query(
-        `SELECT 
-          COUNT(*) AS total_items,
-          COALESCE(SUM(inv.quantity * inv.unit_price), 0) AS total_inventory_value
-         FROM inventories inv
-         WHERE inv.deleted = 0`
-      );
-      inventoryKpi = rows ? [rows[0]] : inventoryKpi;
-    } catch (e) { /* table may not exist */ }
+    const inventoryRows = await safeQuery(
+      `SELECT COUNT(*) AS total_items, COALESCE(SUM(quantity * unit_price), 0) AS total_inventory_value
+       FROM inventories WHERE deleted = 0`
+    );
+    const inventoryKpi = inventoryRows ? inventoryRows[0] : { total_items: 0, total_inventory_value: 0 };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 8. KPI: REIMBURSEMENT PENDING LIABILITY
+    // 8. REIMBURSEMENT KPI
     // ═══════════════════════════════════════════════════════════════════════════
-    let reimbursementKpi = [{ pending_amount: 0, approved_amount: 0, pending_count: 0 }];
-    try {
-      const [rows] = await db.query(
-        `SELECT 
-          COALESCE(SUM(CASE WHEN r.status = 'pending' THEN r.amount ELSE 0 END), 0) AS pending_amount,
-          COALESCE(SUM(CASE WHEN r.status = 'approved' THEN r.amount ELSE 0 END), 0) AS approved_amount,
-          COUNT(CASE WHEN r.status IN ('pending', 'approved') THEN 1 END) AS pending_count
-         FROM reimbursements r
-         WHERE r.deleted = 0`
-      );
-      reimbursementKpi = rows ? [rows[0]] : reimbursementKpi;
-    } catch (e) { /* table may not exist */ }
-
+    const reimbRows = await safeQuery(
+      `SELECT 
+        COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0) AS pending_amount,
+        COALESCE(SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), 0) AS approved_amount,
+        COUNT(CASE WHEN status IN ('pending', 'approved') THEN 1 END) AS pending_count
+       FROM reimbursements WHERE deleted = 0`
+    );
+    const reimbursementKpi = reimbRows ? reimbRows[0] : { pending_amount: 0, approved_amount: 0, pending_count: 0 };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 9. PROFIT & LOSS (computed)
+    // 9. COMPUTED P&L
     // ═══════════════════════════════════════════════════════════════════════════
-    const totalRevenue = parseFloat(revenueKpi[0].total_collected || 0);
-    const totalExpenses = parseFloat(expenseKpi[0].total_expense_amount || 0);
-    const totalPayroll = parseFloat(payrollKpi[0].total_net_salary || 0);
-    const totalCapital = parseFloat(capitalKpi[0].total_capital || 0);
+    const totalRevenue = parseFloat(revenueKpi.total_collected || 0);
+    const totalExpenses = parseFloat(expenseKpi.total_expense_amount || 0);
+    const totalPayroll = parseFloat(payrollKpi.total_net_salary || 0);
+    const totalCapital = parseFloat(capitalKpi.total_capital || 0);
     const netProfit = totalRevenue - totalExpenses - totalPayroll;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // 10. MONTHLY P&L TREND
     // ═══════════════════════════════════════════════════════════════════════════
-    const [monthlyPnL] = await db.query(
+    const monthlyPnL = await safeQuery(
       `SELECT 
         months.month,
         COALESCE(rev.collected, 0) AS revenue,
@@ -228,56 +219,39 @@ exports.getFinanceReport = async (req, res) => {
          FROM payroll WHERE deleted = 0 AND status = 'Paid' GROUP BY pay_year, pay_month
        ) pay ON pay.month = months.month
        ORDER BY months.month ASC
-       LIMIT 24`,
-      []
-    );
+       LIMIT 24`
+    ) || [];
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 11. CASH FLOW (Monthly inflow vs outflow)
+    // 11. CASH FLOW
     // ═══════════════════════════════════════════════════════════════════════════
-    const [cashFlowIn] = await db.query(
-      `SELECT 
-        DATE_FORMAT(p.payment_date, '%Y-%m') AS month,
-        ROUND(SUM(p.amount), 2) AS amount
-       FROM invoice_payments p
-       WHERE 1=1 ${paymentDateFilter}
-       GROUP BY DATE_FORMAT(p.payment_date, '%Y-%m')
-       ORDER BY month ASC LIMIT 24`,
+    const cashFlowIn = await safeQuery(
+      `SELECT DATE_FORMAT(p.payment_date, '%Y-%m') AS month, ROUND(SUM(p.amount), 2) AS amount
+       FROM invoice_payments p WHERE 1=1 ${paymentDateFilter}
+       GROUP BY DATE_FORMAT(p.payment_date, '%Y-%m') ORDER BY month ASC LIMIT 24`,
       [...paymentDateParams]
-    );
+    ) || [];
 
-    const [cashFlowCapital] = await db.query(
-      `SELECT 
-        DATE_FORMAT(c.capital_date, '%Y-%m') AS month,
-        ROUND(SUM(c.amount), 2) AS amount
-       FROM capital c
-       WHERE c.deleted = 0 ${capitalDateFilter}
-       GROUP BY DATE_FORMAT(c.capital_date, '%Y-%m')
-       ORDER BY month ASC LIMIT 24`,
+    const cashFlowCapital = await safeQuery(
+      `SELECT DATE_FORMAT(c.capital_date, '%Y-%m') AS month, ROUND(SUM(c.amount), 2) AS amount
+       FROM capital c WHERE c.deleted = 0 ${capitalDateFilter}
+       GROUP BY DATE_FORMAT(c.capital_date, '%Y-%m') ORDER BY month ASC LIMIT 24`,
       [...capitalDateParams]
-    );
+    ) || [];
 
-    const [cashFlowExpenses] = await db.query(
-      `SELECT 
-        DATE_FORMAT(e.expense_date, '%Y-%m') AS month,
-        ROUND(SUM(e.amount), 2) AS amount
-       FROM expenses e
-       WHERE e.deleted = 0 ${expenseDateFilter}
-       GROUP BY DATE_FORMAT(e.expense_date, '%Y-%m')
-       ORDER BY month ASC LIMIT 24`,
+    const cashFlowExpenses = await safeQuery(
+      `SELECT DATE_FORMAT(e.expense_date, '%Y-%m') AS month, ROUND(SUM(e.amount), 2) AS amount
+       FROM expenses e WHERE e.deleted = 0 ${expenseDateFilter}
+       GROUP BY DATE_FORMAT(e.expense_date, '%Y-%m') ORDER BY month ASC LIMIT 24`,
       [...expenseDateParams]
-    );
+    ) || [];
 
-    const [cashFlowPayroll] = await db.query(
-      `SELECT 
-        CONCAT(p.pay_year, '-', LPAD(p.pay_month, 2, '0')) AS month,
-        ROUND(SUM(p.net_salary), 2) AS amount
-       FROM payroll p
-       WHERE p.deleted = 0 AND p.status = 'Paid' ${payrollFilter}
-       GROUP BY p.pay_year, p.pay_month
-       ORDER BY p.pay_year ASC, p.pay_month ASC LIMIT 24`,
+    const cashFlowPayroll = await safeQuery(
+      `SELECT CONCAT(p.pay_year, '-', LPAD(p.pay_month, 2, '0')) AS month, ROUND(SUM(p.net_salary), 2) AS amount
+       FROM payroll p WHERE p.deleted = 0 AND p.status = 'Paid' ${payrollFilter}
+       GROUP BY p.pay_year, p.pay_month ORDER BY p.pay_year ASC, p.pay_month ASC LIMIT 24`,
       [...payrollParams]
-    );
+    ) || [];
 
     // Merge cash flow
     const cashFlowMonths = new Set();
@@ -300,29 +274,20 @@ exports.getFinanceReport = async (req, res) => {
     });
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 12. EXPENSE BY CATEGORY (donut)
+    // 12. EXPENSE BY CATEGORY
     // ═══════════════════════════════════════════════════════════════════════════
-    const [expenseByCategory] = await db.query(
-      `SELECT 
-        e.category,
-        COUNT(*) AS count,
-        ROUND(SUM(e.amount), 2) AS total_amount
-       FROM expenses e
-       WHERE e.deleted = 0 ${expenseDateFilter}
-       GROUP BY e.category
-       ORDER BY total_amount DESC
-       LIMIT 10`,
+    const expenseByCategory = await safeQuery(
+      `SELECT e.category, COUNT(*) AS count, ROUND(SUM(e.amount), 2) AS total_amount
+       FROM expenses e WHERE e.deleted = 0 ${expenseDateFilter}
+       GROUP BY e.category ORDER BY total_amount DESC LIMIT 10`,
       [...expenseDateParams]
-    );
+    ) || [];
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 13. TOP CLIENTS (revenue + outstanding)
+    // 13. TOP CLIENTS
     // ═══════════════════════════════════════════════════════════════════════════
-    const [topClients] = await db.query(
-      `SELECT 
-        l.id AS client_id,
-        l.name AS client_name,
-        l.business_name,
+    const topClients = await safeQuery(
+      `SELECT l.id AS client_id, l.name AS client_name, l.business_name,
         COUNT(i.id) AS invoice_count,
         ROUND(SUM(i.paid_amount), 2) AS total_paid,
         ROUND(SUM(i.balance_amount), 2) AS outstanding
@@ -330,76 +295,91 @@ exports.getFinanceReport = async (req, res) => {
        JOIN leads l ON l.id = i.lead_id
        WHERE i.deleted = 0 ${invoiceDateFilter}
        GROUP BY l.id, l.name, l.business_name
-       ORDER BY total_paid DESC
-       LIMIT 10`,
+       ORDER BY total_paid DESC LIMIT 10`,
       [...invoiceDateParams]
-    );
+    ) || [];
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 14. CLIENT PROFITABILITY (revenue - expenses per client)
+    // 14. CLIENT PROFITABILITY
     // ═══════════════════════════════════════════════════════════════════════════
-    const [clientProfitability] = await db.query(
-      `SELECT 
-        l.id AS client_id,
-        l.name AS client_name,
-        l.business_name,
+    let clientProfitability = [];
+    try {
+      let profitSql = `SELECT 
+        l.id AS client_id, l.name AS client_name, l.business_name,
         COALESCE(rev.total_paid, 0) AS revenue,
         COALESCE(exp.total_spent, 0) AS expenses,
         ROUND(COALESCE(rev.total_paid, 0) - COALESCE(exp.total_spent, 0), 2) AS profit
        FROM leads l
        LEFT JOIN (
-         SELECT lead_id, SUM(paid_amount) AS total_paid
-         FROM invoices WHERE deleted = 0 ${invoiceDateFilter.replace(/i\./g, '')}
-         GROUP BY lead_id
+         SELECT lead_id, SUM(paid_amount) AS total_paid FROM invoices WHERE deleted = 0`;
+      const profitParams = [];
+
+      if (startDate && endDate) {
+        profitSql += ' AND bill_date BETWEEN ? AND ?';
+        profitParams.push(startDate, endDate);
+      } else if (startDate) {
+        profitSql += ' AND bill_date >= ?';
+        profitParams.push(startDate);
+      } else if (endDate) {
+        profitSql += ' AND bill_date <= ?';
+        profitParams.push(endDate);
+      }
+
+      profitSql += ` GROUP BY lead_id
        ) rev ON rev.lead_id = l.id
        LEFT JOIN (
-         SELECT client_id, SUM(amount) AS total_spent
-         FROM expenses WHERE deleted = 0 ${expenseDateFilter.replace(/e\./g, '')}
-         GROUP BY client_id
+         SELECT client_id, SUM(amount) AS total_spent FROM expenses WHERE deleted = 0`;
+
+      if (startDate && endDate) {
+        profitSql += ' AND expense_date BETWEEN ? AND ?';
+        profitParams.push(startDate, endDate);
+      } else if (startDate) {
+        profitSql += ' AND expense_date >= ?';
+        profitParams.push(startDate);
+      } else if (endDate) {
+        profitSql += ' AND expense_date <= ?';
+        profitParams.push(endDate);
+      }
+
+      profitSql += ` GROUP BY client_id
        ) exp ON exp.client_id = l.id
        WHERE l.deleted = 0 AND (rev.total_paid > 0 OR exp.total_spent > 0)
-       ORDER BY profit DESC
-       LIMIT 15`,
-      [...invoiceDateParams, ...expenseDateParams]
-    );
+       ORDER BY profit DESC LIMIT 15`;
+
+      const [profitRows] = await db.query(profitSql, profitParams);
+      clientProfitability = profitRows || [];
+    } catch (err) {
+      console.error('Client profitability query failed:', err.message);
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 15. INVOICE AGING (5 buckets)
+    // 15. INVOICE AGING
     // ═══════════════════════════════════════════════════════════════════════════
-    const [invoiceAging] = await db.query(
+    const agingRows = await safeQuery(
       `SELECT 
-        SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) <= 0 THEN i.balance_amount ELSE 0 END) AS not_yet_due,
-        SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) BETWEEN 1 AND 30 THEN i.balance_amount ELSE 0 END) AS days_1_30,
-        SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) BETWEEN 31 AND 60 THEN i.balance_amount ELSE 0 END) AS days_31_60,
-        SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) BETWEEN 61 AND 90 THEN i.balance_amount ELSE 0 END) AS days_61_90,
-        SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) > 90 THEN i.balance_amount ELSE 0 END) AS days_over_90,
+        COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) <= 0 THEN i.balance_amount ELSE 0 END), 0) AS not_yet_due,
+        COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) BETWEEN 1 AND 30 THEN i.balance_amount ELSE 0 END), 0) AS days_1_30,
+        COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) BETWEEN 31 AND 60 THEN i.balance_amount ELSE 0 END), 0) AS days_31_60,
+        COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) BETWEEN 61 AND 90 THEN i.balance_amount ELSE 0 END), 0) AS days_61_90,
+        COALESCE(SUM(CASE WHEN DATEDIFF(CURDATE(), i.due_date) > 90 THEN i.balance_amount ELSE 0 END), 0) AS days_over_90,
         COUNT(CASE WHEN DATEDIFF(CURDATE(), i.due_date) > 0 AND i.balance_amount > 0 THEN 1 END) AS overdue_invoice_count
        FROM invoices i
-       WHERE i.deleted = 0 AND i.balance_amount > 0`,
-      []
+       WHERE i.deleted = 0 AND i.balance_amount > 0`
     );
+    const invoiceAging = agingRows ? agingRows[0] : { not_yet_due: 0, days_1_30: 0, days_31_60: 0, days_61_90: 0, days_over_90: 0, overdue_invoice_count: 0 };
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // 16. OVERDUE INVOICES (table)
+    // 16. OVERDUE INVOICES
     // ═══════════════════════════════════════════════════════════════════════════
-    const [overdueInvoices] = await db.query(
-      `SELECT 
-        i.id,
-        i.invoice_number,
-        l.name AS client_name,
-        l.business_name,
-        i.total_amount,
-        i.paid_amount,
-        i.balance_amount,
-        i.due_date,
+    const overdueInvoices = await safeQuery(
+      `SELECT i.id, i.invoice_number, l.name AS client_name, l.business_name,
+        i.total_amount, i.paid_amount, i.balance_amount, i.due_date,
         DATEDIFF(CURDATE(), i.due_date) AS days_overdue
        FROM invoices i
        LEFT JOIN leads l ON l.id = i.lead_id
        WHERE i.deleted = 0 AND i.balance_amount > 0 AND i.due_date < CURDATE()
-       ORDER BY days_overdue DESC
-       LIMIT 20`,
-      []
-    );
+       ORDER BY days_overdue DESC LIMIT 20`
+    ) || [];
 
     // ═══════════════════════════════════════════════════════════════════════════
     // RESPONSE
@@ -410,28 +390,28 @@ exports.getFinanceReport = async (req, res) => {
         total_expenses: totalExpenses,
         net_profit: netProfit,
         total_payroll: totalPayroll,
-        payroll_gross: parseFloat(payrollKpi[0].total_gross || 0),
-        payroll_deductions: parseFloat(payrollKpi[0].total_deductions || 0),
+        payroll_gross: parseFloat(payrollKpi.total_gross || 0),
+        payroll_deductions: parseFloat(payrollKpi.total_deductions || 0),
         total_capital: totalCapital,
-        total_outstanding: parseFloat(revenueKpi[0].total_outstanding || 0),
-        total_invoices: revenueKpi[0].total_invoices,
-        overdue_count: revenueKpi[0].overdue_count,
-        employees_paid: payrollKpi[0].employees_paid,
-        software_license_cost: parseFloat(licensesKpi[0].total_monthly_cost || 0),
-        active_licenses: licensesKpi[0].active_licenses,
-        total_asset_value: parseFloat(assetsKpi[0].total_asset_value || 0),
-        total_assets: assetsKpi[0].total_assets,
-        total_inventory_value: parseFloat(inventoryKpi[0].total_inventory_value || 0),
-        total_inventory_items: inventoryKpi[0].total_items,
-        reimbursement_pending: parseFloat(reimbursementKpi[0].pending_amount || 0) + parseFloat(reimbursementKpi[0].approved_amount || 0),
-        reimbursement_count: reimbursementKpi[0].pending_count,
+        total_outstanding: parseFloat(revenueKpi.total_outstanding || 0),
+        total_invoices: parseInt(revenueKpi.total_invoices || 0),
+        overdue_count: parseInt(revenueKpi.overdue_count || 0),
+        employees_paid: parseInt(payrollKpi.employees_paid || 0),
+        software_license_cost: parseFloat(licensesKpi.total_monthly_cost || 0),
+        active_licenses: parseInt(licensesKpi.active_licenses || 0),
+        total_asset_value: parseFloat(assetsKpi.total_asset_value || 0),
+        total_assets: parseInt(assetsKpi.total_assets || 0),
+        total_inventory_value: parseFloat(inventoryKpi.total_inventory_value || 0),
+        total_inventory_items: parseInt(inventoryKpi.total_items || 0),
+        reimbursement_pending: parseFloat(reimbursementKpi.pending_amount || 0) + parseFloat(reimbursementKpi.approved_amount || 0),
+        reimbursement_count: parseInt(reimbursementKpi.pending_count || 0),
       },
       monthlyPnL,
       cashFlow,
       expenseByCategory,
       topClients,
       clientProfitability,
-      invoiceAging: invoiceAging[0],
+      invoiceAging,
       overdueInvoices,
     });
   } catch (err) {
