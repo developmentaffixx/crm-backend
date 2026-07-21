@@ -972,7 +972,7 @@ exports.afsEnd = async (req, res) => {
 exports.adminGetToday = async (req, res) => {
   try {
     const [users] = await db.query(
-      `SELECT u.id, u.first_name, u.last_name, u.department, u.designation,
+      `SELECT u.id, u.first_name, u.last_name, u.department, u.designation, u.avatar_url,
               a.id AS attendance_id, a.clock_in, a.clock_out, a.clock_in_status, a.total_served_seconds, a.total_afs_seconds,
               MAX(l.id) AS leave_id, MAX(l.leave_type) AS leave_type,
               MAX(t.id) AS current_task_id, MAX(t.title) AS current_task_title,
@@ -993,6 +993,7 @@ exports.adminGetToday = async (req, res) => {
     const team = users.map(u => ({
       id: u.id,
       name: u.first_name + ' ' + u.last_name,
+      avatar_url: u.avatar_url || null,
       department: u.department,
       designation: u.designation,
       clocked_in: !!u.attendance_id,
