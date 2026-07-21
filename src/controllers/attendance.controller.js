@@ -79,9 +79,8 @@ exports.clockIn = async (req, res) => {
     // Trigger if:
     //   (a) User has zero prior attendance records, OR
     //   (b) User has is_rejoining = 1 set by admin (returning employee)
-    // AND they provide "first day joining" (case-insensitive) as their late reason.
-    const isFirstDayReason = typeof late_reason === 'string' &&
-      late_reason.trim().toLowerCase() === 'first day joining';
+    // The user may optionally provide "first day joining" as late_reason,
+    // but it's NOT required — the system auto-detects first-day users.
 
     const [priorAttendance] = await db.query(
       'SELECT COUNT(*) AS cnt FROM attendance WHERE user_id = ?',
@@ -93,7 +92,9 @@ exports.clockIn = async (req, res) => {
     );
     const hasNoHistory = priorAttendance[0].cnt === 0;
     const isRejoining = userFlags[0]?.is_rejoining === 1;
-    const isFirstDayJoining = isFirstDayReason && (hasNoHistory || isRejoining);
+    // Auto-detect first day: if user has no history OR is rejoining, treat as FDJ
+    // regardless of whether they typed the exact phrase
+    const isFirstDayJoining = (hasNoHistory || isRejoining);
     // ─────────────────────────────────────────────────────────────────────────
 
     let clock_in_status;
@@ -123,10 +124,13 @@ exports.clockIn = async (req, res) => {
       }
     }
 
+    // Auto-set late_reason for first-day joiners if they didn't provide one
+    const finalLateReason = isFirstDayJoining && !late_reason ? 'First Day Joining' : (late_reason || null);
+
     const [result] = await db.query(
       `INSERT INTO attendance (user_id, date, clock_in, effective_clock_in, clock_in_status, late_reason)
        VALUES (?, CURDATE(), NOW(), ?, ?, ?)`,
-      [userId, effective_clock_in || null, clock_in_status, late_reason || null]
+      [userId, effective_clock_in || null, clock_in_status, finalLateReason]
     );
 
     // ── Auto-clear is_rejoining flag after first FDJ clock-in ─────────────────
