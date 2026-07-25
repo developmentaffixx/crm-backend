@@ -1083,23 +1083,7 @@ exports.adminGetToday = async (req, res) => {
               a.id AS attendance_id, a.clock_in, a.clock_out, a.clock_in_status, a.total_served_seconds, a.total_afs_seconds,
               MAX(l.id) AS leave_id, MAX(l.leave_type) AS leave_type,
               MAX(t.id) AS current_task_id, MAX(t.title) AS current_task_title,
-              MAX(afs.id) AS active_afs_id, MAX(afs.start_time) AS afs_start_time,
-              (SELECT m3.id FROM meetings m3 LEFT JOIN meeting_members mm3 ON mm3.meeting_id = m3.id
-                WHERE (m3.created_by = u.id OR mm3.user_id = u.id)
-                AND m3.meeting_date = CURDATE() AND m3.deleted = 0 AND m3.status != 'cancelled'
-                AND CURTIME() BETWEEN m3.start_time AND m3.end_time
-                LIMIT 1) AS current_meeting_id,
-              (SELECT m3.title FROM meetings m3 LEFT JOIN meeting_members mm3 ON mm3.meeting_id = m3.id
-                WHERE (m3.created_by = u.id OR mm3.user_id = u.id)
-                AND m3.meeting_date = CURDATE() AND m3.deleted = 0 AND m3.status != 'cancelled'
-                AND CURTIME() BETWEEN m3.start_time AND m3.end_time
-                LIMIT 1) AS current_meeting_title,
-              COALESCE((SELECT SUM(duration) FROM task_time_logs WHERE user_id = u.id AND DATE(started_at) = CURDATE()), 0) AS task_productive_seconds,
-              COALESCE((SELECT SUM(minutes) * 60 FROM ticket_time_logs WHERE user_id = u.id AND DATE(created_at) = CURDATE()), 0) AS ticket_productive_seconds,
-              COALESCE((SELECT SUM(TIMESTAMPDIFF(SECOND, m2.start_time, m2.end_time))
-                FROM meetings m2 LEFT JOIN meeting_members mm2 ON mm2.meeting_id = m2.id
-                WHERE (m2.created_by = u.id OR mm2.user_id = u.id)
-                AND m2.meeting_date = CURDATE() AND m2.status = 'completed' AND m2.deleted = 0), 0) AS meeting_productive_seconds
+              MAX(afs.id) AS active_afs_id, MAX(afs.start_time) AS afs_start_time
        FROM users u
        LEFT JOIN attendance a ON a.user_id = u.id AND a.date = CURDATE()
        LEFT JOIN leaves l ON l.user_id = u.id AND l.status = 'approved' AND l.deleted = 0
@@ -1113,8 +1097,51 @@ exports.adminGetToday = async (req, res) => {
        ORDER BY u.first_name`
     );
 
+    // Fetch productive time (tasks)
+    const [taskLogs] = await db.query(
+      `SELECT user_id, COALESCE(SUM(duration), 0) AS total_seconds
+       FROM task_time_logs WHERE DATE(started_at) = CURDATE() GROUP BY user_id`
+    );
+    const taskMap = {};
+    for (const r of taskLogs) taskMap[r.user_id] = parseInt(r.total_seconds) || 0;
+
+    // Fetch productive time (tickets)
+    const [ticketLogs] = await db.query(
+      `SELECT user_id, COALESCE(SUM(minutes), 0) AS total_minutes
+       FROM ticket_time_logs WHERE DATE(created_at) = CURDATE() GROUP BY user_id`
+    );
+    const ticketMap = {};
+    for (const r of ticketLogs) ticketMap[r.user_id] = (parseInt(r.total_minutes) || 0) * 60;
+
+    // Fetch productive time (completed meetings today)
+    const [meetingLogs] = await db.query(
+      `SELECT COALESCE(mm.user_id, m.created_by) AS user_id,
+              SUM(TIMESTAMPDIFF(SECOND, m.start_time, m.end_time)) AS total_seconds
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE m.meeting_date = CURDATE() AND m.status = 'completed' AND m.deleted = 0
+       GROUP BY COALESCE(mm.user_id, m.created_by)`
+    );
+    const meetingMap = {};
+    for (const r of meetingLogs) meetingMap[r.user_id] = parseInt(r.total_seconds) || 0;
+
+    // Fetch current active meetings
+    const [activeMeetings] = await db.query(
+      `SELECT COALESCE(mm.user_id, m.created_by) AS user_id, m.id AS meeting_id, m.title
+       FROM meetings m
+       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
+       WHERE m.meeting_date = CURDATE() AND m.deleted = 0 AND m.status != 'cancelled'
+         AND CURTIME() BETWEEN m.start_time AND m.end_time`
+    );
+    const activeMeetingMap = {};
+    for (const r of activeMeetings) {
+      if (r.user_id && !activeMeetingMap[r.user_id]) {
+        activeMeetingMap[r.user_id] = { id: r.meeting_id, title: r.title };
+      }
+    }
+
     const team = users.map(u => {
-      const rawProductive = (u.task_productive_seconds || 0) + (u.ticket_productive_seconds || 0) + (u.meeting_productive_seconds || 0);
+      const rawProductive = (taskMap[u.id] || 0) + (ticketMap[u.id] || 0) + (meetingMap[u.id] || 0);
       const productive_seconds = Math.min(rawProductive, u.total_served_seconds || 0);
       return {
         id: u.id,
@@ -1131,7 +1158,7 @@ exports.adminGetToday = async (req, res) => {
         on_leave: !!u.leave_id,
         leave_type: u.leave_type,
         current_task: u.current_task_id ? { id: u.current_task_id, title: u.current_task_title } : null,
-        current_meeting: u.current_meeting_id ? { id: u.current_meeting_id, title: u.current_meeting_title } : null,
+        current_meeting: activeMeetingMap[u.id] || null,
         afs_active: !!u.active_afs_id,
         afs_start_time: u.afs_start_time
       };
