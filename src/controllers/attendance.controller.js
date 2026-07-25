@@ -1084,9 +1084,18 @@ exports.adminGetToday = async (req, res) => {
               MAX(l.id) AS leave_id, MAX(l.leave_type) AS leave_type,
               MAX(t.id) AS current_task_id, MAX(t.title) AS current_task_title,
               MAX(afs.id) AS active_afs_id, MAX(afs.start_time) AS afs_start_time,
-              MAX(mtg.id) AS current_meeting_id, MAX(mtg.title) AS current_meeting_title,
+              (SELECT m3.id FROM meetings m3 LEFT JOIN meeting_members mm3 ON mm3.meeting_id = m3.id
+                WHERE (m3.created_by = u.id OR mm3.user_id = u.id)
+                AND m3.meeting_date = CURDATE() AND m3.deleted = 0 AND m3.status != 'cancelled'
+                AND CURTIME() BETWEEN m3.start_time AND m3.end_time
+                LIMIT 1) AS current_meeting_id,
+              (SELECT m3.title FROM meetings m3 LEFT JOIN meeting_members mm3 ON mm3.meeting_id = m3.id
+                WHERE (m3.created_by = u.id OR mm3.user_id = u.id)
+                AND m3.meeting_date = CURDATE() AND m3.deleted = 0 AND m3.status != 'cancelled'
+                AND CURTIME() BETWEEN m3.start_time AND m3.end_time
+                LIMIT 1) AS current_meeting_title,
               COALESCE((SELECT SUM(duration) FROM task_time_logs WHERE user_id = u.id AND DATE(started_at) = CURDATE()), 0) AS task_productive_seconds,
-              COALESCE((SELECT SUM(minutes) * 60 FROM ticket_time_entries WHERE user_id = u.id AND DATE(created_at) = CURDATE()), 0) AS ticket_productive_seconds,
+              COALESCE((SELECT SUM(minutes) * 60 FROM ticket_time_logs WHERE user_id = u.id AND DATE(created_at) = CURDATE()), 0) AS ticket_productive_seconds,
               COALESCE((SELECT SUM(TIMESTAMPDIFF(SECOND, m2.start_time, m2.end_time))
                 FROM meetings m2 LEFT JOIN meeting_members mm2 ON mm2.meeting_id = m2.id
                 WHERE (m2.created_by = u.id OR mm2.user_id = u.id)
@@ -1098,12 +1107,7 @@ exports.adminGetToday = async (req, res) => {
        LEFT JOIN task_active_timers tat ON tat.user_id = u.id
        LEFT JOIN tasks t ON t.id = tat.task_id AND t.deleted = 0
        LEFT JOIN afs_logs afs ON afs.user_id = u.id AND afs.end_time IS NULL
-       LEFT JOIN meetings mtg ON mtg.meeting_date = CURDATE() AND mtg.deleted = 0
-         AND mtg.status != 'cancelled'
-         AND CURTIME() BETWEEN mtg.start_time AND mtg.end_time
-       LEFT JOIN meeting_members mm ON mm.meeting_id = mtg.id AND mm.user_id = u.id
        WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
-         AND (mtg.id IS NULL OR mm.user_id IS NOT NULL OR mtg.created_by = u.id)
        GROUP BY u.id, u.first_name, u.last_name, u.department, u.designation,
                 a.id, a.clock_in, a.clock_out, a.clock_in_status, a.total_served_seconds, a.total_afs_seconds
        ORDER BY u.first_name`
