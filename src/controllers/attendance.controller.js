@@ -575,6 +575,14 @@ exports.getHistory = async (req, res) => {
         [startDate, endDate]
       );
 
+      // Fetch approved leaves for all users in this month
+      const [allLeaves] = await db.query(
+        `SELECT user_id, leave_type, from_date, to_date, duration, reason
+         FROM leaves WHERE status = 'approved' AND deleted = 0
+         AND from_date <= ? AND to_date >= ?`,
+        [endDate, startDate]
+      );
+
       const [allPlans] = await db.query(
         `SELECT * FROM daily_plans WHERE date BETWEEN ? AND ? ORDER BY sort_order`,
         [startDate, endDate]
@@ -640,6 +648,53 @@ exports.getHistory = async (req, res) => {
           ...record,
           plans: plansByAttendance[record.id] || [],
           productive_seconds: productiveLookup[key] || 0
+        });
+      }
+
+      // Add leave days as virtual records
+      for (const leave of allLeaves) {
+        if (!userMap[leave.user_id]) continue;
+        const leaveStart = new Date(leave.from_date instanceof Date ? leave.from_date : leave.from_date + 'T00:00:00');
+        const leaveEnd = new Date(leave.to_date instanceof Date ? leave.to_date : leave.to_date + 'T00:00:00');
+        const periodStart = new Date(startDate + 'T00:00:00');
+        const periodEnd = new Date(endDate + 'T00:00:00');
+        const effectiveStart = leaveStart < periodStart ? periodStart : leaveStart;
+        const effectiveEnd = leaveEnd > periodEnd ? periodEnd : leaveEnd;
+
+        for (let d = new Date(effectiveStart); d <= effectiveEnd; d.setDate(d.getDate() + 1)) {
+          const dateStr = d.toISOString().split('T')[0];
+          // Skip if there's already an attendance record for this date
+          const alreadyHasRecord = userMap[leave.user_id].records.some(r => {
+            const rDate = r.date instanceof Date ? r.date.toISOString().split('T')[0] : String(r.date).split('T')[0];
+            return rDate === dateStr;
+          });
+          if (!alreadyHasRecord) {
+            userMap[leave.user_id].records.push({
+              id: `leave_${leave.user_id}_${dateStr}`,
+              user_id: leave.user_id,
+              date: dateStr,
+              clock_in: null,
+              clock_out: null,
+              clock_in_status: 'leave',
+              leave_type: leave.leave_type,
+              leave_duration: leave.duration,
+              leave_reason: leave.reason,
+              late_reason: null,
+              total_served_seconds: 0,
+              total_afs_seconds: 0,
+              plans: [],
+              productive_seconds: 0
+            });
+          }
+        }
+      }
+
+      // Sort each user's records by date descending
+      for (const u of Object.values(userMap)) {
+        u.records.sort((a, b) => {
+          const dateA = a.date instanceof Date ? a.date.toISOString().split('T')[0] : String(a.date).split('T')[0];
+          const dateB = b.date instanceof Date ? b.date.toISOString().split('T')[0] : String(b.date).split('T')[0];
+          return dateB.localeCompare(dateA);
         });
       }
 
@@ -724,6 +779,58 @@ exports.getHistory = async (req, res) => {
         plans: plansByAttendance[record.id] || [],
         productive_seconds: productiveSeconds
       };
+    });
+
+    // Fetch approved leaves for this user in this month
+    const [userLeaves] = await db.query(
+      `SELECT leave_type, from_date, to_date, duration, reason
+       FROM leaves WHERE user_id = ? AND status = 'approved' AND deleted = 0
+       AND from_date <= ? AND to_date >= ?`,
+      [user_id, endDate, startDate]
+    );
+
+    // Add leave days as virtual records
+    for (const leave of userLeaves) {
+      const leaveStart = new Date(leave.from_date instanceof Date ? leave.from_date : leave.from_date + 'T00:00:00');
+      const leaveEnd = new Date(leave.to_date instanceof Date ? leave.to_date : leave.to_date + 'T00:00:00');
+      const periodStart = new Date(startDate + 'T00:00:00');
+      const periodEnd = new Date(endDate + 'T00:00:00');
+      const effectiveStart = leaveStart < periodStart ? periodStart : leaveStart;
+      const effectiveEnd = leaveEnd > periodEnd ? periodEnd : leaveEnd;
+
+      for (let d = new Date(effectiveStart); d <= effectiveEnd; d.setDate(d.getDate() + 1)) {
+        const dateStr = d.toISOString().split('T')[0];
+        // Skip if there's already an attendance record for this date
+        const alreadyHasRecord = enrichedRecords.some(r => {
+          const rDate = r.date instanceof Date ? r.date.toISOString().split('T')[0] : String(r.date).split('T')[0];
+          return rDate === dateStr;
+        });
+        if (!alreadyHasRecord) {
+          enrichedRecords.push({
+            id: `leave_${user_id}_${dateStr}`,
+            user_id: parseInt(user_id),
+            date: dateStr,
+            clock_in: null,
+            clock_out: null,
+            clock_in_status: 'leave',
+            leave_type: leave.leave_type,
+            leave_duration: leave.duration,
+            leave_reason: leave.reason,
+            late_reason: null,
+            total_served_seconds: 0,
+            total_afs_seconds: 0,
+            plans: [],
+            productive_seconds: 0
+          });
+        }
+      }
+    }
+
+    // Sort by date descending
+    enrichedRecords.sort((a, b) => {
+      const dateA = a.date instanceof Date ? a.date.toISOString().split('T')[0] : String(a.date).split('T')[0];
+      const dateB = b.date instanceof Date ? b.date.toISOString().split('T')[0] : String(b.date).split('T')[0];
+      return dateB.localeCompare(dateA);
     });
 
     return res.json({ records: enrichedRecords });
@@ -2036,6 +2143,46 @@ exports.adminTimesheet = async (req, res) => {
       [user_id, startStr, endStr]
     );
 
+    // Fetch approved leaves for this user in this period
+    const [userLeaves] = await db.query(
+      `SELECT leave_type, from_date, to_date, duration, reason
+       FROM leaves WHERE user_id = ? AND status = 'approved' AND deleted = 0
+       AND from_date <= ? AND to_date >= ?`,
+      [user_id, endStr, startStr]
+    );
+
+    // Build leave records for days without attendance
+    const leaveRecords = [];
+    for (const leave of userLeaves) {
+      const leaveStart = new Date(leave.from_date instanceof Date ? leave.from_date : leave.from_date + 'T00:00:00');
+      const leaveEnd = new Date(leave.to_date instanceof Date ? leave.to_date : leave.to_date + 'T00:00:00');
+      const periodStart = new Date(startStr + 'T00:00:00');
+      const periodEnd = new Date(endStr + 'T00:00:00');
+      const effectiveStart = leaveStart < periodStart ? periodStart : leaveStart;
+      const effectiveEnd = leaveEnd > periodEnd ? periodEnd : leaveEnd;
+
+      for (let d = new Date(effectiveStart); d <= effectiveEnd; d.setDate(d.getDate() + 1)) {
+        const dateStr = d.toISOString().split('T')[0];
+        const alreadyHasRecord = attendance.some(a => {
+          const aDate = a.date instanceof Date ? a.date.toISOString().split('T')[0] : String(a.date).split('T')[0];
+          return aDate === dateStr;
+        });
+        if (!alreadyHasRecord) {
+          leaveRecords.push({
+            date: dateStr,
+            clock_in: null,
+            clock_out: null,
+            clock_in_status: 'leave',
+            leave_type: leave.leave_type,
+            leave_duration: leave.duration,
+            leave_reason: leave.reason,
+            total_served_seconds: 0,
+            total_afs_seconds: 0
+          });
+        }
+      }
+    }
+
     // Task time logs
     const [taskTime] = await db.query(
       `SELECT DATE(started_at) AS log_date, SUM(duration) AS total_seconds
@@ -2084,6 +2231,7 @@ exports.adminTimesheet = async (req, res) => {
     return res.json({
       period: { start: startStr, end: endStr },
       attendance,
+      leaveRecords,
       taskTime,
       ticketTime,
       meetingTime,
@@ -2096,6 +2244,7 @@ exports.adminTimesheet = async (req, res) => {
         total_ticket_minutes: totalTicketMinutes,
         total_meeting_seconds: totalMeetingSeconds,
         days_present: attendance.length,
+        leave_days: leaveRecords.length,
       },
     });
   } catch (err) {
