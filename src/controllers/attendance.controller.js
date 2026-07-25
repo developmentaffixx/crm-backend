@@ -545,24 +545,30 @@ exports.getHistory = async (req, res) => {
   try {
     const requestingUserId = req.user.id;
     const isAdmin = req.user.is_admin;
-    let { user_id, month } = req.query;
+    let { user_id, month, start_date, end_date } = req.query;
 
     // Non-admins can only see their own records
     if (!isAdmin || !user_id) {
       user_id = requestingUserId;
     }
 
-    // Parse month (YYYY-MM)
-    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
-      const now = new Date();
-      month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    }
+    let startDate, endDate;
 
-    const [year, mon] = month.split('-');
-    const startDate = `${year}-${mon}-01`;
-    // Last day of month
-    const lastDay = new Date(parseInt(year), parseInt(mon), 0).getDate();
-    const endDate = `${year}-${mon}-${String(lastDay).padStart(2, '0')}`;
+    // Support date range (start_date & end_date) or fallback to month
+    if (start_date && end_date) {
+      startDate = start_date;
+      endDate = end_date;
+    } else {
+      // Parse month (YYYY-MM)
+      if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+        const now = new Date();
+        month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      }
+      const [year, mon] = month.split('-');
+      startDate = `${year}-${mon}-01`;
+      const lastDay = new Date(parseInt(year), parseInt(mon), 0).getDate();
+      endDate = `${year}-${mon}-${String(lastDay).padStart(2, '0')}`;
+    }
 
     // If admin requests all employees
     if (isAdmin && user_id === 'all') {
