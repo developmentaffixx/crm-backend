@@ -64,6 +64,7 @@ const revenueIntroDocumentsRoutes = require('./src/routes/revenueIntroDocuments.
 const softwareLicensesRoutes = require('./src/routes/softwareLicenses.routes');
 const inventoriesRoutes      = require('./src/routes/inventories.routes');
 const aiLabsRoutes           = require('./src/routes/aiLabs.routes');
+const quotationsRoutes       = require('./src/routes/quotations.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -158,6 +159,7 @@ app.use('/api/revenue-intro-documents', revenueIntroDocumentsRoutes);
 app.use('/api/software-licenses',      softwareLicensesRoutes);
 app.use('/api/inventories',            inventoriesRoutes);
 app.use('/api/ai-labs',                aiLabsRoutes);
+app.use('/api/quotations',             quotationsRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
 const { authenticate: authMiddleware } = require('./src/middleware/auth');
