@@ -1125,17 +1125,16 @@ exports.adminGetToday = async (req, res) => {
     const meetingMap = {};
     for (const r of meetingLogs) meetingMap[r.user_id] = parseInt(r.total_seconds) || 0;
 
-    // Fetch current active meetings
+    // Fetch current active meetings (user has punched into a meeting)
     const [activeMeetings] = await db.query(
-      `SELECT COALESCE(mm.user_id, m.created_by) AS user_id, m.id AS meeting_id, m.title
-       FROM meetings m
-       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
-       WHERE m.meeting_date = CURDATE() AND m.deleted = 0 AND m.status != 'cancelled'
-         AND CURTIME() BETWEEN m.start_time AND m.end_time`
+      `SELECT mat.user_id, mat.meeting_id, m.title
+       FROM meeting_active_timers mat
+       JOIN meetings m ON m.id = mat.meeting_id AND m.deleted = 0
+       WHERE DATE(mat.started_at) = CURDATE()`
     );
     const activeMeetingMap = {};
     for (const r of activeMeetings) {
-      if (r.user_id && !activeMeetingMap[r.user_id]) {
+      if (!activeMeetingMap[r.user_id]) {
         activeMeetingMap[r.user_id] = { id: r.meeting_id, title: r.title };
       }
     }
