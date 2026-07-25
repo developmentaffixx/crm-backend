@@ -3,15 +3,15 @@ const db = require('../config/db');
 /**
  * GET /api/reports/employees
  * Advanced Employee Analytics Report
- * Query params: startDate, endDate, employeeId, department
+ * Query params: startDate, endDate, employeeId
  */
 exports.getEmployeesReport = async (req, res) => {
   try {
     const { startDate, endDate, employeeId } = req.query;
 
+    // ─── Date Filters ─────────────────────────────────────────────────────────
     let dateFilter = '';
     const dateParams = [];
-
     if (startDate && endDate) {
       dateFilter = 'AND a.date BETWEEN ? AND ?';
       dateParams.push(startDate, endDate);
@@ -43,28 +43,36 @@ exports.getEmployeesReport = async (req, res) => {
       employeeParams.push(employeeId);
     }
 
-    // ─── 1. Workforce Overview KPIs ─────────────────────────────────────────────
-    const [workforceKpi] = await db.query(
+    // Helper: safe query execution — returns empty result on failure
+    const safeQuery = async (sql, params = []) => {
+      try {
+        const [rows] = await db.query(sql, params);
+        return rows;
+      } catch (err) {
+        console.error('Query failed:', err.message);
+        return [];
+      }
+    };
+
+    // ─── 1. Workforce KPIs ──────────────────────────────────────────────────────
+    const workforceKpi = await safeQuery(
       `SELECT 
         COUNT(*) AS total_employees,
         SUM(CASE WHEN u.is_active = 1 THEN 1 ELSE 0 END) AS active_employees,
-        SUM(CASE WHEN u.is_active = 0 THEN 1 ELSE 0 END) AS inactive_employees,
-        SUM(CASE WHEN u.gender = 'male' THEN 1 ELSE 0 END) AS male_count,
-        SUM(CASE WHEN u.gender = 'female' THEN 1 ELSE 0 END) AS female_count
+        SUM(CASE WHEN u.is_active = 0 THEN 1 ELSE 0 END) AS inactive_employees
        FROM users u
        WHERE u.deleted = 0 ${employeeFilter}`,
       [...employeeParams]
     );
 
-    // ─── 2. Attendance Summary ──────────────────────────────────────────────────
-    const [attendanceKpi] = await db.query(
+    // ─── 2. Attendance KPIs ─────────────────────────────────────────────────────
+    const attendanceKpi = await safeQuery(
       `SELECT 
         COUNT(*) AS total_attendance_records,
         SUM(CASE WHEN a.clock_in_status = 'on_time' THEN 1 ELSE 0 END) AS on_time_count,
         SUM(CASE WHEN a.clock_in_status = 'grace' THEN 1 ELSE 0 END) AS grace_count,
         SUM(CASE WHEN a.clock_in_status = 'late' THEN 1 ELSE 0 END) AS late_count,
         ROUND(AVG(a.total_served_seconds) / 3600, 1) AS avg_hours_served,
-        ROUND(AVG(a.total_afs_seconds) / 3600, 1) AS avg_afs_hours,
         ROUND(SUM(a.total_served_seconds) / 3600, 0) AS total_hours_served
        FROM attendance a
        JOIN users u ON u.id = a.user_id
@@ -72,8 +80,8 @@ exports.getEmployeesReport = async (req, res) => {
       [...dateParams, ...employeeParams]
     );
 
-    // ─── 3. Attendance Trend (daily/monthly) ────────────────────────────────────
-    const [attendanceTrend] = await db.query(
+    // ─── 3. Attendance Trend ────────────────────────────────────────────────────
+    const attendanceTrend = await safeQuery(
       `SELECT 
         DATE_FORMAT(a.date, '%Y-%m') AS month,
         COUNT(*) AS total_days,
@@ -84,13 +92,12 @@ exports.getEmployeesReport = async (req, res) => {
        JOIN users u ON u.id = a.user_id
        WHERE u.deleted = 0 ${dateFilter} ${employeeFilter}
        GROUP BY DATE_FORMAT(a.date, '%Y-%m')
-       ORDER BY month ASC
-       LIMIT 12`,
+       ORDER BY month ASC LIMIT 12`,
       [...dateParams, ...employeeParams]
     );
 
-    // ─── 4. Punctuality Leaderboard (top on-time employees) ─────────────────────
-    const [punctualityBoard] = await db.query(
+    // ─── 4. Punctuality Leaderboard ─────────────────────────────────────────────
+    const punctualityBoard = await safeQuery(
       `SELECT 
         a.user_id,
         CONCAT(u.first_name, ' ', u.last_name) AS name,
@@ -103,19 +110,16 @@ exports.getEmployeesReport = async (req, res) => {
        JOIN users u ON u.id = a.user_id
        WHERE u.deleted = 0 ${dateFilter} ${employeeFilter}
        GROUP BY a.user_id, u.first_name, u.last_name
-       ORDER BY punctuality_rate DESC, total_days DESC
-       LIMIT 15`,
+       ORDER BY punctuality_rate DESC, total_days DESC LIMIT 15`,
       [...dateParams, ...employeeParams]
     );
 
-    // ─── 5. Task Performance ────────────────────────────────────────────────────
-    const [taskKpi] = await db.query(
+    // ─── 5. Task KPIs ───────────────────────────────────────────────────────────
+    const taskKpi = await safeQuery(
       `SELECT 
         COUNT(*) AS total_tasks,
         SUM(CASE WHEN t.is_active = 3 THEN 1 ELSE 0 END) AS completed_tasks,
         SUM(CASE WHEN t.is_active = 1 THEN 1 ELSE 0 END) AS active_tasks,
-        SUM(CASE WHEN t.is_active = 0 THEN 1 ELSE 0 END) AS pending_tasks,
-        SUM(CASE WHEN t.is_active = 4 THEN 1 ELSE 0 END) AS rejected_tasks,
         SUM(CASE WHEN t.deadline < CURDATE() AND t.is_active NOT IN (3) THEN 1 ELSE 0 END) AS overdue_tasks,
         SUM(CASE WHEN t.is_active = 3 AND t.updated_at <= t.deadline THEN 1 ELSE 0 END) AS on_time_completions,
         ROUND(AVG(CASE WHEN t.is_active = 3 THEN DATEDIFF(t.updated_at, t.created_at) END), 1) AS avg_completion_days
@@ -125,8 +129,8 @@ exports.getEmployeesReport = async (req, res) => {
       [...taskDateParams, ...employeeParams]
     );
 
-    // ─── 6. Task Performance by Employee ────────────────────────────────────────
-    const [taskByEmployee] = await db.query(
+    // ─── 6. Tasks by Employee ───────────────────────────────────────────────────
+    const taskByEmployee = await safeQuery(
       `SELECT 
         t.assigned_to AS user_id,
         CONCAT(u.first_name, ' ', u.last_name) AS name,
@@ -134,19 +138,17 @@ exports.getEmployeesReport = async (req, res) => {
         SUM(CASE WHEN t.is_active = 3 THEN 1 ELSE 0 END) AS completed,
         SUM(CASE WHEN t.is_active = 1 THEN 1 ELSE 0 END) AS active,
         SUM(CASE WHEN t.deadline < CURDATE() AND t.is_active NOT IN (3) THEN 1 ELSE 0 END) AS overdue,
-        ROUND(SUM(CASE WHEN t.is_active = 3 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS completion_rate,
-        ROUND(AVG(CASE WHEN t.is_active = 3 THEN DATEDIFF(t.updated_at, t.created_at) END), 1) AS avg_days
+        ROUND(SUM(CASE WHEN t.is_active = 3 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS completion_rate
        FROM tasks t
        JOIN users u ON u.id = t.assigned_to
        WHERE t.deleted = 0 ${taskDateFilter} ${employeeFilter}
        GROUP BY t.assigned_to, u.first_name, u.last_name
-       ORDER BY completed DESC
-       LIMIT 15`,
+       ORDER BY completed DESC LIMIT 15`,
       [...taskDateParams, ...employeeParams]
     );
 
-    // ─── 7. Task Priority Distribution ──────────────────────────────────────────
-    const [taskPriority] = await db.query(
+    // ─── 7. Task Priority ───────────────────────────────────────────────────────
+    const taskPriority = await safeQuery(
       `SELECT 
         t.priority,
         COUNT(*) AS count,
@@ -159,7 +161,7 @@ exports.getEmployeesReport = async (req, res) => {
       [...taskDateParams, ...employeeParams]
     );
 
-    // ─── 8. Leave Analytics ─────────────────────────────────────────────────────
+    // ─── 8. Leave KPIs ──────────────────────────────────────────────────────────
     let leaveDateFilter = '';
     const leaveDateParams = [];
     if (startDate && endDate) {
@@ -173,12 +175,11 @@ exports.getEmployeesReport = async (req, res) => {
       leaveDateParams.push(endDate);
     }
 
-    const [leaveKpi] = await db.query(
+    const leaveKpi = await safeQuery(
       `SELECT 
         COUNT(*) AS total_leave_requests,
         SUM(CASE WHEN lv.status = 'approved' THEN 1 ELSE 0 END) AS approved_leaves,
         SUM(CASE WHEN lv.status = 'rejected' THEN 1 ELSE 0 END) AS rejected_leaves,
-        SUM(CASE WHEN lv.status = 'pending' THEN 1 ELSE 0 END) AS pending_leaves,
         SUM(CASE WHEN lv.status = 'approved' THEN lv.days ELSE 0 END) AS total_days_taken,
         ROUND(AVG(CASE WHEN lv.status = 'approved' THEN lv.days END), 1) AS avg_leave_duration
        FROM leaves lv
@@ -187,12 +188,11 @@ exports.getEmployeesReport = async (req, res) => {
       [...leaveDateParams, ...employeeParams]
     );
 
-    // ─── 9. Leave Type Breakdown ────────────────────────────────────────────────
-    const [leaveByType] = await db.query(
+    // ─── 9. Leave by Type ───────────────────────────────────────────────────────
+    const leaveByType = await safeQuery(
       `SELECT 
         lv.leave_type,
         COUNT(*) AS count,
-        SUM(lv.days) AS total_days,
         SUM(CASE WHEN lv.status = 'approved' THEN lv.days ELSE 0 END) AS approved_days
        FROM leaves lv
        JOIN users u ON u.id = lv.user_id
@@ -201,8 +201,8 @@ exports.getEmployeesReport = async (req, res) => {
       [...leaveDateParams, ...employeeParams]
     );
 
-    // ─── 10. Leave Trend (monthly) ──────────────────────────────────────────────
-    const [leaveTrend] = await db.query(
+    // ─── 10. Leave Trend ────────────────────────────────────────────────────────
+    const leaveTrend = await safeQuery(
       `SELECT 
         DATE_FORMAT(lv.from_date, '%Y-%m') AS month,
         COUNT(*) AS requests,
@@ -211,12 +211,11 @@ exports.getEmployeesReport = async (req, res) => {
        JOIN users u ON u.id = lv.user_id
        WHERE lv.deleted = 0 ${leaveDateFilter} ${employeeFilter}
        GROUP BY DATE_FORMAT(lv.from_date, '%Y-%m')
-       ORDER BY month ASC
-       LIMIT 12`,
+       ORDER BY month ASC LIMIT 12`,
       [...leaveDateParams, ...employeeParams]
     );
 
-    // ─── 11. Time Tracking Analytics ────────────────────────────────────────────
+    // ─── 11. Time Tracking KPIs ─────────────────────────────────────────────────
     let timeLogDateFilter = '';
     const timeLogDateParams = [];
     if (startDate && endDate) {
@@ -230,7 +229,7 @@ exports.getEmployeesReport = async (req, res) => {
       timeLogDateParams.push(endDate + ' 23:59:59');
     }
 
-    const [timeLogKpi] = await db.query(
+    const timeLogKpi = await safeQuery(
       `SELECT 
         COUNT(*) AS total_time_entries,
         ROUND(SUM(tl.duration) / 3600, 0) AS total_logged_hours,
@@ -243,8 +242,8 @@ exports.getEmployeesReport = async (req, res) => {
       [...timeLogDateParams, ...employeeParams]
     );
 
-    // ─── 12. Time Logged by Employee ────────────────────────────────────────────
-    const [timeByEmployee] = await db.query(
+    // ─── 12. Time by Employee ───────────────────────────────────────────────────
+    const timeByEmployee = await safeQuery(
       `SELECT 
         tl.user_id,
         CONCAT(u.first_name, ' ', u.last_name) AS name,
@@ -256,12 +255,11 @@ exports.getEmployeesReport = async (req, res) => {
        JOIN users u ON u.id = tl.user_id
        WHERE 1=1 ${timeLogDateFilter} ${employeeFilter}
        GROUP BY tl.user_id, u.first_name, u.last_name
-       ORDER BY total_hours DESC
-       LIMIT 15`,
+       ORDER BY total_hours DESC LIMIT 15`,
       [...timeLogDateParams, ...employeeParams]
     );
 
-    // ─── 13. Payroll Summary ────────────────────────────────────────────────────
+    // ─── 13. Payroll KPIs ───────────────────────────────────────────────────────
     let payrollFilter = '';
     const payrollParams = [];
     if (startDate) {
@@ -277,7 +275,7 @@ exports.getEmployeesReport = async (req, res) => {
       payrollParams.push(eYear, eYear, eMonth);
     }
 
-    const [payrollKpi] = await db.query(
+    const payrollKpi = await safeQuery(
       `SELECT 
         COUNT(*) AS total_payslips,
         SUM(CASE WHEN p.status = 'Paid' THEN 1 ELSE 0 END) AS paid_count,
@@ -292,8 +290,8 @@ exports.getEmployeesReport = async (req, res) => {
       [...payrollParams, ...employeeParams]
     );
 
-    // ─── 14. Payroll Trend (monthly) ────────────────────────────────────────────
-    const [payrollTrend] = await db.query(
+    // ─── 14. Payroll Trend ──────────────────────────────────────────────────────
+    const payrollTrend = await safeQuery(
       `SELECT 
         CONCAT(p.pay_year, '-', LPAD(p.pay_month, 2, '0')) AS month,
         ROUND(SUM(p.gross_salary), 0) AS gross,
@@ -304,13 +302,12 @@ exports.getEmployeesReport = async (req, res) => {
        JOIN users u ON u.id = p.employee_id
        WHERE p.deleted = 0 AND p.status = 'Paid' ${payrollFilter} ${employeeFilter}
        GROUP BY p.pay_year, p.pay_month
-       ORDER BY p.pay_year ASC, p.pay_month ASC
-       LIMIT 12`,
+       ORDER BY p.pay_year ASC, p.pay_month ASC LIMIT 12`,
       [...payrollParams, ...employeeParams]
     );
 
-    // ─── 15. Project Involvement ────────────────────────────────────────────────
-    const [projectStats] = await db.query(
+    // ─── 15. Project Stats ──────────────────────────────────────────────────────
+    const projectStats = await safeQuery(
       `SELECT 
         COUNT(DISTINCT pm.project_id) AS total_projects,
         SUM(CASE WHEN pr.status = 'completed' THEN 1 ELSE 0 END) AS completed_projects,
@@ -323,8 +320,8 @@ exports.getEmployeesReport = async (req, res) => {
       [...employeeParams]
     );
 
-    // ─── 16. Projects per Employee ──────────────────────────────────────────────
-    const [projectsByEmployee] = await db.query(
+    // ─── 16. Projects by Employee ───────────────────────────────────────────────
+    const projectsByEmployee = await safeQuery(
       `SELECT 
         pm.user_id,
         CONCAT(u.first_name, ' ', u.last_name) AS name,
@@ -336,12 +333,11 @@ exports.getEmployeesReport = async (req, res) => {
        JOIN users u ON u.id = pm.user_id
        WHERE u.deleted = 0 ${employeeFilter}
        GROUP BY pm.user_id, u.first_name, u.last_name
-       ORDER BY total_projects DESC
-       LIMIT 15`,
+       ORDER BY total_projects DESC LIMIT 15`,
       [...employeeParams]
     );
 
-    // ─── 17. Reimbursement Summary ──────────────────────────────────────────────
+    // ─── 17. Reimbursement KPIs ─────────────────────────────────────────────────
     let reimbDateFilter = '';
     const reimbDateParams = [];
     if (startDate && endDate) {
@@ -355,15 +351,12 @@ exports.getEmployeesReport = async (req, res) => {
       reimbDateParams.push(endDate);
     }
 
-    const [reimbursementKpi] = await db.query(
+    const reimbursementKpi = await safeQuery(
       `SELECT 
         COUNT(*) AS total_claims,
-        SUM(CASE WHEN r.status = 'approved' THEN 1 ELSE 0 END) AS approved_claims,
-        SUM(CASE WHEN r.status = 'paid' THEN 1 ELSE 0 END) AS paid_claims,
         SUM(CASE WHEN r.status = 'pending' THEN 1 ELSE 0 END) AS pending_claims,
         ROUND(SUM(r.amount), 0) AS total_amount,
-        ROUND(SUM(CASE WHEN r.status IN ('approved', 'paid') THEN r.amount ELSE 0 END), 0) AS approved_amount,
-        ROUND(AVG(r.amount), 0) AS avg_claim_amount
+        ROUND(SUM(CASE WHEN r.status IN ('approved', 'paid') THEN r.amount ELSE 0 END), 0) AS approved_amount
        FROM reimbursements r
        JOIN users u ON u.id = r.user_id
        WHERE r.deleted = 0 ${reimbDateFilter} ${employeeFilter}`,
@@ -371,7 +364,7 @@ exports.getEmployeesReport = async (req, res) => {
     );
 
     // ─── 18. Reimbursement by Category ──────────────────────────────────────────
-    const [reimbByCategory] = await db.query(
+    const reimbByCategory = await safeQuery(
       `SELECT 
         r.category,
         COUNT(*) AS count,
@@ -384,68 +377,28 @@ exports.getEmployeesReport = async (req, res) => {
       [...reimbDateParams, ...employeeParams]
     );
 
-    // ─── 19. Employee List (for filter dropdown) ────────────────────────────────
-    const [employeeList] = await db.query(
+    // ─── 19. Employee List (for dropdown filter) ────────────────────────────────
+    const employeeList = await safeQuery(
       `SELECT id, CONCAT(first_name, ' ', last_name) AS name 
        FROM users WHERE deleted = 0 AND is_active = 1 
        ORDER BY first_name ASC`
     );
 
-    // ─── 20. Productivity Score (composite) ─────────────────────────────────────
-    const [productivityScores] = await db.query(
-      `SELECT 
-        u.id AS user_id,
-        CONCAT(u.first_name, ' ', u.last_name) AS name,
-        COALESCE(att.punctuality_rate, 0) AS punctuality_rate,
-        COALESCE(tsk.completion_rate, 0) AS task_completion_rate,
-        COALESCE(tm.total_hours, 0) AS time_logged_hours,
-        ROUND(
-          (COALESCE(att.punctuality_rate, 0) * 0.3) + 
-          (COALESCE(tsk.completion_rate, 0) * 0.5) + 
-          (LEAST(COALESCE(tm.total_hours, 0) / NULLIF(att.total_days * (SELECT full_day_hours FROM work_schedule WHERE id = 1), 0) * 100, 100) * 0.2)
-        , 1) AS productivity_score
-       FROM users u
-       LEFT JOIN (
-         SELECT user_id, COUNT(*) AS total_days,
-           ROUND(SUM(CASE WHEN clock_in_status = 'on_time' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS punctuality_rate
-         FROM attendance WHERE 1=1 ${dateFilter.replace(/a\./g, '')}
-         GROUP BY user_id
-       ) att ON att.user_id = u.id
-       LEFT JOIN (
-         SELECT assigned_to AS user_id,
-           ROUND(SUM(CASE WHEN is_active = 3 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS completion_rate
-         FROM tasks WHERE deleted = 0 ${taskDateFilter.replace(/t\./g, '')}
-         GROUP BY assigned_to
-       ) tsk ON tsk.user_id = u.id
-       LEFT JOIN (
-         SELECT user_id, ROUND(SUM(duration) / 3600, 1) AS total_hours
-         FROM task_time_logs WHERE 1=1 ${timeLogDateFilter.replace(/tl\./g, '')}
-         GROUP BY user_id
-       ) tm ON tm.user_id = u.id
-       WHERE u.deleted = 0 AND u.is_active = 1 ${employeeFilter}
-       ORDER BY productivity_score DESC
-       LIMIT 15`,
-      [...dateParams, ...taskDateParams, ...timeLogDateParams, ...employeeParams]
-    );
+    // ─── 20. Daily Plan Stats ───────────────────────────────────────────────────
+    let dailyPlanDateFilter = '';
+    const dailyPlanDateParams = [];
+    if (startDate && endDate) {
+      dailyPlanDateFilter = 'AND dp.date BETWEEN ? AND ?';
+      dailyPlanDateParams.push(startDate, endDate);
+    } else if (startDate) {
+      dailyPlanDateFilter = 'AND dp.date >= ?';
+      dailyPlanDateParams.push(startDate);
+    } else if (endDate) {
+      dailyPlanDateFilter = 'AND dp.date <= ?';
+      dailyPlanDateParams.push(endDate);
+    }
 
-    // ─── 21. Attendance Heatmap (daily data for calendar view) ─────────────────
-    const [attendanceHeatmap] = await db.query(
-      `SELECT 
-        DATE_FORMAT(a.date, '%Y-%m-%d') AS date,
-        COUNT(DISTINCT a.user_id) AS employees_present,
-        SUM(CASE WHEN a.clock_in_status = 'late' THEN 1 ELSE 0 END) AS late_count,
-        ROUND(AVG(a.total_served_seconds) / 3600, 1) AS avg_hours
-       FROM attendance a
-       JOIN users u ON u.id = a.user_id
-       WHERE u.deleted = 0 ${dateFilter} ${employeeFilter}
-       GROUP BY a.date
-       ORDER BY a.date DESC
-       LIMIT 90`,
-      [...dateParams, ...employeeParams]
-    );
-
-    // ─── 22. Daily Plan Completion Rate ─────────────────────────────────────────
-    const [dailyPlanStats] = await db.query(
+    const dailyPlanStats = await safeQuery(
       `SELECT 
         COUNT(*) AS total_plans,
         SUM(CASE WHEN dp.status = 'completed' THEN 1 ELSE 0 END) AS completed_plans,
@@ -453,12 +406,12 @@ exports.getEmployeesReport = async (req, res) => {
         SUM(CASE WHEN dp.is_additional = 1 THEN 1 ELSE 0 END) AS additional_tasks_taken
        FROM daily_plans dp
        JOIN users u ON u.id = dp.user_id
-       WHERE 1=1 ${dateFilter.replace(/a\./g, 'dp.')} ${employeeFilter}`,
-      [...dateParams, ...employeeParams]
+       WHERE 1=1 ${dailyPlanDateFilter} ${employeeFilter}`,
+      [...dailyPlanDateParams, ...employeeParams]
     );
 
-    // ─── 23. Daily Plan Completion by Employee ──────────────────────────────────
-    const [dailyPlanByEmployee] = await db.query(
+    // ─── 21. Daily Plan by Employee ─────────────────────────────────────────────
+    const dailyPlanByEmployee = await safeQuery(
       `SELECT 
         dp.user_id,
         CONCAT(u.first_name, ' ', u.last_name) AS name,
@@ -467,15 +420,14 @@ exports.getEmployeesReport = async (req, res) => {
         ROUND(SUM(CASE WHEN dp.status = 'completed' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS completion_rate
        FROM daily_plans dp
        JOIN users u ON u.id = dp.user_id
-       WHERE 1=1 ${dateFilter.replace(/a\./g, 'dp.')} ${employeeFilter}
+       WHERE 1=1 ${dailyPlanDateFilter} ${employeeFilter}
        GROUP BY dp.user_id, u.first_name, u.last_name
-       ORDER BY completion_rate DESC
-       LIMIT 15`,
-      [...dateParams, ...employeeParams]
+       ORDER BY completion_rate DESC LIMIT 15`,
+      [...dailyPlanDateParams, ...employeeParams]
     );
 
-    // ─── 24. Workload Distribution (tasks per employee - radar data) ────────────
-    const [workloadRadar] = await db.query(
+    // ─── 22. Workload Radar ─────────────────────────────────────────────────────
+    const workloadRadar = await safeQuery(
       `SELECT 
         u.id AS user_id,
         CONCAT(u.first_name, ' ', u.last_name) AS name,
@@ -487,7 +439,7 @@ exports.getEmployeesReport = async (req, res) => {
        FROM users u
        LEFT JOIN (
          SELECT assigned_to AS user_id, COUNT(*) AS total_tasks
-         FROM tasks WHERE deleted = 0 ${taskDateFilter.replace(/t\./g, '')}
+         FROM tasks WHERE deleted = 0
          GROUP BY assigned_to
        ) tsk ON tsk.user_id = u.id
        LEFT JOIN (
@@ -496,31 +448,28 @@ exports.getEmployeesReport = async (req, res) => {
        ) proj ON proj.user_id = u.id
        LEFT JOIN (
          SELECT user_id, COUNT(*) AS total_days
-         FROM attendance WHERE 1=1 ${dateFilter.replace(/a\./g, '')}
+         FROM attendance WHERE 1=1
          GROUP BY user_id
        ) att ON att.user_id = u.id
        LEFT JOIN (
          SELECT user_id, ROUND(SUM(duration) / 3600, 1) AS total_hours
-         FROM task_time_logs WHERE 1=1 ${timeLogDateFilter.replace(/tl\./g, '')}
+         FROM task_time_logs WHERE 1=1
          GROUP BY user_id
        ) tm ON tm.user_id = u.id
        LEFT JOIN (
          SELECT user_id, SUM(days) AS leave_days
-         FROM leaves WHERE deleted = 0 AND status = 'approved' ${leaveDateFilter.replace(/lv\./g, '')}
+         FROM leaves WHERE deleted = 0 AND status = 'approved'
          GROUP BY user_id
        ) lv ON lv.user_id = u.id
        WHERE u.deleted = 0 AND u.is_active = 1 ${employeeFilter}
-       ORDER BY tasks_assigned DESC
-       LIMIT 10`,
-      [...taskDateParams, ...dateParams, ...timeLogDateParams, ...leaveDateParams, ...employeeParams]
+       ORDER BY tasks_assigned DESC LIMIT 10`,
+      [...employeeParams]
     );
 
-    // ─── 25. Weekly Productivity Trend (last 12 weeks) ──────────────────────────
-    const [weeklyTrend] = await db.query(
+    // ─── 23. Weekly Productivity Trend ──────────────────────────────────────────
+    const weeklyTrend = await safeQuery(
       `SELECT 
         YEARWEEK(a.date, 1) AS week_num,
-        MIN(a.date) AS week_start,
-        COUNT(DISTINCT a.user_id) AS avg_employees,
         ROUND(AVG(a.total_served_seconds) / 3600, 1) AS avg_hours,
         SUM(CASE WHEN a.clock_in_status = 'on_time' THEN 1 ELSE 0 END) AS on_time,
         SUM(CASE WHEN a.clock_in_status = 'late' THEN 1 ELSE 0 END) AS late
@@ -532,16 +481,13 @@ exports.getEmployeesReport = async (req, res) => {
       [...employeeParams]
     );
 
-    // ─── 26. Top Performers (multi-dimensional) ────────────────────────────────
-    const [topPerformers] = await db.query(
+    // ─── 24. Top Performers ─────────────────────────────────────────────────────
+    const topPerformers = await safeQuery(
       `SELECT 
         u.id AS user_id,
         CONCAT(u.first_name, ' ', u.last_name) AS name,
-        u.email,
         COALESCE(att.punctuality_rate, 0) AS punctuality,
-        COALESCE(att.avg_hours, 0) AS avg_hours,
         COALESCE(tsk.completion_rate, 0) AS task_completion,
-        COALESCE(tsk.total_tasks, 0) AS total_tasks,
         COALESCE(tsk.on_time_rate, 0) AS on_time_delivery,
         COALESCE(dp.plan_rate, 0) AS daily_plan_rate,
         COALESCE(tm.total_hours, 0) AS time_logged,
@@ -550,43 +496,41 @@ exports.getEmployeesReport = async (req, res) => {
           (COALESCE(tsk.completion_rate, 0) * 0.3) +
           (COALESCE(tsk.on_time_rate, 0) * 0.2) +
           (COALESCE(dp.plan_rate, 0) * 0.15) +
-          (LEAST(COALESCE(tm.total_hours, 0) / NULLIF(att.total_days * (SELECT full_day_hours FROM work_schedule WHERE id = 1), 0) * 100, 100) * 0.15)
+          (LEAST(COALESCE(tm.total_hours, 0), 100) * 0.15)
         , 1) AS overall_score
        FROM users u
        LEFT JOIN (
-         SELECT user_id, COUNT(*) AS total_days,
-           ROUND(SUM(CASE WHEN clock_in_status = 'on_time' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS punctuality_rate,
-           ROUND(AVG(total_served_seconds) / 3600, 1) AS avg_hours
-         FROM attendance WHERE 1=1 ${dateFilter.replace(/a\./g, '')}
+         SELECT user_id,
+           ROUND(SUM(CASE WHEN clock_in_status = 'on_time' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS punctuality_rate
+         FROM attendance
          GROUP BY user_id
        ) att ON att.user_id = u.id
        LEFT JOIN (
-         SELECT assigned_to AS user_id, COUNT(*) AS total_tasks,
+         SELECT assigned_to AS user_id,
            ROUND(SUM(CASE WHEN is_active = 3 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS completion_rate,
            ROUND(SUM(CASE WHEN is_active = 3 AND updated_at <= deadline THEN 1 ELSE 0 END) * 100.0 / NULLIF(SUM(CASE WHEN is_active = 3 THEN 1 ELSE 0 END), 0), 1) AS on_time_rate
-         FROM tasks WHERE deleted = 0 ${taskDateFilter.replace(/t\./g, '')}
+         FROM tasks WHERE deleted = 0
          GROUP BY assigned_to
        ) tsk ON tsk.user_id = u.id
        LEFT JOIN (
          SELECT user_id,
            ROUND(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 1) AS plan_rate
-         FROM daily_plans WHERE 1=1 ${dateFilter.replace(/a\./g, '')}
+         FROM daily_plans
          GROUP BY user_id
        ) dp ON dp.user_id = u.id
        LEFT JOIN (
          SELECT user_id, ROUND(SUM(duration) / 3600, 1) AS total_hours
-         FROM task_time_logs WHERE 1=1 ${timeLogDateFilter.replace(/tl\./g, '')}
+         FROM task_time_logs
          GROUP BY user_id
        ) tm ON tm.user_id = u.id
        WHERE u.deleted = 0 AND u.is_active = 1 ${employeeFilter}
        HAVING overall_score > 0
-       ORDER BY overall_score DESC
-       LIMIT 20`,
-      [...dateParams, ...taskDateParams, ...dateParams, ...timeLogDateParams, ...employeeParams]
+       ORDER BY overall_score DESC LIMIT 20`,
+      [...employeeParams]
     );
 
-    // ─── 27. AFS (Away From System) Analytics ───────────────────────────────────
-    const [afsStats] = await db.query(
+    // ─── 25. AFS Stats ──────────────────────────────────────────────────────────
+    const afsStats = await safeQuery(
       `SELECT 
         ROUND(AVG(a.total_afs_seconds) / 60, 0) AS avg_afs_minutes_per_day,
         ROUND(SUM(a.total_afs_seconds) / 3600, 0) AS total_afs_hours,
@@ -597,11 +541,10 @@ exports.getEmployeesReport = async (req, res) => {
       [...dateParams, ...employeeParams]
     );
 
-    // ─── 28. Task Completion Trend (weekly) ─────────────────────────────────────
-    const [taskWeeklyTrend] = await db.query(
+    // ─── 26. Task Weekly Trend ──────────────────────────────────────────────────
+    const taskWeeklyTrend = await safeQuery(
       `SELECT 
         YEARWEEK(t.updated_at, 1) AS week_num,
-        MIN(DATE(t.updated_at)) AS week_start,
         SUM(CASE WHEN t.is_active = 3 THEN 1 ELSE 0 END) AS completed,
         COUNT(*) AS created
        FROM tasks t
@@ -612,15 +555,28 @@ exports.getEmployeesReport = async (req, res) => {
       [...employeeParams]
     );
 
-    // ─── 29. Deadline Extension KPIs ────────────────────────────────────────────
-    const [extensionKpi] = await db.query(
+    // ─── 27. Attendance Heatmap ─────────────────────────────────────────────────
+    const attendanceHeatmap = await safeQuery(
+      `SELECT 
+        DATE_FORMAT(a.date, '%Y-%m-%d') AS date,
+        COUNT(DISTINCT a.user_id) AS employees_present,
+        SUM(CASE WHEN a.clock_in_status = 'late' THEN 1 ELSE 0 END) AS late_count
+       FROM attendance a
+       JOIN users u ON u.id = a.user_id
+       WHERE u.deleted = 0 ${dateFilter} ${employeeFilter}
+       GROUP BY a.date
+       ORDER BY a.date DESC LIMIT 90`,
+      [...dateParams, ...employeeParams]
+    );
+
+    // ─── 28. Deadline Extension KPIs ────────────────────────────────────────────
+    const extensionKpi = await safeQuery(
       `SELECT
         COUNT(*) AS total_extension_requests,
         SUM(CASE WHEN ext.status = 'approved' THEN 1 ELSE 0 END) AS approved_extensions,
         SUM(CASE WHEN ext.status = 'rejected' THEN 1 ELSE 0 END) AS rejected_extensions,
-        SUM(CASE WHEN ext.status = 'pending'  THEN 1 ELSE 0 END) AS pending_extensions,
+        SUM(CASE WHEN ext.status = 'pending' THEN 1 ELSE 0 END) AS pending_extensions,
         COUNT(DISTINCT ext.task_id) AS tasks_with_extensions,
-        -- Extension requested AFTER the original deadline = genuinely overdue when asked
         SUM(CASE WHEN DATE(ext.created_at) > t.deadline THEN 1 ELSE 0 END) AS extensions_after_deadline
        FROM task_deadline_extension_requests ext
        JOIN tasks t ON t.id = ext.task_id
@@ -629,38 +585,34 @@ exports.getEmployeesReport = async (req, res) => {
       [...employeeParams]
     );
 
-    // ─── 30. Extension Analytics per Employee ───────────────────────────────────
-    const [extensionByEmployee] = await db.query(
+    // ─── 29. Extensions by Employee ─────────────────────────────────────────────
+    const extensionByEmployee = await safeQuery(
       `SELECT
         t.assigned_to AS user_id,
         CONCAT(u.first_name, ' ', u.last_name) AS name,
         COUNT(ext.id) AS total_extensions,
         SUM(CASE WHEN ext.status = 'approved' THEN 1 ELSE 0 END) AS approved,
         SUM(CASE WHEN ext.status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
-        SUM(CASE WHEN ext.status = 'pending'  THEN 1 ELSE 0 END) AS pending,
-        -- How many were requested after the deadline had already passed
+        SUM(CASE WHEN ext.status = 'pending' THEN 1 ELSE 0 END) AS pending,
         SUM(CASE WHEN DATE(ext.created_at) > t.deadline THEN 1 ELSE 0 END) AS after_deadline,
         COUNT(DISTINCT ext.task_id) AS tasks_extended,
-        -- Max extensions on a single task for this employee
         MAX(ext_counts.ext_count) AS max_extensions_on_one_task
        FROM task_deadline_extension_requests ext
        JOIN tasks t ON t.id = ext.task_id
        JOIN users u ON u.id = t.assigned_to
        JOIN (
          SELECT task_id, COUNT(*) AS ext_count
-         FROM task_deadline_extension_requests
-         WHERE deleted = 0
+         FROM task_deadline_extension_requests WHERE deleted = 0
          GROUP BY task_id
        ) ext_counts ON ext_counts.task_id = ext.task_id
        WHERE t.deleted = 0 AND ext.deleted = 0 ${employeeFilter}
        GROUP BY t.assigned_to, u.first_name, u.last_name
-       ORDER BY total_extensions DESC
-       LIMIT 15`,
+       ORDER BY total_extensions DESC LIMIT 15`,
       [...employeeParams]
     );
 
-    // ─── 31. Most Extended Tasks ─────────────────────────────────────────────────
-    const [mostExtendedTasks] = await db.query(
+    // ─── 30. Most Extended Tasks ────────────────────────────────────────────────
+    const mostExtendedTasks = await safeQuery(
       `SELECT
         t.id AS task_id,
         t.title,
@@ -677,64 +629,63 @@ exports.getEmployeesReport = async (req, res) => {
        JOIN users u ON u.id = t.assigned_to
        WHERE t.deleted = 0 AND ext.deleted = 0 ${employeeFilter}
        GROUP BY t.id, t.title, u.first_name, u.last_name, t.deadline, t.is_active
-       ORDER BY extension_count DESC
-       LIMIT 10`,
+       ORDER BY extension_count DESC LIMIT 10`,
       [...employeeParams]
     );
 
+    // ─── Response ───────────────────────────────────────────────────────────────
     return res.json({
-      workforce: workforceKpi[0],
+      workforce: workforceKpi[0] || {},
       attendance: {
-        kpi: attendanceKpi[0],
+        kpi: attendanceKpi[0] || {},
         trend: attendanceTrend,
         leaderboard: punctualityBoard,
         heatmap: attendanceHeatmap,
-        afs: afsStats[0],
+        afs: afsStats[0] || {},
       },
       tasks: {
-        kpi: taskKpi[0],
+        kpi: taskKpi[0] || {},
         byEmployee: taskByEmployee,
         priority: taskPriority,
         weeklyTrend: taskWeeklyTrend,
         extensions: {
-          kpi: extensionKpi[0],
+          kpi: extensionKpi[0] || {},
           byEmployee: extensionByEmployee,
           mostExtended: mostExtendedTasks,
         },
       },
       leaves: {
-        kpi: leaveKpi[0],
+        kpi: leaveKpi[0] || {},
         byType: leaveByType,
         trend: leaveTrend,
       },
       timeTracking: {
-        kpi: timeLogKpi[0],
+        kpi: timeLogKpi[0] || {},
         byEmployee: timeByEmployee,
       },
       payroll: {
-        kpi: payrollKpi[0],
+        kpi: payrollKpi[0] || {},
         trend: payrollTrend,
       },
       projects: {
-        kpi: projectStats[0],
+        kpi: projectStats[0] || {},
         byEmployee: projectsByEmployee,
       },
       reimbursements: {
-        kpi: reimbursementKpi[0],
+        kpi: reimbursementKpi[0] || {},
         byCategory: reimbByCategory,
       },
       dailyPlans: {
-        kpi: dailyPlanStats[0],
+        kpi: dailyPlanStats[0] || {},
         byEmployee: dailyPlanByEmployee,
       },
       workloadRadar,
       weeklyTrend,
       topPerformers,
-      productivityScores,
       employeeList,
     });
   } catch (err) {
     console.error('Employees report error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
