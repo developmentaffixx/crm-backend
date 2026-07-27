@@ -29,10 +29,8 @@ exports.list = async (req, res) => {
     const [[summaryRow]] = await db.query(
       `SELECT
          COUNT(*)                                AS total,
-         SUM(p.status = 'open')                 AS open,
-         SUM(p.status = 'in_progress')          AS in_progress,
-         SUM(p.status = 'completed')            AS completed,
-         SUM(p.status = 'cancelled')            AS cancelled
+         SUM(p.status = 'active')               AS active,
+         SUM(p.status = 'inactive')             AS inactive
        FROM projects p
        LEFT JOIN leads l ON l.id = p.client_id
        ${!req.user.is_admin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ?' : ''}
@@ -40,26 +38,20 @@ exports.list = async (req, res) => {
       summaryParams
     );
     const summary = {
-      total:       Number(summaryRow.total       || 0),
-      open:        Number(summaryRow.open        || 0),
-      in_progress: Number(summaryRow.in_progress || 0),
-      completed:   Number(summaryRow.completed   || 0),
-      cancelled:   Number(summaryRow.cancelled   || 0),
+      total:    Number(summaryRow.total    || 0),
+      active:   Number(summaryRow.active   || 0),
+      inactive: Number(summaryRow.inactive || 0),
     };
 
     // ── Main query — applies status filter ──
     let where = baseWhere;
     const params = [...baseParams];
 
-    if (status === 'active') {
-      where += ` AND p.status IN ('open', 'in_progress')`;
-    } else if (status) {
+    if (status === 'active' || status === 'inactive') {
       where += ' AND p.status = ?';
       params.push(status);
-    } else {
-      // No filter passed — default to active only
-      where += ` AND p.status IN ('open', 'in_progress')`;
     }
+    // No filter passed — show all (no status restriction)
 
     // Add user_id param for the pm_self join if non-admin
     const mainParams = [...params];
@@ -73,27 +65,14 @@ exports.list = async (req, res) => {
               s.name AS service_name,
               CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
               (SELECT COUNT(*) FROM project_members pm2 WHERE pm2.project_id = p.id) AS member_count,
-              (SELECT COUNT(*) FROM project_services ps2 WHERE ps2.project_id = p.id) AS service_count,
-              CASE
-                WHEN EXISTS (
-                  SELECT 1 FROM project_services ps3
-                  WHERE ps3.project_id = p.id AND ps3.status = 'active'
-                ) THEN 1
-                WHEN EXISTS (
-                  SELECT 1 FROM service_cycles sc2
-                  JOIN project_services ps4 ON ps4.id = sc2.project_service_id
-                  WHERE ps4.project_id = p.id AND sc2.status = 'active'
-                ) THEN 1
-                WHEN p.status IN ('open', 'in_progress') THEN 1
-                ELSE 0
-              END AS is_active
+              (SELECT COUNT(*) FROM project_services ps2 WHERE ps2.project_id = p.id) AS service_count
        FROM projects p
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN services s ON s.id = p.service_id
        LEFT JOIN users uc ON uc.id = p.created_by
        ${!req.user.is_admin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ?' : ''}
        WHERE ${where}
-       ORDER BY is_active DESC, p.created_at DESC`,
+       ORDER BY p.status = 'active' DESC, p.created_at DESC`,
       mainParams
     );
 
@@ -304,7 +283,7 @@ exports.create = async (req, res) => {
         start_date || null,
         end_date || null,
         budget || null,
-        status || 'open',
+        status || 'active',
         req.user.id
       ]
     );
