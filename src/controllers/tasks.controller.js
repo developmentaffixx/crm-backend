@@ -218,7 +218,9 @@ exports.getOne = async (req, res) => {
               pt.project_id,
               p.title AS project_name,
               pt.service_id,
-              sv.name AS service_name
+              sv.name AS service_name,
+              sc.id AS cycle_id,
+              sc.title AS cycle_name
        FROM tasks t
        LEFT JOIN users u_assigned ON u_assigned.id = t.assigned_to
        LEFT JOIN users u_created  ON u_created.id  = t.created_by
@@ -229,6 +231,8 @@ exports.getOne = async (req, res) => {
        LEFT JOIN project_tasks pt ON pt.task_id = t.id
        LEFT JOIN projects p ON p.id = pt.project_id AND p.deleted = 0
        LEFT JOIN services sv ON sv.id = pt.service_id
+       LEFT JOIN cycle_tasks ct ON ct.task_id = t.id
+       LEFT JOIN service_cycles sc ON sc.id = ct.cycle_id
        WHERE t.id = ? AND t.deleted = 0`,
       [req.params.id]
     );
