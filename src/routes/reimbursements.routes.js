@@ -21,6 +21,7 @@ router.get('/stats', requireAdmin, ctrl.stats);
 router.post('/', upload.single('receipt'), ctrl.create);
 
 // Admin actions
+router.put('/:id/edit', requireAdmin, upload.single('receipt'), ctrl.edit);
 router.put('/:id/approve', requireAdmin, ctrl.approve);
 router.put('/:id/reject', requireAdmin, ctrl.reject);
 router.put('/:id/mark-paid', requireAdmin, ctrl.markPaid);

@@ -182,6 +182,54 @@ exports.markPaid = async (req, res) => {
 };
 
 /**
+ * PUT /api/reimbursements/:id/edit
+ * Admin edits a reimbursement (any status)
+ */
+exports.edit = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { category, amount, expense_date, description, is_group, group_members } = req.body;
+
+    const [rows] = await db.query('SELECT * FROM reimbursements WHERE id = ? AND deleted = 0', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Not found' });
+
+    // Build dynamic update
+    const updates = [];
+    const params = [];
+
+    if (category) { updates.push('category = ?'); params.push(category); }
+    if (amount !== undefined && amount !== '') { updates.push('amount = ?'); params.push(amount); }
+    if (expense_date) { updates.push('expense_date = ?'); params.push(expense_date); }
+    if (description !== undefined) { updates.push('description = ?'); params.push(description); }
+    if (is_group !== undefined) { updates.push('is_group = ?'); params.push(is_group ? 1 : 0); }
+    if (group_members !== undefined) {
+      updates.push('group_members = ?');
+      params.push(group_members ? JSON.stringify(group_members) : null);
+    }
+
+    // Handle receipt upload
+    if (req.file) {
+      const { url } = await uploadToCloudinary(req.file.buffer, 'crm/reimbursements', 'auto');
+      updates.push('receipt_url = ?');
+      params.push(url);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ message: 'No fields to update' });
+    }
+
+    updates.push('updated_at = NOW()');
+    params.push(id);
+
+    await db.query(`UPDATE reimbursements SET ${updates.join(', ')} WHERE id = ?`, params);
+    return res.json({ message: 'Reimbursement updated' });
+  } catch (err) {
+    console.error('Edit reimbursement error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * DELETE /api/reimbursements/:id
  * Employee cancels own pending request
  */
