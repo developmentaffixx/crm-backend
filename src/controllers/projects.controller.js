@@ -163,29 +163,6 @@ exports.getOne = async (req, res) => {
     );
     project.activities = activities;
 
-    // Fetch related tickets (tickets have project_id field)
-    const [tickets] = await db.query(
-      `SELECT tk.id, tk.title, tk.status, tk.priority, tk.ticket_type, tk.due_date,
-              CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name
-       FROM tickets tk
-       LEFT JOIN users u ON u.id = tk.assigned_to
-       WHERE tk.project_id = ? AND tk.deleted = 0
-       ORDER BY tk.created_at DESC`,
-      [project.id]
-    );
-    project.tickets = tickets;
-
-    // Fetch related shoots (via client)
-    const [shoots] = await db.query(
-      `SELECT s.id, s.project_campaign_name, s.shoot_date, s.start_time, s.end_time,
-              s.location_type, s.city, s.status, s.shoot_status
-       FROM shoots s
-       WHERE s.client_brand_id = ? AND s.deleted = 0
-       ORDER BY s.shoot_date DESC`,
-      [project.client_id || 0]
-    );
-    project.shoots = shoots;
-
     // Fetch DRS sections from client_drs (shared with client)
     if (project.client_id) {
       const [drs] = await db.query(
@@ -243,7 +220,7 @@ exports.create = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { title, description, project_type, client_id, service_id, start_date, end_date, status, members, budget } = req.body;
+  const { title, description, project_type, client_id, service_id, status, members, budget } = req.body;
 
   try {
     // Generate project_id_code: ACC-YYMMDD-### (sequence resets per Financial Year: April–March)
@@ -271,8 +248,8 @@ exports.create = async (req, res) => {
     const project_id_code = `${datePrefix}-${String(projectSeq).padStart(3, '0')}`;
 
     const [result] = await db.query(
-      `INSERT INTO projects (project_id_code, title, description, project_type, client_id, service_id, start_date, end_date, budget, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (project_id_code, title, description, project_type, client_id, service_id, budget, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         project_id_code,
         title,
@@ -280,8 +257,6 @@ exports.create = async (req, res) => {
         project_type || 'internal',
         actualClientId,
         service_id || null,
-        start_date || null,
-        end_date || null,
         budget || null,
         status || 'active',
         req.user.id
@@ -327,12 +302,12 @@ exports.update = async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    const allowed = ['title', 'description', 'project_type', 'client_id', 'service_id', 'start_date', 'end_date', 'budget', 'status', 'project_id_code'];
+    const allowed = ['title', 'description', 'project_type', 'client_id', 'service_id', 'budget', 'status', 'project_id_code'];
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
 
     // Normalize empty strings to null for nullable fields
-    const nullableFields = ['description', 'client_id', 'service_id', 'start_date', 'end_date', 'budget'];
+    const nullableFields = ['description', 'client_id', 'service_id', 'budget'];
     nullableFields.forEach(f => {
       if (updates[f] === '' || updates[f] === 0 || updates[f] === '0') {
         updates[f] = null;
