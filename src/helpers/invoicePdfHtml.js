@@ -173,9 +173,9 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
       <!-- Left: Issued To -->
       <div style="flex:1;padding-right:16px;border-right:1px solid #e0d9d0;">
         <p style="font-size:11px;text-transform:uppercase;letter-spacing:2px;font-weight:600;color:#b8a994;margin-bottom:8px;">Issued To:</p>
-        <p style="font-size:14px;font-weight:600;color:#4a4340;margin:0;">${invoice.lead_name || '—'}</p>
+        <p style="font-size:14px;font-weight:600;color:#4a4340;margin:0;">${invoice.lead_business || '—'}</p>
         <div style="font-size:12px;color:#6b5e50;margin-top:4px;line-height:1.6;">
-          ${invoice.lead_business ? `<p style="margin:0;">${invoice.lead_business}</p>` : ''}
+          ${invoice.lead_name ? `<p style="margin:0;">${invoice.lead_name}</p>` : ''}
           ${invoice.lead_phone ? `<p style="margin:0;">${invoice.lead_phone}</p>` : ''}
           ${invoice.lead_email ? `<p style="margin:0;">${invoice.lead_email}</p>` : ''}
           ${clientAddr ? `<p style="margin:0;">${clientAddr}</p>` : ''}

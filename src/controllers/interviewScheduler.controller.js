@@ -5,7 +5,7 @@ const http  = require('http');
 // ── GET /api/interview-scheduler/candidates ───────────────────────────────────
 exports.listCandidates = async (req, res) => {
   try {
-    const { search, status, source } = req.query;
+    const { search, status, source, position, from_date, to_date } = req.query;
 
     let sql = `
       SELECT ic.*
@@ -30,6 +30,18 @@ exports.listCandidates = async (req, res) => {
     if (source) {
       sql += ` AND ic.source = ?`;
       params.push(source);
+    }
+    if (position) {
+      sql += ` AND ic.position_applied = ?`;
+      params.push(position);
+    }
+    if (from_date) {
+      sql += ` AND ic.created_at >= ?`;
+      params.push(from_date);
+    }
+    if (to_date) {
+      sql += ` AND ic.created_at <= ?`;
+      params.push(to_date + ' 23:59:59');
     }
 
     sql += ` ORDER BY ic.created_at DESC`;
@@ -157,17 +169,29 @@ exports.submitApplication = async (req, res) => {
 exports.updateStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, rejection_reason } = req.body;
 
     const validStatuses = ['new', 'in_process', 'selected', 'rejected', 'on_hold'];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ message: 'Invalid status' });
     }
 
-    await db.query(
-      `UPDATE interview_candidates SET status = ? WHERE id = ? AND deleted = 0`,
-      [status, id]
-    );
+    // Rejection reason is mandatory when rejecting
+    if (status === 'rejected' && (!rejection_reason || !rejection_reason.trim())) {
+      return res.status(400).json({ message: 'Rejection reason is required' });
+    }
+
+    if (status === 'rejected') {
+      await db.query(
+        `UPDATE interview_candidates SET status = ?, rejection_reason = ? WHERE id = ? AND deleted = 0`,
+        [status, rejection_reason.trim(), id]
+      );
+    } else {
+      await db.query(
+        `UPDATE interview_candidates SET status = ?, rejection_reason = NULL WHERE id = ? AND deleted = 0`,
+        [status, id]
+      );
+    }
 
     return res.json({ message: 'Status updated' });
   } catch (err) {
