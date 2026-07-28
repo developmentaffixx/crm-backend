@@ -454,6 +454,7 @@ exports.createUser = async (req, res) => {
         last_name,
         email,
         password,
+        emp_code,
         login_url:    loginUrl,
         company_name: companyName,
       }).catch(e => console.error('Welcome email failed:', e.message));
