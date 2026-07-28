@@ -123,7 +123,9 @@ exports.list = async (req, res) => {
               (SELECT pt2.project_id FROM project_tasks pt2 WHERE pt2.task_id = t.id LIMIT 1) AS project_id,
               (SELECT p2.title FROM project_tasks pt2 JOIN projects p2 ON p2.id = pt2.project_id AND p2.deleted = 0 WHERE pt2.task_id = t.id LIMIT 1) AS project_name,
               (SELECT pt2.service_id FROM project_tasks pt2 WHERE pt2.task_id = t.id LIMIT 1) AS service_id,
-              (SELECT s2.name FROM project_tasks pt2 JOIN services s2 ON s2.id = pt2.service_id WHERE pt2.task_id = t.id LIMIT 1) AS service_name
+              (SELECT s2.name FROM project_tasks pt2 JOIN services s2 ON s2.id = pt2.service_id WHERE pt2.task_id = t.id LIMIT 1) AS service_name,
+              (SELECT sc2.id FROM cycle_tasks ct2 JOIN service_cycles sc2 ON sc2.id = ct2.cycle_id WHERE ct2.task_id = t.id LIMIT 1) AS cycle_id,
+              (SELECT sc2.title FROM cycle_tasks ct2 JOIN service_cycles sc2 ON sc2.id = ct2.cycle_id WHERE ct2.task_id = t.id LIMIT 1) AS cycle_name
        FROM tasks t
        LEFT JOIN users u_assigned ON u_assigned.id = t.assigned_to
        LEFT JOIN users u_created  ON u_created.id  = t.created_by
