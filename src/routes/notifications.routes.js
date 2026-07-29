@@ -8,4 +8,7 @@ router.use(authenticate);
 // GET /api/notifications/unified — unified notification feed (role-based)
 router.get('/unified', notificationsController.getUnifiedNotifications);
 
+// POST /api/notifications/task-comments/mark-read — mark task comment notifications as read
+router.post('/task-comments/mark-read', notificationsController.markTaskCommentsRead);
+
 module.exports = router;

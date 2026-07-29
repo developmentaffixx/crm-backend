@@ -280,7 +280,41 @@ exports.getUnifiedNotifications = async (req, res) => {
       });
     }
 
-    // ─── 8. SMM Slot Notifications (from smm_notifications table) ────────────────
+    // ─── 8. Task Comment Notifications ─────────────────────────────────────────
+    try {
+      const [commentRows] = await db.query(
+        `SELECT tcn.id, tcn.task_id, tcn.comment_type, tcn.message, tcn.created_at,
+                CONCAT(u.first_name, ' ', u.last_name) AS triggered_by_name,
+                t.title AS task_title
+         FROM task_comment_notifications tcn
+         LEFT JOIN users u ON u.id = tcn.triggered_by
+         LEFT JOIN tasks t ON t.id = tcn.task_id
+         WHERE tcn.user_id = ? AND tcn.is_read = 0
+         ORDER BY tcn.created_at DESC
+         LIMIT 20`,
+        [userId]
+      );
+
+      commentRows.forEach(r => {
+        notifications.push({
+          id: `task-comment-${r.id}`,
+          category: 'task_comment',
+          priority: 'medium',
+          title: r.task_title || 'Task Comment',
+          subtitle: r.triggered_by_name || 'Someone',
+          message: r.message,
+          link: `/tasks`,
+          date: r.created_at,
+          days_overdue: 0,
+        });
+      });
+    } catch (tcnErr) {
+      if (tcnErr.code !== 'ER_NO_SUCH_TABLE') {
+        console.error('Task comment notifications error:', tcnErr.message);
+      }
+    }
+
+    // ─── 9. SMM Slot Notifications (from smm_notifications table) ────────────────
     try {
       const [smmRows] = await db.query(
         `SELECT sn.*, CONCAT(u.first_name, ' ', u.last_name) AS triggered_by_name
@@ -334,6 +368,7 @@ exports.getUnifiedNotifications = async (req, res) => {
         leave_approval: notifications.filter(n => n.category === 'leave_approval').length,
         invoice_overdue: notifications.filter(n => n.category === 'invoice_overdue').length,
         announcement: notifications.filter(n => n.category === 'announcement').length,
+        task_comment: notifications.filter(n => n.category === 'task_comment').length,
         smm_notification: notifications.filter(n => n.category === 'smm_notification').length,
       },
     };
@@ -342,5 +377,34 @@ exports.getUnifiedNotifications = async (req, res) => {
   } catch (err) {
     console.error('Unified notifications error:', err);
     return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/notifications/task-comments/mark-read
+ * Mark task comment notifications as read for the current user.
+ * Body: { task_id } (optional — if provided, marks only that task's comments as read)
+ */
+exports.markTaskCommentsRead = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { task_id } = req.body;
+
+    if (task_id) {
+      await db.query(
+        'UPDATE task_comment_notifications SET is_read = 1 WHERE user_id = ? AND task_id = ? AND is_read = 0',
+        [userId, task_id]
+      );
+    } else {
+      await db.query(
+        'UPDATE task_comment_notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0',
+        [userId]
+      );
+    }
+
+    res.json({ message: 'Marked as read' });
+  } catch (err) {
+    console.error('Mark task comments read error:', err);
+    res.status(500).json({ message: 'Server error' });
   }
 };

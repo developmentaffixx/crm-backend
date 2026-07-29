@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const multer = require('multer');
 const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
+const { emitEvent } = require('../config/socket');
 
 // ─── Multer config for audio uploads (max 10MB, audio only) ──────────────────
 const upload = multer({
@@ -17,6 +18,64 @@ const upload = multer({
 });
 
 exports.uploadMiddleware = upload.single('audio');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPER: Notify all task participants about a new comment
+// ─────────────────────────────────────────────────────────────────────────────
+async function notifyTaskComment(taskId, commenterId, commenterName, commentType) {
+  try {
+    // Get all users associated with this task (assignee, creator, collaborators)
+    const [taskRows] = await db.query(
+      'SELECT assigned_to, created_by FROM tasks WHERE id = ?',
+      [taskId]
+    );
+    if (taskRows.length === 0) return;
+
+    const task = taskRows[0];
+
+    // Get collaborators
+    const [collabs] = await db.query(
+      'SELECT user_id FROM task_assignees WHERE task_id = ? AND role = ?',
+      [taskId, 'collaborator']
+    );
+
+    // Get all admin users
+    const [admins] = await db.query(
+      'SELECT id FROM users WHERE is_admin = 1 AND is_active = 1 AND deleted = 0'
+    );
+
+    // Build unique set of users to notify (exclude the commenter)
+    const recipientIds = new Set();
+    if (task.assigned_to) recipientIds.add(task.assigned_to);
+    if (task.created_by) recipientIds.add(task.created_by);
+    collabs.forEach(c => recipientIds.add(c.user_id));
+    admins.forEach(a => recipientIds.add(a.id));
+    recipientIds.delete(commenterId); // Don't notify the person who commented
+
+    const message = commentType === 'audio'
+      ? `${commenterName} left a voice note on a task`
+      : `${commenterName} commented on a task`;
+
+    // Insert notification for each recipient
+    for (const userId of recipientIds) {
+      await db.query(
+        `INSERT INTO task_comment_notifications (user_id, task_id, triggered_by, comment_type, message, is_read)
+         VALUES (?, ?, ?, ?, ?, 0)`,
+        [userId, taskId, commenterId, commentType, message]
+      );
+
+      // Real-time socket push
+      emitEvent('task:new-comment', {
+        task_id: taskId,
+        commenter: commenterName,
+        comment_type: commentType,
+        message,
+      }, `user:${userId}`);
+    }
+  } catch (err) {
+    console.error('Notify task comment error:', err);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/tasks/:id/comments — list comments for a task
@@ -75,6 +134,10 @@ exports.addTextComment = async (req, res) => {
       [result.insertId]
     );
 
+    // Notify participants
+    const commenterName = rows[0].user_name;
+    notifyTaskComment(taskId, userId, commenterName, 'text');
+
     res.status(201).json({ comment: rows[0] });
   } catch (err) {
     console.error('Add text comment error:', err);
@@ -119,6 +182,10 @@ exports.addAudioComment = async (req, res) => {
        WHERE tc.id = ?`,
       [result.insertId]
     );
+
+    // Notify participants
+    const commenterName = rows[0].user_name;
+    notifyTaskComment(taskId, userId, commenterName, 'audio');
 
     res.status(201).json({ comment: rows[0] });
   } catch (err) {
