@@ -487,8 +487,7 @@ exports.deleteQuestion = async (req, res) => {
 
 // ── GET /api/interview-scheduler/candidates/:id/resume ───────────────────────
 // Authenticated proxy — streams the resume PDF from the joinus storage server.
-// Keeps the file behind auth so the direct storage URL (which is blocked) is
-// never exposed to the browser.
+// Keeps the file behind auth so the direct storage URL is never exposed to the browser.
 exports.getResume = async (req, res) => {
   try {
     const { id } = req.params;
@@ -508,12 +507,25 @@ exports.getResume = async (req, res) => {
       return res.status(400).json({ message: 'Invalid resume path' });
     }
 
-    const urlObj = new URL(resumeUrl);
+    // Extract just the filename from the stored URL and use the PHP file-server endpoint
+    // instead of direct file access (which is blocked on shared hosting)
+    let fetchUrl = resumeUrl;
+    const filenameMatch = resumeUrl.match(/\/storage\/resumes\/([^/?#]+)$/);
+    if (filenameMatch) {
+      const baseUrl = resumeUrl.split('/storage/resumes/')[0];
+      fetchUrl = `${baseUrl}/api/resume.php?file=${encodeURIComponent(filenameMatch[1])}`;
+    }
+
+    const urlObj = new URL(fetchUrl);
     const lib    = urlObj.protocol === 'https:' ? https : http;
 
-    const proxyReq = lib.get(resumeUrl, (proxyRes) => {
+    const proxyReq = lib.get(fetchUrl, (proxyRes) => {
       if (proxyRes.statusCode !== 200) {
-        return res.status(proxyRes.statusCode).json({ message: 'Could not fetch resume from storage' });
+        console.error(`Resume proxy got status ${proxyRes.statusCode} from: ${fetchUrl}`);
+        if (!res.headersSent) {
+          return res.status(proxyRes.statusCode).json({ message: 'Could not fetch resume from storage' });
+        }
+        return;
       }
 
       res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'application/pdf');
