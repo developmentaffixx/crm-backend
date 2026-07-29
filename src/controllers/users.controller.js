@@ -179,7 +179,16 @@ exports.myPermissions = async (req, res) => {
         report_centre: 2,
       };
 
-      return res.json({ is_admin: true, role_id: roleId || null, role_name: 'Admin', responsibilities, permissions: perms, socialAccess });
+      // Admins get full submenu access for all modules
+      const submenuAccess = {
+        creative_hub: { social_overview: 2, content_calendar: 2, content_writing: 2, shoot_planning: 2, ads_planning: 2, daily_journal: 2, report_centre: 2 },
+        people_ops: { on_boarding: 2, recruitment: 2, leaves: 2, reimbursements: 2 },
+        revenue: { leads: 2, proposals: 2, quotations: 2, vendor_agreement: 2, introduction: 2 },
+        finance: { invoices: 2, expenses: 2, income: 2, assets: 2, payroll: 2, software_licenses: 2, inventories: 2 },
+        reports: { employees: 2, clients: 2, tickets: 2, leads: 2, projects: 2, finance: 2, performance: 2 },
+      };
+
+      return res.json({ is_admin: true, role_id: roleId || null, role_name: 'Admin', responsibilities, permissions: perms, socialAccess, submenuAccess });
     }
 
     const [userRows] = await db.query(
@@ -231,7 +240,18 @@ exports.myPermissions = async (req, res) => {
       socialAccess = socialRows[0];
     }
 
-    return res.json({ is_admin: false, role_id: roleId, role_name: roleName, responsibilities, permissions, socialAccess });
+    // Fetch generic submenu permissions for all modules
+    let submenuAccess = {};
+    const [submenuRows] = await db.query(
+      'SELECT module, submenu, can_access FROM role_submenu_permissions WHERE role_id = ?',
+      [roleId]
+    );
+    submenuRows.forEach(r => {
+      if (!submenuAccess[r.module]) submenuAccess[r.module] = {};
+      submenuAccess[r.module][r.submenu] = r.can_access;
+    });
+
+    return res.json({ is_admin: false, role_id: roleId, role_name: roleName, responsibilities, permissions, socialAccess, submenuAccess });
   } catch (err) {
     console.error('myPermissions error:', err);
     return res.status(500).json({ message: 'Server error' });

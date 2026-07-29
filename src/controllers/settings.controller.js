@@ -323,6 +323,96 @@ exports.updateRoleSocialPermissions = async (req, res) => {
   }
 };
 
+// ─── GENERIC SUBMENU PERMISSIONS ──────────────────────────────────────────────
+
+/**
+ * GET /api/settings/roles/:id/submenu-permissions
+ * Returns all submenu permissions for a role, grouped by module.
+ * Response: { module1: { submenu1: 0, submenu2: 2, ... }, module2: { ... } }
+ */
+exports.getRoleSubmenuPermissions = async (req, res) => {
+  const roleId = parseInt(req.params.id, 10);
+  try {
+    const [rows] = await db.query(
+      'SELECT module, submenu, can_access FROM role_submenu_permissions WHERE role_id = ?',
+      [roleId]
+    );
+    // Group by module
+    const result = {};
+    rows.forEach(r => {
+      if (!result[r.module]) result[r.module] = {};
+      result[r.module][r.submenu] = r.can_access;
+    });
+    return res.json(result);
+  } catch (err) {
+    console.error('getRoleSubmenuPermissions error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/settings/roles/:id/submenu-permissions
+ * Upsert submenu permissions for a role.
+ * Body: { module1: { submenu1: 0, submenu2: 2, ... }, module2: { ... } }
+ */
+exports.updateRoleSubmenuPermissions = async (req, res) => {
+  const roleId = parseInt(req.params.id, 10);
+  const data = req.body; // { module: { submenu: can_access, ... }, ... }
+
+  if (!data || typeof data !== 'object') {
+    return res.status(400).json({ message: 'Request body must be an object of module → submenu → access level' });
+  }
+
+  try {
+    const [roleRows] = await db.query('SELECT id FROM roles WHERE id = ?', [roleId]);
+    if (roleRows.length === 0) return res.status(404).json({ message: 'Role not found' });
+
+    // Build values array for batch upsert
+    const values = [];
+    for (const [module, submenus] of Object.entries(data)) {
+      if (typeof submenus !== 'object') continue;
+      for (const [submenu, canAccess] of Object.entries(submenus)) {
+        const access = parseInt(canAccess, 10) || 0;
+        values.push([roleId, module, submenu, access]);
+      }
+    }
+
+    if (values.length > 0) {
+      await db.query(
+        `INSERT INTO role_submenu_permissions (role_id, module, submenu, can_access)
+         VALUES ?
+         ON DUPLICATE KEY UPDATE can_access = VALUES(can_access)`,
+        [values]
+      );
+    }
+
+    // Also sync to role_social_permissions for backward compatibility
+    if (data.creative_hub) {
+      const sp = data.creative_hub;
+      await db.query(
+        `INSERT INTO role_social_permissions (role_id, social_overview, content_calendar, content_writing, shoot_planning, ads_planning, daily_journal, report_centre)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           social_overview = VALUES(social_overview),
+           content_calendar = VALUES(content_calendar),
+           content_writing = VALUES(content_writing),
+           shoot_planning = VALUES(shoot_planning),
+           ads_planning = VALUES(ads_planning),
+           daily_journal = VALUES(daily_journal),
+           report_centre = VALUES(report_centre)`,
+        [roleId, sp.social_overview || 0, sp.content_calendar || 0, sp.content_writing || 0, sp.shoot_planning || 0, sp.ads_planning || 0, sp.daily_journal || 0, sp.report_centre || 0]
+      );
+    }
+
+    await logAudit(db, req.user.id, 'submenu_permissions_updated', 'role', roleId, data, req.ip);
+
+    return res.json({ message: 'Submenu permissions updated' });
+  } catch (err) {
+    console.error('updateRoleSubmenuPermissions error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── USER MANAGEMENT ─────────────────────────────────────────────────────────
 
 /**
