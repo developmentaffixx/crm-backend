@@ -80,6 +80,30 @@ router.get('/:id/activity', param('id').isInt(), tasksController.getActivity);
 // DELETE /api/tasks/:id          — creator or admin soft-deletes a task
 router.delete('/:id', param('id').isInt(), authenticate, tasksController.remove);
 
+// ── Task Comments (Text + Audio) ──────────────────────────────────────────────
+const taskCommentsController = require('../controllers/taskComments.controller');
+
+// GET  /api/tasks/:id/comments         — list comments for a task
+router.get('/:id/comments', param('id').isInt(), taskCommentsController.getComments);
+
+// POST /api/tasks/:id/comments         — add a text comment
+router.post('/:id/comments', param('id').isInt(), taskCommentsController.addTextComment);
+
+// POST /api/tasks/:id/comments/audio   — add an audio comment
+router.post(
+  '/:id/comments/audio',
+  param('id').isInt(),
+  taskCommentsController.uploadMiddleware,
+  taskCommentsController.addAudioComment
+);
+
+// DELETE /api/tasks/:id/comments/:commentId  — delete a comment
+router.delete(
+  '/:id/comments/:commentId',
+  [param('id').isInt(), param('commentId').isInt()],
+  taskCommentsController.deleteComment
+);
+
 // ── Time Tracking ─────────────────────────────────────────────────────────────
 const timeLogsController = require('../controllers/timeLogs.controller');
 const { body: bodyV } = require('express-validator');
