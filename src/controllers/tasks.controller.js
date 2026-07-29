@@ -124,8 +124,14 @@ exports.list = async (req, res) => {
               (SELECT p2.title FROM project_tasks pt2 JOIN projects p2 ON p2.id = pt2.project_id AND p2.deleted = 0 WHERE pt2.task_id = t.id LIMIT 1) AS project_name,
               (SELECT pt2.service_id FROM project_tasks pt2 WHERE pt2.task_id = t.id LIMIT 1) AS service_id,
               (SELECT s2.name FROM project_tasks pt2 JOIN services s2 ON s2.id = pt2.service_id WHERE pt2.task_id = t.id LIMIT 1) AS service_name,
-              (SELECT sc2.id FROM cycle_tasks ct2 JOIN service_cycles sc2 ON sc2.id = ct2.cycle_id WHERE ct2.task_id = t.id LIMIT 1) AS cycle_id,
-              (SELECT sc2.title FROM cycle_tasks ct2 JOIN service_cycles sc2 ON sc2.id = ct2.cycle_id WHERE ct2.task_id = t.id LIMIT 1) AS cycle_name
+              COALESCE(
+                (SELECT sc2.id FROM cycle_tasks ct2 JOIN service_cycles sc2 ON sc2.id = ct2.cycle_id WHERE ct2.task_id = t.id LIMIT 1),
+                (SELECT sc3.id FROM project_tasks pt3 JOIN service_cycles sc3 ON sc3.project_id = pt3.project_id AND sc3.status = 'active' WHERE pt3.task_id = t.id AND pt3.service_id IS NOT NULL LIMIT 1)
+              ) AS cycle_id,
+              COALESCE(
+                (SELECT sc2.title FROM cycle_tasks ct2 JOIN service_cycles sc2 ON sc2.id = ct2.cycle_id WHERE ct2.task_id = t.id LIMIT 1),
+                (SELECT sc3.title FROM project_tasks pt3 JOIN service_cycles sc3 ON sc3.project_id = pt3.project_id AND sc3.status = 'active' WHERE pt3.task_id = t.id AND pt3.service_id IS NOT NULL LIMIT 1)
+              ) AS cycle_name
        FROM tasks t
        LEFT JOIN users u_assigned ON u_assigned.id = t.assigned_to
        LEFT JOIN users u_created  ON u_created.id  = t.created_by
@@ -221,8 +227,8 @@ exports.getOne = async (req, res) => {
               p.title AS project_name,
               pt.service_id,
               sv.name AS service_name,
-              sc.id AS cycle_id,
-              sc.title AS cycle_name
+              COALESCE(sc.id, sc_active.id) AS cycle_id,
+              COALESCE(sc.title, sc_active.title) AS cycle_name
        FROM tasks t
        LEFT JOIN users u_assigned ON u_assigned.id = t.assigned_to
        LEFT JOIN users u_created  ON u_created.id  = t.created_by
@@ -235,6 +241,7 @@ exports.getOne = async (req, res) => {
        LEFT JOIN services sv ON sv.id = pt.service_id
        LEFT JOIN cycle_tasks ct ON ct.task_id = t.id
        LEFT JOIN service_cycles sc ON sc.id = ct.cycle_id
+       LEFT JOIN service_cycles sc_active ON sc_active.project_id = pt.project_id AND sc_active.status = 'active' AND ct.id IS NULL AND pt.service_id IS NOT NULL
        WHERE t.id = ? AND t.deleted = 0`,
       [req.params.id]
     );
