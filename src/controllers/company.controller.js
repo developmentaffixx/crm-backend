@@ -93,9 +93,12 @@ exports.uploadLogo       = (req, res) => uploadImage(req, res, 'logos',       'l
 exports.uploadFavicon    = (req, res) => uploadImage(req, res, 'favicons',    'favicon_url',    'Favicon');
 exports.uploadUpiQr      = (req, res) => uploadImage(req, res, 'qr-codes',   'upi_qr_url',     'UPI QR');
 exports.uploadLetterhead = (req, res) => uploadImage(req, res, 'letterheads', 'letterhead_url', 'Letterhead');
+exports.uploadQuotationLetterhead = (req, res) => uploadImage(req, res, 'letterheads', 'quotation_letterhead_url', 'Quotation Letterhead');
 
 // ─── Remove endpoints ─────────────────────────────────────────────────────────
 exports.removeLogo       = (req, res) => removeImage(req, res, 'logo_url',       'Logo');
 exports.removeFavicon    = (req, res) => removeImage(req, res, 'favicon_url',    'Favicon');
 exports.removeUpiQr      = (req, res) => removeImage(req, res, 'upi_qr_url',     'UPI QR');
+exports.removeLetterhead = (req, res) => removeImage(req, res, 'letterhead_url', 'Letterhead');
+exports.removeQuotationLetterhead = (req, res) => removeImage(req, res, 'quotation_letterhead_url', 'Quotation Letterhead');
 exports.removeLetterhead = (req, res) => removeImage(req, res, 'letterhead_url', 'Letterhead');

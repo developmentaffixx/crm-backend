@@ -26,11 +26,13 @@ router.post('/upload-logo',        authenticate, requireAdmin, upload.single('lo
 router.post('/upload-favicon',     authenticate, requireAdmin, upload.single('favicon'),     ctrl.uploadFavicon);
 router.post('/upload-upi-qr',      authenticate, requireAdmin, upload.single('upi_qr'),     ctrl.uploadUpiQr);
 router.post('/upload-letterhead',  authenticate, requireAdmin, upload.single('letterhead'),  ctrl.uploadLetterhead);
+router.post('/upload-quotation-letterhead', authenticate, requireAdmin, upload.single('letterhead'), ctrl.uploadQuotationLetterhead);
 
 // Remove images
 router.delete('/remove-logo',        authenticate, requireAdmin, ctrl.removeLogo);
 router.delete('/remove-favicon',     authenticate, requireAdmin, ctrl.removeFavicon);
 router.delete('/remove-upi-qr',      authenticate, requireAdmin, ctrl.removeUpiQr);
 router.delete('/remove-letterhead',  authenticate, requireAdmin, ctrl.removeLetterhead);
+router.delete('/remove-quotation-letterhead', authenticate, requireAdmin, ctrl.removeQuotationLetterhead);
 
 module.exports = router;
