@@ -18,29 +18,59 @@ async function generateQuotationNumber() {
 // ─── GET /api/quotations ──────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
-    const { status, search } = req.query;
+    const { status, search, service_type, page = 1, limit = 50, sortBy = 'created_at', sortOrder = 'desc' } = req.query;
     let where = 'q.deleted = 0';
     const params = [];
 
     if (status) { where += ' AND q.status = ?'; params.push(status); }
+    if (service_type) { where += ' AND q.service_type = ?'; params.push(service_type); }
     if (search) {
       where += ' AND (q.quotation_number LIKE ? OR q.client_name LIKE ? OR q.service_title LIKE ?)';
       const s = `%${search}%`;
       params.push(s, s, s);
     }
 
+    // Allowed sort fields
+    const allowedSort = ['created_at', 'client_name', 'investment_amount', 'status', 'service_title'];
+    const safeSort = allowedSort.includes(sortBy) ? sortBy : 'created_at';
+    const safeOrder = sortOrder === 'asc' ? 'ASC' : 'DESC';
+
+    // Get total count
+    const [countResult] = await db.query(`SELECT COUNT(*) as total FROM quotations q WHERE ${where}`, params);
+    const total = countResult[0].total;
+    const totalPages = Math.ceil(total / limit);
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
     const [rows] = await db.query(
       `SELECT q.*, l.name AS lead_name, l.business_name AS lead_business,
+              l.email AS lead_email,
               CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
        FROM quotations q
        LEFT JOIN leads l ON l.id = q.lead_id
        LEFT JOIN users u ON u.id = q.created_by
        WHERE ${where}
-       ORDER BY q.created_at DESC`,
-      params
+       ORDER BY q.${safeSort} ${safeOrder}
+       LIMIT ? OFFSET ?`,
+      [...params, parseInt(limit), offset]
     );
 
-    return res.json({ quotations: rows });
+    // Summary stats
+    const [summary] = await db.query(
+      `SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'Draft' THEN 1 ELSE 0 END) as draft,
+        SUM(CASE WHEN status = 'Sent' THEN 1 ELSE 0 END) as sent,
+        SUM(CASE WHEN status = 'Accepted' THEN 1 ELSE 0 END) as accepted,
+        SUM(CASE WHEN status = 'Rejected' THEN 1 ELSE 0 END) as rejected,
+        SUM(CASE WHEN status = 'Accepted' THEN investment_amount ELSE 0 END) as total_value
+       FROM quotations WHERE deleted = 0`
+    );
+
+    return res.json({
+      quotations: rows,
+      summary: summary[0] || {},
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, totalPages }
+    });
   } catch (err) {
     console.error('Quotations list error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -73,10 +103,10 @@ exports.create = async (req, res) => {
   try {
     const {
       lead_id, client_name, client_email, client_phone,
-      service_title, tagline, description,
+      service_title, service_type, tagline, description,
       process_sections, plan_title, plan_includes,
       investment_amount, investment_label,
-      terms, bank_name, account_number, ifsc_code, branch, upi_id
+      terms, bank_name, account_number, ifsc_code, branch, upi_id, valid_until
     } = req.body;
 
     if (!client_name || !service_title) {
@@ -87,10 +117,10 @@ exports.create = async (req, res) => {
 
     const [result] = await db.query(
       `INSERT INTO quotations (quotation_number, lead_id, client_name, client_email, client_phone,
-        service_title, tagline, description, process_sections, plan_title, plan_includes,
+        service_title, service_type, tagline, description, process_sections, plan_title, plan_includes,
         investment_amount, investment_label, terms,
-        bank_name, account_number, ifsc_code, branch, upi_id, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        bank_name, account_number, ifsc_code, branch, upi_id, valid_until, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         quotation_number,
         lead_id || null,
@@ -98,6 +128,7 @@ exports.create = async (req, res) => {
         client_email || null,
         client_phone || null,
         service_title,
+        service_type || 'smm',
         tagline || null,
         description || null,
         JSON.stringify(process_sections || []),
@@ -111,6 +142,7 @@ exports.create = async (req, res) => {
         ifsc_code || null,
         branch || null,
         upi_id || null,
+        valid_until || null,
         req.user.id
       ]
     );
@@ -132,19 +164,19 @@ exports.update = async (req, res) => {
 
     const {
       lead_id, client_name, client_email, client_phone,
-      service_title, tagline, description,
+      service_title, service_type, tagline, description,
       process_sections, plan_title, plan_includes,
       investment_amount, investment_label,
-      terms, bank_name, account_number, ifsc_code, branch, upi_id, status
+      terms, bank_name, account_number, ifsc_code, branch, upi_id, status, valid_until
     } = req.body;
 
     await db.query(
       `UPDATE quotations SET
         lead_id = ?, client_name = ?, client_email = ?, client_phone = ?,
-        service_title = ?, tagline = ?, description = ?,
+        service_title = ?, service_type = ?, tagline = ?, description = ?,
         process_sections = ?, plan_title = ?, plan_includes = ?,
         investment_amount = ?, investment_label = ?, terms = ?,
-        bank_name = ?, account_number = ?, ifsc_code = ?, branch = ?, upi_id = ?, status = ?
+        bank_name = ?, account_number = ?, ifsc_code = ?, branch = ?, upi_id = ?, status = ?, valid_until = ?
        WHERE id = ?`,
       [
         lead_id !== undefined ? lead_id : existing[0].lead_id,
@@ -152,6 +184,7 @@ exports.update = async (req, res) => {
         client_email !== undefined ? client_email : existing[0].client_email,
         client_phone !== undefined ? client_phone : existing[0].client_phone,
         service_title || existing[0].service_title,
+        service_type || existing[0].service_type || 'smm',
         tagline !== undefined ? tagline : existing[0].tagline,
         description !== undefined ? description : existing[0].description,
         JSON.stringify(process_sections || JSON.parse(existing[0].process_sections || '[]')),
@@ -166,6 +199,7 @@ exports.update = async (req, res) => {
         branch !== undefined ? branch : existing[0].branch,
         upi_id !== undefined ? upi_id : existing[0].upi_id,
         status || existing[0].status,
+        valid_until !== undefined ? valid_until : existing[0].valid_until,
         req.params.id
       ]
     );
@@ -175,6 +209,29 @@ exports.update = async (req, res) => {
     return res.json(updated[0]);
   } catch (err) {
     console.error('Quotation update error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── PATCH /api/quotations/:id/status ─────────────────────────────────────────
+exports.updateStatus = async (req, res) => {
+  try {
+    const { status } = req.body;
+    const validStatuses = ['Draft', 'Sent', 'Accepted', 'Rejected'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    const [rows] = await db.query('SELECT * FROM quotations WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ message: 'Quotation not found' });
+
+    await db.query('UPDATE quotations SET status = ? WHERE id = ?', [status, req.params.id]);
+
+    const [updated] = await db.query('SELECT * FROM quotations WHERE id = ?', [req.params.id]);
+    res.emitSocket('quotations:updated', updated[0]);
+    return res.json(updated[0]);
+  } catch (err) {
+    console.error('Quotation status update error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

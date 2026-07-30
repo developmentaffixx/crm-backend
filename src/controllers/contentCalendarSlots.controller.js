@@ -781,3 +781,78 @@ exports.unshareWithClient = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+// ─── CLIENT VIEW CALENDAR ─────────────────────────────────────────────────────
+// Called from client portal — shows only shared plans for the authenticated client
+
+exports.clientViewCalendar = async (req, res) => {
+  try {
+    const clientId = req.clientId || req.clientUser?.client_id;
+    if (!clientId) return res.status(401).json({ message: 'Unauthorized' });
+
+    const { month } = req.query;
+
+    let monthFilter = '';
+    const params = [clientId];
+
+    if (month) {
+      monthFilter = ' AND p.plan_month = ?';
+      params.push(month);
+    }
+
+    // Get shared plans for this client
+    const [plans] = await db.query(
+      `SELECT p.id, p.plan_month, p.primary_goal, p.target_audience, p.status, p.shared_at,
+              pr.title AS project_title
+       FROM content_calendar_plans p
+       LEFT JOIN projects pr ON pr.id = p.project_id
+       WHERE p.client_id = ? AND p.shared_with_client = 1 AND p.deleted = 0${monthFilter}
+       ORDER BY p.plan_month DESC`,
+      params
+    );
+
+    if (plans.length === 0) {
+      return res.json({ plans: [], posts: [], shoots: [], ads: [] });
+    }
+
+    const planIds = plans.map(p => p.id);
+
+    // Get posts for shared plans
+    const [posts] = await db.query(
+      `SELECT cp.id, cp.plan_id, cp.post_no, cp.platform, cp.format, cp.topic,
+              cp.ad_target, cp.posting_date, cp.cta, cp.status,
+              cwr.hook AS brief_hook
+       FROM content_calendar_posts cp
+       LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
+       WHERE cp.plan_id IN (?)
+       ORDER BY cp.posting_date ASC`,
+      [planIds]
+    );
+
+    // Get shoots for shared plans
+    const [shoots] = await db.query(
+      `SELECT cs.id, cs.plan_id, cs.shoot_date, cs.location, cs.description,
+              cs.num_videos, cs.num_photos, cs.status
+       FROM content_calendar_shoots cs
+       WHERE cs.plan_id IN (?)
+       ORDER BY cs.shoot_date ASC`,
+      [planIds]
+    );
+
+    // Get ads for shared plans
+    const [ads] = await db.query(
+      `SELECT ca.id, ca.plan_id, ca.ad_no, ca.creative_name, ca.campaign_objective,
+              ca.platform, ca.ad_status AS status, ca.budget, ca.start_date, ca.end_date,
+              ca.expected_outcomes
+       FROM content_calendar_ads ca
+       WHERE ca.plan_id IN (?)
+       ORDER BY ca.start_date ASC`,
+      [planIds]
+    );
+
+    return res.json({ plans, posts, shoots, ads });
+  } catch (err) {
+    console.error('clientViewCalendar error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
