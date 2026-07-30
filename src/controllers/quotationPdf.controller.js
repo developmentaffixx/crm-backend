@@ -135,9 +135,22 @@ exports.generatePdf = async (req, res) => {
         if (!line.trim()) { doc.moveDown(0.4); continue; }
         checkNewPage(20);
         resetX();
-        doc.fontSize(9).font(FONT_REGULAR).text(line.trim(), LEFT_MARGIN, doc.y, {
-          width: CONTENT_WIDTH, align: 'left', lineGap: 2
-        });
+        // Detect heading lines (short questions or section titles)
+        const isHeading = (line.trim().endsWith('?') && line.trim().length < 80) ||
+          line.trim() === 'Why Does Your Business Need SEO?' ||
+          line.trim() === 'Why Does SEO Take Time?' ||
+          line.trim().startsWith('What is SEO');
+        if (isHeading) {
+          doc.moveDown(0.3);
+          doc.fontSize(10).font(FONT_BOLD).text(line.trim(), LEFT_MARGIN, doc.y, {
+            width: CONTENT_WIDTH, align: 'left', lineGap: 2
+          });
+          doc.moveDown(0.2);
+        } else {
+          doc.fontSize(9).font(FONT_REGULAR).text(line.trim(), LEFT_MARGIN, doc.y, {
+            width: CONTENT_WIDTH, align: 'left', lineGap: 2
+          });
+        }
       }
       doc.moveDown(0.5);
     }
