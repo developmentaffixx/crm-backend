@@ -458,9 +458,17 @@ exports.update = async (req, res) => {
 /**
  * POST /api/tasks/:id/mark-done
  * Primary assignee marks task done: is_active 1 → 2 (pending closing approval).
+ * Requires a closing_statement with minimum 30 words.
  */
 exports.markDone = async (req, res) => {
   try {
+    const { closing_statement } = req.body;
+
+    // Validate closing statement — minimum 30 words
+    if (!closing_statement || closing_statement.trim().split(/\s+/).filter(Boolean).length < 30) {
+      return res.status(400).json({ message: 'Closing statement must be at least 30 words' });
+    }
+
     const [rows] = await db.query('SELECT * FROM tasks WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Task not found' });
 
@@ -475,9 +483,9 @@ exports.markDone = async (req, res) => {
       return res.status(400).json({ message: 'Task must be active (is_active=1) to mark as done' });
     }
 
-    await db.query("UPDATE tasks SET is_active = 2, status = 'done' WHERE id = ?", [task.id]);
+    await db.query("UPDATE tasks SET is_active = 2, status = 'done', closing_statement = ? WHERE id = ?", [closing_statement.trim(), task.id]);
 
-    await logActivity(task.id, req.user.id, 'marked_done');
+    await logActivity(task.id, req.user.id, 'marked_done', { note: closing_statement.trim() });
 
     const [updated] = await db.query('SELECT * FROM tasks WHERE id = ?', [task.id]);
     res.emitSocket('tasks:updated', updated[0]);
