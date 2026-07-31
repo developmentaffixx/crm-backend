@@ -76,7 +76,7 @@ exports.createCredentials = async (req, res) => {
 exports.getCredentials = async (req, res) => {
   try {
     const [rows] = await db.query(
-      'SELECT id, client_id, login_email, plain_password, is_active, last_login_at, created_at FROM client_portal_users WHERE client_id = ?',
+      'SELECT id, client_id, login_email, plain_password, is_active, content_calendar_access, last_login_at, created_at FROM client_portal_users WHERE client_id = ?',
       [req.params.clientId]
     );
     if (!rows.length) return res.json({ credentials: null });
@@ -154,6 +154,24 @@ exports.toggleAccess = async (req, res) => {
     return res.json({ message: `Portal access ${is_active ? 'enabled' : 'disabled'}` });
   } catch (err) {
     console.error('toggleAccess error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/client-portal/toggle-calendar/:clientId
+ * Enable/disable content calendar visibility on client portal
+ */
+exports.toggleCalendarAccess = async (req, res) => {
+  const { enabled } = req.body;
+  try {
+    await db.query(
+      'UPDATE client_portal_users SET content_calendar_access = ? WHERE client_id = ?',
+      [enabled ? 1 : 0, req.params.clientId]
+    );
+    return res.json({ message: `Content Calendar ${enabled ? 'enabled' : 'disabled'} for client portal`, content_calendar_access: enabled ? 1 : 0 });
+  } catch (err) {
+    console.error('toggleCalendarAccess error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

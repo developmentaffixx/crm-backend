@@ -38,11 +38,22 @@ router.get('/milestones', ctrl.authenticateClient, v2.getMilestones);
 router.put('/milestones/:id/celebrate', ctrl.authenticateClient, v2.celebrateMilestone);
 router.get('/behind-the-scenes', ctrl.authenticateClient, v2.getBehindTheScenes);
 
-// Content Calendar — client views shared calendar
+// Content Calendar — client views shared calendar (only if access enabled)
 const calendarSlotsCtrl = require('../controllers/contentCalendarSlots.controller');
-router.get('/content-calendar', ctrl.authenticateClient, (req, res) => {
-  req.clientId = req.clientUser.client_id;
-  calendarSlotsCtrl.clientViewCalendar(req, res);
+router.get('/content-calendar', ctrl.authenticateClient, async (req, res, next) => {
+  try {
+    const [rows] = await require('../config/db').query(
+      'SELECT content_calendar_access FROM client_portal_users WHERE client_id = ?',
+      [req.clientUser.client_id]
+    );
+    if (!rows.length || !rows[0].content_calendar_access) {
+      return res.status(403).json({ message: 'Content Calendar access is not enabled for your portal' });
+    }
+    req.clientId = req.clientUser.client_id;
+    calendarSlotsCtrl.clientViewCalendar(req, res);
+  } catch (err) {
+    return res.status(500).json({ message: 'Server error' });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -53,6 +64,7 @@ router.post('/create-credentials', authenticate, ctrl.createCredentials);
 router.get('/credentials/:clientId', authenticate, ctrl.getCredentials);
 router.put('/credentials/:clientId', authenticate, ctrl.updateCredentials);
 router.put('/toggle-access/:clientId', authenticate, ctrl.toggleAccess);
+router.put('/toggle-calendar/:clientId', authenticate, ctrl.toggleCalendarAccess);
 router.post('/send-credentials/:clientId', authenticate, ctrl.sendCredentials);
 
 // CRM managing portal content
