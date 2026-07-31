@@ -904,7 +904,7 @@ exports.clientViewCalendar = async (req, res) => {
     const [posts] = await db.query(
       `SELECT cp.id, cp.plan_id, cp.post_no, cp.platform, cp.format, cp.topic,
               cp.ad_target, cp.posting_date, cp.cta, cp.status,
-              cwr.hook AS brief_hook
+              cwr.hook_opening_line AS brief_hook
        FROM content_calendar_posts cp
        LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
        WHERE cp.plan_id IN (?)
