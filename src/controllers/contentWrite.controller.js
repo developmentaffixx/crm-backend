@@ -19,10 +19,14 @@ exports.list = async (req, res) => {
       params.push(s, s, s);
     }
 
-    // Non-admin: only see own requests
+    // Non-admin: only see own requests (unless SMM lead with level 2)
     if (!req.user.is_admin) {
-      where += ' AND cwr.created_by = ?';
-      params.push(req.user.id);
+      if (req.socialAccessLevel >= 2) {
+        // SMM lead — see all
+      } else {
+        where += ' AND cwr.created_by = ?';
+        params.push(req.user.id);
+      }
     }
 
     const [rows] = await db.query(

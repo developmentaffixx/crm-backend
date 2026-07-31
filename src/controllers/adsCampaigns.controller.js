@@ -12,8 +12,12 @@ exports.list = async (req, res) => {
     if (assigned_to) { where += ' AND ac.assigned_to = ?'; params.push(assigned_to); }
 
     if (!req.user.is_admin) {
-      where += ' AND (ac.created_by = ? OR ac.assigned_to = ? OR pm.user_id IS NOT NULL)';
-      params.push(req.user.id, req.user.id);
+      if (req.socialAccessLevel >= 2) {
+        // SMM lead — see all campaigns
+      } else {
+        where += ' AND (ac.created_by = ? OR ac.assigned_to = ? OR pm.user_id IS NOT NULL)';
+        params.push(req.user.id, req.user.id);
+      }
     }
 
     const offset = (parseInt(page) - 1) * parseInt(limit);

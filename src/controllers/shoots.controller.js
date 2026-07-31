@@ -21,9 +21,13 @@ exports.list = async (req, res) => {
     }
 
     if (!req.user.is_admin) {
-      // Show shoots where user is creator, photographer, videographer, or shoot manager
-      where += ` AND (s.created_by = ? OR s.shoot_manager_id = ? OR JSON_CONTAINS(s.photographers, CAST(? AS JSON)) OR JSON_CONTAINS(s.videographers, CAST(? AS JSON)))`;
-      params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+      if (req.socialAccessLevel >= 2) {
+        // SMM lead with full access — see all shoots
+      } else {
+        // Show shoots where user is creator, photographer, videographer, or shoot manager
+        where += ` AND (s.created_by = ? OR s.shoot_manager_id = ? OR JSON_CONTAINS(s.photographers, CAST(? AS JSON)) OR JSON_CONTAINS(s.videographers, CAST(? AS JSON)))`;
+        params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+      }
     }
 
     const [rows] = await db.query(
