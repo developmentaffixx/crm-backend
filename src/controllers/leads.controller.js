@@ -765,6 +765,61 @@ exports.convert = async (req, res) => {
 };
 
 /**
+ * PATCH /api/leads/bulk-reassign
+ * Bulk reassign leads to a different user
+ * Body: { lead_ids: [1,2,3], assigned_to: 5 }
+ * - lead_ids: array of lead IDs to reassign (if empty/missing, reassigns ALL unassigned)
+ * - assigned_to: user ID to assign leads to
+ */
+exports.bulkReassign = async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: 'Only admin can bulk reassign leads' });
+    }
+
+    const { lead_ids, assigned_to } = req.body;
+
+    if (!assigned_to) {
+      return res.status(400).json({ message: 'assigned_to (user ID) is required' });
+    }
+
+    // Verify the target user exists
+    const [targetUser] = await db.query(
+      'SELECT id, first_name, last_name, emp_code FROM users WHERE id = ? AND deleted = 0',
+      [assigned_to]
+    );
+    if (targetUser.length === 0) {
+      return res.status(404).json({ message: 'Target user not found' });
+    }
+
+    let result;
+    if (lead_ids && lead_ids.length > 0) {
+      // Reassign specific leads
+      const placeholders = lead_ids.map(() => '?').join(',');
+      [result] = await db.query(
+        `UPDATE leads SET assigned_to = ?, updated_at = NOW() WHERE id IN (${placeholders}) AND deleted = 0`,
+        [assigned_to, ...lead_ids]
+      );
+    } else {
+      // Reassign all unassigned leads
+      [result] = await db.query(
+        'UPDATE leads SET assigned_to = ?, updated_at = NOW() WHERE assigned_to IS NULL AND deleted = 0',
+        [assigned_to]
+      );
+    }
+
+    return res.json({
+      message: `${result.affectedRows} lead(s) reassigned to ${targetUser[0].first_name} ${targetUser[0].last_name}`,
+      count: result.affectedRows,
+      assigned_to: targetUser[0],
+    });
+  } catch (err) {
+    console.error('Bulk reassign error:', err);
+    return res.status(500).json({ message: err.message || 'Server error' });
+  }
+};
+
+/**
  * GET /api/leads/filter-options
  * Returns distinct values for filter dropdowns (source, industry, status, assigned users)
  */

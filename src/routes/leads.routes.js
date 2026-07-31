@@ -21,6 +21,9 @@ router.get('/dropdown', leadsController.dropdown);
 // GET  /api/leads/filter-options — distinct values for filter dropdowns
 router.get('/filter-options', leadsController.getFilterOptions);
 
+// PATCH /api/leads/bulk-reassign — bulk reassign leads to a user (admin only)
+router.patch('/bulk-reassign', leadsController.bulkReassign);
+
 // GET  /api/leads          — list leads (filtered by role, paginated, sortable)
 router.get('/', leadsController.list);
 
