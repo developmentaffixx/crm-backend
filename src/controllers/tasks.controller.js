@@ -458,15 +458,15 @@ exports.update = async (req, res) => {
 /**
  * POST /api/tasks/:id/mark-done
  * Primary assignee marks task done: is_active 1 → 2 (pending closing approval).
- * Requires a closing_statement with minimum 30 words.
+ * Requires a closing_statement with minimum 30 characters.
  */
 exports.markDone = async (req, res) => {
   try {
     const { closing_statement } = req.body;
 
-    // Validate closing statement — minimum 30 words
-    if (!closing_statement || closing_statement.trim().split(/\s+/).filter(Boolean).length < 30) {
-      return res.status(400).json({ message: 'Closing statement must be at least 30 words' });
+    // Validate closing statement — minimum 30 characters
+    if (!closing_statement || closing_statement.trim().length < 30) {
+      return res.status(400).json({ message: 'Closing statement must be at least 30 characters' });
     }
 
     const [rows] = await db.query('SELECT * FROM tasks WHERE id = ? AND deleted = 0', [req.params.id]);
