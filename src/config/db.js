@@ -9,7 +9,7 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME     || 'crm_task_module',
   dateStrings: true,
   waitForConnections: true,
-  connectionLimit:    10,
+  connectionLimit:    25,
   queueLimit:         0,
 });
 

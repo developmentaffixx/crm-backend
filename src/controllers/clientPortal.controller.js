@@ -346,51 +346,123 @@ exports.getDashboard = async (req, res) => {
   };
 
   try {
-    // Client info
-    const clientRows = await safeQuery(
-      'SELECT id, name, business_name, email, phone FROM leads WHERE id = ?',
-      [clientId]
-    );
+    // Parallelize all independent queries for faster dashboard load
+    const [
+      clientRows,
+      services,
+      recentTasks,
+      recentTickets,
+      recentShoots,
+      portalActivities,
+      projects,
+      portalProgress,
+      wins,
+      pendingTasks,
+      portalNextActions,
+      portalTeam,
+      brandHealthRows,
+      approvalCountRows,
+      pendingItems,
+      crmMeetings,
+      portalMeetings,
+      notifCountRows,
+      invoiceSummary,
+      calendarAccessRows
+    ] = await Promise.all([
+      // Client info
+      safeQuery('SELECT id, name, business_name, email, phone FROM leads WHERE id = ?', [clientId]),
+      // Active services
+      safeQuery(
+        `SELECT cp.*, p.name as plan_name, s.name as service_name
+         FROM client_plans cp
+         LEFT JOIN plans p ON p.id = cp.plan_id
+         LEFT JOIN services s ON s.id = cp.service_id
+         WHERE cp.client_id = ? AND cp.status = 'active'`,
+        [clientId]
+      ),
+      // Recent tasks
+      safeQuery(
+        `SELECT t.id, t.title, t.status, t.updated_at as created_at, 'task' as source
+         FROM tasks t
+         INNER JOIN project_tasks pt ON pt.task_id = t.id
+         INNER JOIN projects p ON p.id = pt.project_id
+         WHERE p.client_id = ? AND t.deleted = 0
+         ORDER BY t.updated_at DESC LIMIT 5`,
+        [clientId]
+      ),
+      // Recent tickets
+      safeQuery(
+        `SELECT id, title, status, updated_at as created_at, 'ticket' as source
+         FROM tickets
+         WHERE related_to_type = 'client' AND related_to_id = ? AND deleted = 0
+         ORDER BY updated_at DESC LIMIT 5`,
+        [clientId]
+      ),
+      // Recent shoots
+      safeQuery(
+        `SELECT id, project_campaign_name as title, shoot_status as status, updated_at as created_at, 'shoot' as source
+         FROM shoots
+         WHERE client_brand_id = ? AND deleted = 0
+         ORDER BY updated_at DESC LIMIT 5`,
+        [clientId]
+      ),
+      // Portal activities
+      safeQuery('SELECT * FROM client_portal_activities WHERE client_id = ? ORDER BY created_at DESC LIMIT 10', [clientId]),
+      // Projects
+      safeQuery('SELECT id, title, status FROM projects WHERE client_id = ? AND deleted = 0 ORDER BY created_at DESC', [clientId]),
+      // Portal progress
+      safeQuery('SELECT * FROM client_portal_progress WHERE client_id = ? ORDER BY sort_order', [clientId]),
+      // Wins
+      safeQuery('SELECT * FROM client_portal_wins WHERE client_id = ? ORDER BY created_at DESC LIMIT 10', [clientId]),
+      // Pending tasks
+      safeQuery(
+        `SELECT t.id, t.title, t.deadline as due_date, 'deliverable' as action_type
+         FROM tasks t
+         INNER JOIN project_tasks pt ON pt.task_id = t.id
+         INNER JOIN projects p ON p.id = pt.project_id
+         WHERE p.client_id = ? AND t.deleted = 0 AND t.status IN ('to_do','in_progress')
+         ORDER BY t.deadline ASC LIMIT 5`,
+        [clientId]
+      ),
+      // Portal next actions
+      safeQuery('SELECT * FROM client_portal_next_actions WHERE client_id = ? AND is_completed = 0 ORDER BY due_date ASC LIMIT 5', [clientId]),
+      // Portal team
+      safeQuery('SELECT * FROM client_portal_team WHERE client_id = ? ORDER BY sort_order', [clientId]),
+      // Brand health
+      safeQuery('SELECT * FROM client_portal_brand_health WHERE client_id = ?', [clientId]),
+      // Approval count
+      safeQuery("SELECT COUNT(*) as count FROM client_portal_approvals WHERE client_id = ? AND status = 'pending'", [clientId]),
+      // Pending from client
+      safeQuery('SELECT * FROM client_portal_pending WHERE client_id = ? AND is_resolved = 0 ORDER BY priority DESC', [clientId]),
+      // CRM meetings
+      safeQuery(
+        `SELECT id, title, CONCAT(meeting_date, ' ', start_time) as scheduled_at, 
+                TIMESTAMPDIFF(MINUTE, CONCAT(meeting_date, ' ', start_time), CONCAT(meeting_date, ' ', end_time)) as duration_minutes, 
+                meeting_link, 'crm' as source
+         FROM meetings
+         WHERE client_id = ? AND deleted = 0 AND status = 'scheduled' AND meeting_date >= CURDATE()
+         ORDER BY meeting_date ASC, start_time ASC LIMIT 1`,
+        [clientId]
+      ),
+      // Portal meetings
+      safeQuery("SELECT * FROM client_portal_meetings WHERE client_id = ? AND status = 'scheduled' AND scheduled_at > NOW() ORDER BY scheduled_at ASC LIMIT 1", [clientId]),
+      // Notification count
+      safeQuery('SELECT COUNT(*) as count FROM client_portal_notifications WHERE client_id = ? AND is_read = 0', [clientId]),
+      // Invoice summary
+      safeQuery(
+        `SELECT COUNT(*) as total, 
+                SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid,
+                SUM(CASE WHEN status IN ('sent','overdue') THEN 1 ELSE 0 END) as pending
+         FROM invoices WHERE lead_id = ? AND deleted = 0`,
+        [clientId]
+      ),
+      // Content calendar access flag
+      safeQuery('SELECT content_calendar_access FROM client_portal_users WHERE client_id = ?', [clientId])
+    ]);
+
     const client = clientRows[0] || {};
 
-    // Active services (from CRM client_plans)
-    const services = await safeQuery(
-      `SELECT cp.*, p.name as plan_name, s.name as service_name
-       FROM client_plans cp
-       LEFT JOIN plans p ON p.id = cp.plan_id
-       LEFT JOIN services s ON s.id = cp.service_id
-       WHERE cp.client_id = ? AND cp.status = 'active'`,
-      [clientId]
-    );
-
-    // Activity feed — pull from real CRM data (recent tasks, tickets, shoots, invoices)
-    const recentTasks = await safeQuery(
-      `SELECT t.id, t.title, t.status, t.updated_at as created_at, 'task' as source
-       FROM tasks t
-       INNER JOIN project_tasks pt ON pt.task_id = t.id
-       INNER JOIN projects p ON p.id = pt.project_id
-       WHERE p.client_id = ? AND t.deleted = 0
-       ORDER BY t.updated_at DESC LIMIT 5`,
-      [clientId]
-    );
-
-    const recentTickets = await safeQuery(
-      `SELECT id, title, status, updated_at as created_at, 'ticket' as source
-       FROM tickets
-       WHERE related_to_type = 'client' AND related_to_id = ? AND deleted = 0
-       ORDER BY updated_at DESC LIMIT 5`,
-      [clientId]
-    );
-
-    const recentShoots = await safeQuery(
-      `SELECT id, project_campaign_name as title, shoot_status as status, updated_at as created_at, 'shoot' as source
-       FROM shoots
-       WHERE client_brand_id = ? AND deleted = 0
-       ORDER BY updated_at DESC LIMIT 5`,
-      [clientId]
-    );
-
-    // Merge and build activity feed
+    // Build activity feed
     const statusIcons = {
       completed: '✅', done: '✅', approved: '✅', paid: '✅',
       in_progress: '🔄', active: '🔄', ongoing: '🔄', to_do: '📋',
@@ -410,67 +482,27 @@ exports.getDashboard = async (req, res) => {
         created_at: a.created_at,
       }));
 
-    // Also fetch portal-specific activities if any
-    const portalActivities = await safeQuery(
-      'SELECT * FROM client_portal_activities WHERE client_id = ? ORDER BY created_at DESC LIMIT 10',
-      [clientId]
-    );
     const activities = [...portalActivities, ...allActivities]
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
       .slice(0, 20);
 
-    // Projects progress (as progress bars)
-    const projects = await safeQuery(
-      `SELECT id, title, status FROM projects WHERE client_id = ? AND deleted = 0 ORDER BY created_at DESC`,
-      [clientId]
-    );
+    // Progress bars
     const progressFromProjects = projects.map(p => ({
       id: p.id,
       label: p.title,
       percentage: p.status === 'completed' ? 100 : p.status === 'in_progress' ? 50 : p.status === 'open' ? 10 : 0,
       color: p.status === 'completed' ? '#22c55e' : p.status === 'in_progress' ? '#4C2C21' : '#f59e0b',
     }));
-
-    // Also check portal-specific progress
-    const portalProgress = await safeQuery(
-      'SELECT * FROM client_portal_progress WHERE client_id = ? ORDER BY sort_order',
-      [clientId]
-    );
     const progress = portalProgress.length > 0 ? portalProgress : progressFromProjects;
 
-    // Monthly wins (portal table)
-    const wins = await safeQuery(
-      'SELECT * FROM client_portal_wins WHERE client_id = ? ORDER BY created_at DESC LIMIT 10',
-      [clientId]
-    );
-
-
-    // Next actions — from pending tasks + pending approvals + upcoming shoots
-    const pendingTasks = await safeQuery(
-      `SELECT t.id, t.title, t.deadline as due_date, 'deliverable' as action_type
-       FROM tasks t
-       INNER JOIN project_tasks pt ON pt.task_id = t.id
-       INNER JOIN projects p ON p.id = pt.project_id
-       WHERE p.client_id = ? AND t.deleted = 0 AND t.status IN ('to_do','in_progress')
-       ORDER BY t.deadline ASC LIMIT 5`,
-      [clientId]
-    );
-    const portalNextActions = await safeQuery(
-      'SELECT * FROM client_portal_next_actions WHERE client_id = ? AND is_completed = 0 ORDER BY due_date ASC LIMIT 5',
-      [clientId]
-    );
+    // Next actions
     const nextActions = [...portalNextActions, ...pendingTasks.map(t => ({
       id: `task_${t.id}`, title: t.title, action_type: t.action_type, due_date: t.due_date
     }))].slice(0, 10);
 
-    // Team — from assigned_to user + portal team table
-    const portalTeam = await safeQuery(
-      'SELECT * FROM client_portal_team WHERE client_id = ? ORDER BY sort_order',
-      [clientId]
-    );
+    // Team (fallback to assigned user if no portal team)
     let team = portalTeam;
     if (team.length === 0) {
-      // Fallback: pull assigned user from the lead record
       const assignedUser = await safeQuery(
         `SELECT u.id, u.first_name, u.last_name, u.email, u.avatar_url, r.name as role_name
          FROM leads l
@@ -490,54 +522,7 @@ exports.getDashboard = async (req, res) => {
       }
     }
 
-    // Brand health
-    const brandHealthRows = await safeQuery(
-      'SELECT * FROM client_portal_brand_health WHERE client_id = ?',
-      [clientId]
-    );
-
-    // Pending approvals count (portal table)
-    const approvalCountRows = await safeQuery(
-      "SELECT COUNT(*) as count FROM client_portal_approvals WHERE client_id = ? AND status = 'pending'",
-      [clientId]
-    );
-
-    // Pending from client (portal table)
-    const pendingItems = await safeQuery(
-      'SELECT * FROM client_portal_pending WHERE client_id = ? AND is_resolved = 0 ORDER BY priority DESC',
-      [clientId]
-    );
-
-    // Upcoming meetings — from CRM meetings table + portal meetings
-    const crmMeetings = await safeQuery(
-      `SELECT id, title, CONCAT(meeting_date, ' ', start_time) as scheduled_at, 
-              TIMESTAMPDIFF(MINUTE, CONCAT(meeting_date, ' ', start_time), CONCAT(meeting_date, ' ', end_time)) as duration_minutes, 
-              meeting_link, 'crm' as source
-       FROM meetings
-       WHERE client_id = ? AND deleted = 0 AND status = 'scheduled' AND meeting_date >= CURDATE()
-       ORDER BY meeting_date ASC, start_time ASC LIMIT 1`,
-      [clientId]
-    );
-    const portalMeetings = await safeQuery(
-      "SELECT * FROM client_portal_meetings WHERE client_id = ? AND status = 'scheduled' AND scheduled_at > NOW() ORDER BY scheduled_at ASC LIMIT 1",
-      [clientId]
-    );
     const upcomingMeeting = portalMeetings[0] || crmMeetings[0] || null;
-
-    // Unread notifications count
-    const notifCountRows = await safeQuery(
-      'SELECT COUNT(*) as count FROM client_portal_notifications WHERE client_id = ? AND is_read = 0',
-      [clientId]
-    );
-
-    // Invoices summary (from CRM)
-    const invoiceSummary = await safeQuery(
-      `SELECT COUNT(*) as total, 
-              SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid,
-              SUM(CASE WHEN status IN ('sent','overdue') THEN 1 ELSE 0 END) as pending
-       FROM invoices WHERE lead_id = ? AND deleted = 0`,
-      [clientId]
-    );
 
     return res.json({
       client,
@@ -554,6 +539,7 @@ exports.getDashboard = async (req, res) => {
       unreadNotifications: notifCountRows[0]?.count || 0,
       invoiceSummary: invoiceSummary[0] || null,
       projectsCount: projects.length,
+      contentCalendarAccess: calendarAccessRows[0]?.content_calendar_access ? true : false,
     });
   } catch (err) {
     console.error('getDashboard error:', err);
