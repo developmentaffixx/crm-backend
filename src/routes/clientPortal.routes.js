@@ -65,6 +65,7 @@ router.get('/credentials/:clientId', authenticate, ctrl.getCredentials);
 router.put('/credentials/:clientId', authenticate, ctrl.updateCredentials);
 router.put('/toggle-access/:clientId', authenticate, ctrl.toggleAccess);
 router.put('/toggle-calendar/:clientId', authenticate, ctrl.toggleCalendarAccess);
+router.put('/menu-access/:clientId', authenticate, ctrl.updateMenuAccess);
 router.post('/send-credentials/:clientId', authenticate, ctrl.sendCredentials);
 
 // CRM managing portal content

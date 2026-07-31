@@ -76,12 +76,26 @@ exports.createCredentials = async (req, res) => {
 exports.getCredentials = async (req, res) => {
   try {
     const [rows] = await db.query(
-      'SELECT id, client_id, login_email, plain_password, is_active, content_calendar_access, last_login_at, created_at FROM client_portal_users WHERE client_id = ?',
+      `SELECT id, client_id, login_email, plain_password, is_active, content_calendar_access,
+              access_approvals, access_reports, access_files, access_meetings,
+              access_roadmap, access_ideas, access_weekly_updates, access_milestones,
+              access_behind_scenes, access_knowledge_hub, access_support,
+              last_login_at, created_at
+       FROM client_portal_users WHERE client_id = ?`,
       [req.params.clientId]
     );
     if (!rows.length) return res.json({ credentials: null });
     return res.json({ credentials: rows[0] });
   } catch (err) {
+    // If columns don't exist yet (migration not run), fallback
+    if (err.code === 'ER_BAD_FIELD_ERROR') {
+      const [rows] = await db.query(
+        'SELECT id, client_id, login_email, plain_password, is_active, content_calendar_access, last_login_at, created_at FROM client_portal_users WHERE client_id = ?',
+        [req.params.clientId]
+      );
+      if (!rows.length) return res.json({ credentials: null });
+      return res.json({ credentials: rows[0] });
+    }
     console.error('getCredentials error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
@@ -172,6 +186,44 @@ exports.toggleCalendarAccess = async (req, res) => {
     return res.json({ message: `Content Calendar ${enabled ? 'enabled' : 'disabled'} for client portal`, content_calendar_access: enabled ? 1 : 0 });
   } catch (err) {
     console.error('toggleCalendarAccess error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/client-portal/menu-access/:clientId
+ * Update individual menu access toggles for a client's portal
+ */
+exports.updateMenuAccess = async (req, res) => {
+  const { clientId } = req.params;
+  const allowedFields = [
+    'content_calendar_access', 'access_approvals', 'access_reports', 'access_files',
+    'access_meetings', 'access_roadmap', 'access_ideas', 'access_weekly_updates',
+    'access_milestones', 'access_behind_scenes', 'access_knowledge_hub', 'access_support'
+  ];
+
+  try {
+    const updates = [];
+    const values = [];
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        updates.push(`${field} = ?`);
+        values.push(req.body[field] ? 1 : 0);
+      }
+    }
+
+    if (updates.length === 0) return res.status(400).json({ message: 'No valid fields to update' });
+
+    values.push(clientId);
+    await db.query(
+      `UPDATE client_portal_users SET ${updates.join(', ')} WHERE client_id = ?`,
+      values
+    );
+
+    return res.json({ message: 'Menu access updated successfully' });
+  } catch (err) {
+    console.error('updateMenuAccess error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
@@ -284,9 +336,25 @@ exports.clientLogin = async (req, res) => {
 
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '30d' });
 
+    // Build menu access object
+    const menuAccess = {
+      content_calendar: portalUser.content_calendar_access ? true : false,
+      approvals: portalUser.access_approvals !== undefined ? !!portalUser.access_approvals : true,
+      reports: portalUser.access_reports !== undefined ? !!portalUser.access_reports : true,
+      files: portalUser.access_files !== undefined ? !!portalUser.access_files : true,
+      meetings: portalUser.access_meetings !== undefined ? !!portalUser.access_meetings : true,
+      roadmap: portalUser.access_roadmap !== undefined ? !!portalUser.access_roadmap : true,
+      ideas: portalUser.access_ideas !== undefined ? !!portalUser.access_ideas : true,
+      weekly_updates: portalUser.access_weekly_updates !== undefined ? !!portalUser.access_weekly_updates : true,
+      milestones: portalUser.access_milestones !== undefined ? !!portalUser.access_milestones : true,
+      behind_scenes: portalUser.access_behind_scenes !== undefined ? !!portalUser.access_behind_scenes : true,
+      knowledge_hub: portalUser.access_knowledge_hub !== undefined ? !!portalUser.access_knowledge_hub : true,
+      support: portalUser.access_support !== undefined ? !!portalUser.access_support : true,
+    };
+
     return res.json({
       token,
-      client: client[0] || {},
+      client: { ...(client[0] || {}), menuAccess },
     });
   } catch (err) {
     console.error('clientLogin error:', err);
