@@ -12,7 +12,7 @@ USE crm_task_module;
 -- CASCADE will automatically remove all child posts, shoots, and ads
 
 DELETE FROM content_calendar_plans
-WHERE client_id = 106
+WHERE client_id IN (34, 106)
   AND project_id = 1
   AND plan_month = '2026-08-01'
   AND primary_goal LIKE '%Increase brand awareness & generate leads%';
