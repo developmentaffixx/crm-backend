@@ -20,6 +20,9 @@ router.get('/', controller.listSlots);
 // POST /api/content-calendar-slots/assign       — assign a slot to a user (admin/SMM)
 router.post('/assign', controller.assignSlot);
 
+// PUT  /api/content-calendar-slots/fill         — fill content fields + submit for approval
+router.put('/fill', controller.fillSlot);
+
 // PUT  /api/content-calendar-slots/submit       — submit filled slot for approval
 router.put('/submit', controller.submitSlot);
 

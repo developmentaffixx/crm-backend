@@ -60,7 +60,12 @@ exports.listSlots = async (req, res) => {
 
     let statusFilter = '';
     const statusParams = [];
-    if (slot_status) { statusFilter = ' AND slot_status = ?'; statusParams.push(slot_status); }
+    if (slot_status) {
+      // Map frontend 'pending_approval' to the actual DB value 'submitted'
+      const mappedStatus = slot_status === 'pending_approval' ? 'submitted' : slot_status;
+      statusFilter = ' AND slot_status = ?';
+      statusParams.push(mappedStatus);
+    }
 
     let assignedFilter = '';
     const assignedParams = [];
@@ -315,6 +320,84 @@ exports.assignSlot = async (req, res) => {
     await conn.rollback();
     conn.release();
     console.error('Assign slot error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── FILL SLOT (updates content fields + submits for approval) ────────────────
+// Called from FillSlotModal on the Content Calendar page.
+// Accepts content fields (platform, topic, format, etc.) and sets slot_status to 'submitted'.
+
+exports.fillSlot = async (req, res) => {
+  try {
+    const { item_type, item_id, ...fields } = req.body;
+    const userId = req.user.id;
+
+    if (!item_type || !item_id) {
+      return res.status(400).json({ message: 'item_type and item_id are required' });
+    }
+
+    const table = TABLE_MAP[item_type];
+    if (!table) return res.status(400).json({ message: 'Invalid item_type' });
+
+    const [rows] = await db.query(`SELECT * FROM ${table} WHERE id = ?`, [item_id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Slot not found' });
+
+    const slot = rows[0];
+
+    if (!['assigned', 'rejected'].includes(slot.slot_status)) {
+      return res.status(400).json({ message: `Cannot fill a slot with status "${slot.slot_status}". Must be assigned or rejected.` });
+    }
+
+    // Build dynamic SET clause from allowed fields based on item_type
+    const allowedFields = {
+      post: ['platform', 'format', 'topic', 'posting_date', 'cta', 'ad_target'],
+      shoot: ['shoot_date', 'location', 'description', 'num_videos', 'num_photos', 'talent', 'production_notes'],
+      ad: ['creative_name', 'campaign_objective', 'platform', 'target_audience', 'budget', 'start_date', 'end_date', 'expected_outcomes'],
+    };
+
+    const allowed = allowedFields[item_type] || [];
+    const setClauses = [];
+    const setValues = [];
+
+    for (const key of allowed) {
+      if (fields[key] !== undefined) {
+        setClauses.push(`${key} = ?`);
+        setValues.push(fields[key] === '' ? null : fields[key]);
+      }
+    }
+
+    // Always set slot_status to submitted
+    setClauses.push("slot_status = 'submitted'");
+    setClauses.push("submitted_at = NOW()");
+    setClauses.push("rejection_reason = NULL");
+
+    await db.query(
+      `UPDATE ${table} SET ${setClauses.join(', ')} WHERE id = ?`,
+      [...setValues, item_id]
+    );
+
+    // Notify the assigner that work was submitted
+    if (slot.assigned_by) {
+      await createSmmNotification(null, {
+        user_id: slot.assigned_by,
+        triggered_by: userId,
+        type: 'slot_submitted',
+        slot_type: item_type,
+        slot_id: item_id,
+        linked_item_type: item_type === 'post' ? 'content_write' : item_type === 'shoot' ? 'shoots' : 'ads',
+        linked_item_id: null,
+        title: `${item_type} slot submitted for approval`,
+        message: `Content has been filled and submitted. Please review.`,
+        link: '/social/content-calendar',
+      });
+      res.emitSocket('smm:notification', { user_id: slot.assigned_by, type: 'slot_submitted' });
+    }
+
+    res.emitSocket('content-calendar:slot-submitted', { item_type, item_id, user_id: userId });
+    return res.json({ message: 'Slot filled and submitted for approval', item_type, item_id });
+  } catch (err) {
+    console.error('Fill slot error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
