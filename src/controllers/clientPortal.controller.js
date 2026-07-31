@@ -524,8 +524,8 @@ exports.getDashboard = async (req, res) => {
          FROM invoices WHERE lead_id = ? AND deleted = 0`,
         [clientId]
       ),
-      // Content calendar access flag
-      safeQuery('SELECT content_calendar_access FROM client_portal_users WHERE client_id = ?', [clientId])
+      // Content calendar + menu access flags
+      safeQuery('SELECT content_calendar_access, access_approvals, access_reports, access_files, access_meetings, access_roadmap, access_ideas, access_weekly_updates, access_milestones, access_behind_scenes, access_knowledge_hub, access_support FROM client_portal_users WHERE client_id = ?', [clientId])
     ]);
 
     const client = clientRows[0] || {};
@@ -592,6 +592,22 @@ exports.getDashboard = async (req, res) => {
 
     const upcomingMeeting = portalMeetings[0] || crmMeetings[0] || null;
 
+    const portalAccess = calendarAccessRows[0] || {};
+    const menuAccess = {
+      content_calendar: !!portalAccess.content_calendar_access,
+      approvals: portalAccess.access_approvals !== undefined ? !!portalAccess.access_approvals : true,
+      reports: portalAccess.access_reports !== undefined ? !!portalAccess.access_reports : true,
+      files: portalAccess.access_files !== undefined ? !!portalAccess.access_files : true,
+      meetings: portalAccess.access_meetings !== undefined ? !!portalAccess.access_meetings : true,
+      roadmap: portalAccess.access_roadmap !== undefined ? !!portalAccess.access_roadmap : true,
+      ideas: portalAccess.access_ideas !== undefined ? !!portalAccess.access_ideas : true,
+      weekly_updates: portalAccess.access_weekly_updates !== undefined ? !!portalAccess.access_weekly_updates : true,
+      milestones: portalAccess.access_milestones !== undefined ? !!portalAccess.access_milestones : true,
+      behind_scenes: portalAccess.access_behind_scenes !== undefined ? !!portalAccess.access_behind_scenes : true,
+      knowledge_hub: portalAccess.access_knowledge_hub !== undefined ? !!portalAccess.access_knowledge_hub : true,
+      support: portalAccess.access_support !== undefined ? !!portalAccess.access_support : true,
+    };
+
     return res.json({
       client,
       services,
@@ -607,7 +623,8 @@ exports.getDashboard = async (req, res) => {
       unreadNotifications: notifCountRows[0]?.count || 0,
       invoiceSummary: invoiceSummary[0] || null,
       projectsCount: projects.length,
-      contentCalendarAccess: calendarAccessRows[0]?.content_calendar_access ? true : false,
+      contentCalendarAccess: !!portalAccess.content_calendar_access,
+      menuAccess,
     });
   } catch (err) {
     console.error('getDashboard error:', err);

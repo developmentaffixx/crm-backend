@@ -50,7 +50,7 @@ async function syncAssignees(taskId, primaryUserId, collaboratorIds = []) {
 exports.list = async (req, res) => {
   try {
     const {
-      status, is_active, priority, search, exclude_done, assigned_to,
+      status, is_active, priority, search, exclude_done, assigned_to, project_id,
       page = 1, limit = 25,
       sort_by = 'deadline', sort_order = 'ASC'
     } = req.query;
@@ -94,6 +94,10 @@ exports.list = async (req, res) => {
     if (exclude_done === '1') { where += ' AND t.is_active != 3'; }
     if (priority)  { where += ' AND t.priority = ?';  params.push(priority); }
     if (assigned_to) { where += ' AND t.assigned_to = ?'; params.push(assigned_to); }
+    if (project_id) {
+      where += ' AND EXISTS (SELECT 1 FROM project_tasks pt_f WHERE pt_f.task_id = t.id AND pt_f.project_id = ?)';
+      params.push(project_id);
+    }
 
     // Search by title or description
     if (search && search.trim()) {
