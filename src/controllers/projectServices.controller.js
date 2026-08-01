@@ -59,7 +59,7 @@ exports.list = async (req, res) => {
               s.service_type,
               CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
               (SELECT COUNT(*) FROM service_cycles sc WHERE sc.project_service_id = ps.id) AS cycle_count,
-              (SELECT MAX(sc.cycle_number) FROM service_cycles sc WHERE sc.project_service_id = ps.id) AS latest_cycle_number,
+              (SELECT sc.title FROM service_cycles sc WHERE sc.project_service_id = ps.id ORDER BY sc.cycle_number DESC LIMIT 1) AS latest_cycle_number,
               (SELECT sc.status FROM service_cycles sc WHERE sc.project_service_id = ps.id ORDER BY sc.cycle_number DESC LIMIT 1) AS latest_cycle_status
        FROM project_services ps
        JOIN services s ON s.id = ps.service_id
