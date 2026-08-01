@@ -15,23 +15,29 @@ const CYCLE_SECTIONS = [
 // Helper: Generate ONE next cycle for a project service (or legacy project)
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateNextCycleForProject(projectId, startDate, endDate, userId, projectServiceId = null) {
-  // Get existing max cycle number (scoped to project_service_id if available)
-  let maxQuery, maxParams;
-  if (projectServiceId) {
-    maxQuery = 'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_service_id = ?';
-    maxParams = [projectServiceId];
-  } else {
-    maxQuery = 'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_id = ?';
-    maxParams = [projectId];
-  }
-  const [existing] = await db.query(maxQuery, maxParams);
+  // cycle_number must be unique per project (uq_project_cycle constraint on project_id+cycle_number)
+  // So always get the max across the ENTIRE project to avoid duplicate key errors
+  const [existing] = await db.query(
+    'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_id = ?',
+    [projectId]
+  );
   const nextCycleNum = (existing[0].max_num || 0) + 1;
+
+  // For display title use per-service count so each service shows Cycle 01, 02...
+  let serviceCycleNum = 1;
+  if (projectServiceId) {
+    const [svcExisting] = await db.query(
+      'SELECT COUNT(*) AS cycle_count FROM service_cycles WHERE project_service_id = ?',
+      [projectServiceId]
+    );
+    serviceCycleNum = (svcExisting[0].cycle_count || 0) + 1;
+  }
 
   // Use provided dates (manual creation)
   const cycleStart = startDate ? new Date(startDate) : new Date();
   const cycleEnd = endDate ? new Date(endDate) : new Date(cycleStart.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-  const title = `Cycle ${String(nextCycleNum).padStart(2, '0')}`;
+  const title = `Cycle ${String(serviceCycleNum).padStart(2, '0')}`;
 
   const [result] = await db.query(
     `INSERT INTO service_cycles (project_id, project_service_id, cycle_number, title, start_date, end_date, status, created_by)
