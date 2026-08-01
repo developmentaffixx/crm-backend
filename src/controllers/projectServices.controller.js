@@ -26,17 +26,16 @@ async function recalculateProjectStatus(projectId) {
 
   let newStatus;
   if (hasActive) {
-    newStatus = 'in_progress';
-  } else if (allCompleted) {
-    newStatus = 'completed';
+    newStatus = 'active';
   } else if (allCancelled) {
-    newStatus = 'cancelled';
+    newStatus = 'inactive';
+  } else if (allCompleted) {
+    newStatus = 'inactive';
   } else if (allCompletedOrCancelled) {
-    // Mix of completed + cancelled (but no active/paused) → completed
-    newStatus = 'completed';
+    newStatus = 'inactive';
   } else {
-    // Some paused, none active → still in progress
-    newStatus = 'in_progress';
+    // Some paused, none active → inactive
+    newStatus = 'inactive';
   }
 
   await db.query(

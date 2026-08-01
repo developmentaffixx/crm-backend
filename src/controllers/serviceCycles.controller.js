@@ -378,16 +378,11 @@ exports.updateCycle = async (req, res) => {
       if (allServices.length > 0) {
         const svcStatuses = allServices.map(s => s.status);
         const hasActive = svcStatuses.includes('active');
-        const allCompleted = svcStatuses.every(s => s === 'completed');
-        const allCancelled = svcStatuses.every(s => s === 'cancelled');
         const allDone = svcStatuses.every(s => s === 'completed' || s === 'cancelled');
 
         let newProjectStatus;
-        if (hasActive) newProjectStatus = 'in_progress';
-        else if (allCompleted) newProjectStatus = 'completed';
-        else if (allCancelled) newProjectStatus = 'cancelled';
-        else if (allDone) newProjectStatus = 'completed';
-        else newProjectStatus = 'in_progress';
+        if (hasActive) newProjectStatus = 'active';
+        else newProjectStatus = 'inactive';
 
         await db.query('UPDATE projects SET status = ? WHERE id = ?', [newProjectStatus, projectId]);
       }
