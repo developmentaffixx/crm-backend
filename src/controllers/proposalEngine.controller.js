@@ -453,6 +453,84 @@ exports.regenerate = async (req, res) => {
   }
 };
 
+/**
+ * PUT /api/proposal-engine/proposals/:id/content
+ * Update the generated_content sections (content editor)
+ * Body: { sections: [...] }
+ */
+exports.updateContent = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM proposals WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Proposal not found' });
+    if (!req.user.is_admin && rows[0].created_by !== req.user.id) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const { sections } = req.body;
+    if (!Array.isArray(sections)) return res.status(400).json({ message: 'Sections array is required' });
+
+    const generatedContent = { sections, generated_at: new Date().toISOString() };
+    await db.query('UPDATE proposals SET generated_content = ? WHERE id = ?', [JSON.stringify(generatedContent), req.params.id]);
+
+    const [updated] = await db.query('SELECT * FROM proposals WHERE id = ?', [req.params.id]);
+    const proposal = parseJsonFields(updated[0], PROPOSAL_JSON_FIELDS);
+    return res.json(proposal);
+  } catch (err) {
+    console.error('updateContent error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/proposal-engine/proposals/:id/duplicate
+ * Duplicate a proposal
+ */
+exports.duplicate = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM proposals WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Proposal not found' });
+    if (!req.user.is_admin && rows[0].created_by !== req.user.id) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const p = rows[0];
+    const token = generateToken();
+    const expiresAt = computeExpiry(p.validity_days || 7);
+
+    const [result] = await db.query(
+      `INSERT INTO proposals (
+        proposal_token, lead_id, client_id, service_key, industry_key, persona_key,
+        client_name, business_name, contact_person, designation, phone, email, website, social_links,
+        current_situation, pain_points, opportunities, goals, special_notes,
+        website_type, existing_issues, recommended_improvements,
+        pricing_package, service_cost, ad_spend, additional_cost, one_time_cost, monthly_cost,
+        total_monthly, total_first_month, pricing_notes,
+        case_study_ids, selected_plan_service_id, generated_content,
+        validity_days, expires_at, prepared_by_name, prepared_by_email, prepared_by_phone, prepared_by_website,
+        status, created_by
+      ) SELECT ?, lead_id, client_id, service_key, industry_key, persona_key,
+        CONCAT(client_name, ' (Copy)'), business_name, contact_person, designation, phone, email, website, social_links,
+        current_situation, pain_points, opportunities, goals, special_notes,
+        website_type, existing_issues, recommended_improvements,
+        pricing_package, service_cost, ad_spend, additional_cost, one_time_cost, monthly_cost,
+        total_monthly, total_first_month, pricing_notes,
+        case_study_ids, selected_plan_service_id, generated_content,
+        validity_days, ?, prepared_by_name, prepared_by_email, prepared_by_phone, prepared_by_website,
+        'draft', ?
+      FROM proposals WHERE id = ?`,
+      [token, expiresAt, req.user.id, req.params.id]
+    );
+
+    const [created] = await db.query('SELECT * FROM proposals WHERE id = ?', [result.insertId]);
+    const proposal = parseJsonFields(created[0], PROPOSAL_JSON_FIELDS);
+    res.emitSocket('proposal-engine:created', proposal);
+    return res.status(201).json(proposal);
+  } catch (err) {
+    console.error('duplicate error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // PUBLIC (No auth — client-facing)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -585,6 +663,14 @@ async function assembleProposalContent(data) {
   const [industryBlocks] = await db.query('SELECT * FROM proposal_industry_blocks WHERE industry_key = ? AND service_key = ?', [industry_key, service_key]);
   const industry = industryBlocks.length > 0 ? parseJsonFields(industryBlocks[0], ['challenges', 'opportunities', 'expected_outcomes', 'case_study_ids']) : null;
 
+  // Also try generic industry block if service-specific one not found
+  let genericIndustry = null;
+  if (!industry) {
+    const [genRows] = await db.query('SELECT * FROM proposal_industry_blocks WHERE industry_key = ? AND service_key = "smm"', [industry_key]);
+    genericIndustry = genRows.length > 0 ? parseJsonFields(genRows[0], ['challenges', 'opportunities', 'expected_outcomes', 'case_study_ids']) : null;
+  }
+  const industryData = industry || genericIndustry;
+
   // Fetch persona block (only for personal_branding)
   let persona = null;
   if (persona_key && service_key === 'personal_branding') {
@@ -607,40 +693,52 @@ async function assembleProposalContent(data) {
   for (const sec of templateSections) {
     const built = { key: sec.key, title: sec.title, type: sec.type, content: null };
 
+    // Parse default_content from template
+    let defaultContent = sec.default_content;
+    if (defaultContent && typeof defaultContent === 'string') {
+      try { defaultContent = JSON.parse(defaultContent); } catch (_) {}
+    }
+
     switch (sec.key) {
       case 'cover':
         built.content = { client_name, business_name, service_name: template.service_name };
         break;
 
       case 'executive_summary':
-        built.content = industry?.executive_summary || `This proposal outlines our comprehensive ${template.service_name} strategy for ${client_name}.`;
-        if (persona) built.content += '\n\n' + (persona.positioning || '');
+        built.content = industryData?.executive_summary || defaultContent || `This proposal outlines our comprehensive ${template.service_name} strategy for ${client_name}.`;
+        if (persona && persona.positioning) built.content += '\n\n' + persona.positioning;
         break;
 
       case 'current_presence':
       case 'current_analysis':
       case 'current_situation':
-        built.content = current_situation || 'To be analyzed during onboarding.';
+        if (service_key === 'website_dev' && website_type === 'revamp' && existing_issues) {
+          built.content = existing_issues;
+        } else {
+          built.content = current_situation || defaultContent || 'To be analyzed during onboarding.';
+        }
         break;
 
       case 'challenges':
         built.content = [
-          ...(industry?.challenges || []),
+          ...(industryData?.challenges || []),
           ...(pain_points || []),
         ];
+        if (built.content.length === 0 && defaultContent) built.content = defaultContent;
         break;
 
       case 'opportunities':
       case 'objectives':
         built.content = [
-          ...(industry?.opportunities || []),
+          ...(industryData?.opportunities || []),
           ...(opportunities || []),
         ];
+        if (built.content.length === 0 && defaultContent) built.content = defaultContent;
         break;
 
       case 'expected_outcomes':
       case 'expected_growth':
-        built.content = industry?.expected_outcomes || (persona?.expected_outcomes || []);
+        built.content = industryData?.expected_outcomes || persona?.expected_outcomes || defaultContent || [];
         break;
 
       case 'case_studies':
@@ -663,20 +761,20 @@ async function assembleProposalContent(data) {
         break;
 
       case 'positioning':
-        built.content = persona?.positioning || '';
+        built.content = persona?.positioning || defaultContent || '';
         break;
 
       case 'audience':
       case 'target_audience':
-        built.content = persona?.audience || '';
+        built.content = persona?.audience || defaultContent || '';
         break;
 
       case 'content_strategy':
-        built.content = persona?.content_strategy || '';
+        built.content = persona?.content_strategy || defaultContent || '';
         break;
 
       case 'next_steps':
-        built.content = [
+        built.content = defaultContent || [
           'Accept this proposal',
           'Kickoff call scheduled within 24 hours',
           'Strategy document shared within 3 days',
@@ -685,17 +783,9 @@ async function assembleProposalContent(data) {
         break;
 
       default:
-        // For sections like strategy, content_plan, deliverables, etc.
-        // These will be partially filled — BDE can customize in the editor
-        built.content = special_notes || null;
+        // Use template default_content for all other sections (strategy, deliverables, timeline, etc.)
+        built.content = defaultContent || special_notes || null;
         break;
-    }
-
-    // Website dev specific
-    if (service_key === 'website_dev') {
-      if (sec.key === 'current_analysis' && website_type === 'revamp') {
-        built.content = existing_issues || current_situation || '';
-      }
     }
 
     sections.push(built);

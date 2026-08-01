@@ -34,5 +34,7 @@ router.put('/proposals/:id', ctrl.update);
 router.delete('/proposals/:id', ctrl.remove);
 router.patch('/proposals/:id/mark-sent', ctrl.markSent);
 router.patch('/proposals/:id/regenerate', ctrl.regenerate);
+router.put('/proposals/:id/content', ctrl.updateContent);
+router.post('/proposals/:id/duplicate', ctrl.duplicate);
 
 module.exports = router;
