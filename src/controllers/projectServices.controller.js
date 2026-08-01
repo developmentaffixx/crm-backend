@@ -446,14 +446,21 @@ exports.createNewCycle = async (req, res) => {
       return res.status(400).json({ message: 'An active cycle already exists for this service' });
     }
 
-    // Get max cycle number
+    // Get max cycle number across the entire project (not just this service)
+    // This avoids duplicate entry on uq_project_cycle (project_id, cycle_number)
     const [maxRow] = await db.query(
-      'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_service_id = ?',
-      [serviceId]
+      'SELECT MAX(cycle_number) AS max_num FROM service_cycles WHERE project_id = ?',
+      [projectId]
     );
     const nextCycleNum = (maxRow[0].max_num || 0) + 1;
 
-    const title = `Cycle ${String(nextCycleNum).padStart(2, '0')}`;
+    // For display title, use per-service cycle count so it shows Cycle 01, 02... per service
+    const [serviceMaxRow] = await db.query(
+      'SELECT COUNT(*) AS cycle_count FROM service_cycles WHERE project_service_id = ?',
+      [serviceId]
+    );
+    const serviceCycleNum = (serviceMaxRow[0].cycle_count || 0) + 1;
+    const title = `Cycle ${String(serviceCycleNum).padStart(2, '0')}`;
 
     const [result] = await db.query(
       `INSERT INTO service_cycles (project_id, project_service_id, cycle_number, title, start_date, end_date, status, created_by)
