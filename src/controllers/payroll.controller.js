@@ -50,7 +50,7 @@ function calcWorkingDays(year, month, dateOfJoining, lastWorkingDate) {
   return Math.round((workedDays / calendarDays) * FIXED_DAYS);
 }
 
-// ─── Helper: get attendance days present ─────────────────────────────────────
+// ─── Helper: get attendance data (present days + actual leave days, excluding Sundays) ──
 async function getAttendance(employeeId, year, month, dateOfJoining, lastWorkingDate) {
   const mm       = String(month).padStart(2, '0');
   const monthEnd = new Date(year, month, 0);
@@ -75,17 +75,33 @@ async function getAttendance(employeeId, year, month, dateOfJoining, lastWorking
     }
   }
 
+  // Count days the employee actually clocked in (with clock_out)
   const [rows] = await db.query(
     `SELECT COUNT(*) AS days_present FROM attendance
      WHERE user_id = ? AND date >= ? AND date <= ? AND clock_out IS NOT NULL`,
     [employeeId, startDate, endDate]
   );
-  return rows[0]?.days_present || 0;
+  const daysPresent = rows[0]?.days_present || 0;
+
+  // Count Sundays in the date range — these are paid rest days, not "leaves"
+  let sundayCount = 0;
+  const start = new Date(startDate);
+  const end   = new Date(endDate);
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    if (d.getDay() === 0) sundayCount++; // 0 = Sunday
+  }
+
+  // Actual leave days = total calendar days - Sundays - days present
+  const totalDays   = Math.round((end - start) / (1000 * 60 * 60 * 24)) + 1;
+  const leaveDays   = Math.max(0, totalDays - sundayCount - daysPresent);
+
+  return { daysPresent, leaveDays, sundayCount };
 }
 
 // ─── Helper: calculate payroll figures ───────────────────────────────────────
-function calcPayroll(workingDays, daysPresent, monthlySalary, employmentStatus) {
-  const absentDays = Math.max(0, workingDays - daysPresent);
+function calcPayroll(workingDays, daysPresent, monthlySalary, employmentStatus, leaveDays) {
+  // leaveDays = actual days off (excludes Sundays) — passed in from getAttendance
+  const absentDays = leaveDays !== undefined ? leaveDays : Math.max(0, workingDays - daysPresent);
   const perDay     = parseFloat((monthlySalary / FIXED_DAYS).toFixed(2));
 
   // Pro-rata salary for the working days period
@@ -268,9 +284,11 @@ exports.generate = async (req, res) => {
       }
 
       const workingDays  = calcWorkingDays(year, month, emp.date_of_joining, emp.last_working_date);
-      const daysPresent  = await getAttendance(emp.id, year, month, emp.date_of_joining, emp.last_working_date);
+      const attendance   = await getAttendance(emp.id, year, month, emp.date_of_joining, emp.last_working_date);
+      const daysPresent  = attendance.daysPresent;
+      const leaveDays    = attendance.leaveDays;
       const empStatus    = (emp.employment_status === 'permanent' || emp.employment_status === 'confirmed') ? 'permanent' : 'probation';
-      const { perDay, paidLeaveUsed, lopDays, lopDeduction, absentDays } = calcPayroll(workingDays, daysPresent, emp.monthly_salary, empStatus);
+      const { perDay, paidLeaveUsed, lopDays, lopDeduction, absentDays } = calcPayroll(workingDays, daysPresent, emp.monthly_salary, empStatus, leaveDays);
 
       const netSalary   = parseFloat((workingDays * perDay - lopDeduction).toFixed(2));
       const payrollCode = await generatePayrollCode(year, month, emp.id);
