@@ -369,7 +369,7 @@ exports.getApprovalsPage = async (req, res) => {
 
     let pendingTasksWhere = "t.deleted = 0 AND t.is_active IN (0, 2)";
     let extWhere          = "er.deleted = 0";
-    let fwdWhere          = "fr.deleted = 0";
+    let fwdWhere          = "fr.deleted = 0 AND fr.status = 'pending'";
     const params = [];
 
     if (!isAdmin) {
