@@ -161,9 +161,10 @@ exports.generateSampleQuotation = async (req, res) => {
         val instanceof PDFRef ? srcDoc.context.lookup(val) : val;
 
       // How many points to shift content DOWN so it clears the letterhead header.
-      // PDF coordinates are bottom-up, so -OFFSET_Y moves content downward.
-      // Read from query param ?offset=80 so it can be tuned without redeploying.
-      const CONTENT_OFFSET_Y = parseInt(req.query.offset || '80', 10);
+      // How many points to leave at the bottom so it clears the letterhead footer.
+      // Read from query params so they can be tuned without redeploying.
+      const CONTENT_OFFSET_TOP    = parseInt(req.query.offset || req.query.top    || '80', 10);
+      const CONTENT_OFFSET_BOTTOM = parseInt(req.query.bottom || '60', 10);
 
       const pages = srcDoc.getPages();
 
@@ -186,17 +187,29 @@ exports.generateSampleQuotation = async (req, res) => {
         // ── Build streams ─────────────────────────────────────────────────
         // 1. Full-page letterhead background
         const bgOps    = `q\n${width} 0 0 ${height} 0 0 cm\n/LH_BG Do\nQ\n`;
-        const bgStream = srcDoc.context.flateStream(bgOps);
-        const bgRef    = srcDoc.context.register(bgStream);
+        const bgRef    = srcDoc.context.register(srcDoc.context.flateStream(bgOps));
 
-        // 2. Wrap-start: save state + translate down by CONTENT_OFFSET_Y
-        //    PDF Y-axis is bottom-up → negative Y = move down visually
-        const wrapStart    = srcDoc.context.flateStream(`q\n1 0 0 1 0 -${CONTENT_OFFSET_Y} cm\n`);
-        const wrapStartRef = srcDoc.context.register(wrapStart);
+        // 2. Content transform: scale + translate so content fits within the
+        //    safe zone between letterhead header and footer.
+        //
+        //    PDF CTM: [sx 0 0 sy tx ty]
+        //    - sx = 1          → no horizontal scaling
+        //    - sy = safeH / h  → compress vertically to fit safe zone
+        //    - tx = 0          → no horizontal shift
+        //    - ty = bottomOffset → push bottom of scaled content up above footer
+        //
+        //    The result: content starts at (bottomOffset) from the page bottom
+        //    and ends at (height - topOffset) — perfectly inside the letterhead.
+        const safeHeight = height - CONTENT_OFFSET_TOP - CONTENT_OFFSET_BOTTOM;
+        const sy         = safeHeight / height;
+        const ty         = CONTENT_OFFSET_BOTTOM;
 
-        // 3. Wrap-end: restore graphics state
-        const wrapEnd    = srcDoc.context.flateStream('Q\n');
-        const wrapEndRef = srcDoc.context.register(wrapEnd);
+        const wrapStartRef = srcDoc.context.register(
+          srcDoc.context.flateStream(`q\n1 0 0 ${sy.toFixed(6)} 0 ${ty} cm\n`)
+        );
+        const wrapEndRef = srcDoc.context.register(
+          srcDoc.context.flateStream('Q\n')
+        );
 
         // ── Get existing content refs ─────────────────────────────────────
         const existing = page.node.get(PDFName.of('Contents'));
@@ -210,7 +223,6 @@ exports.generateSampleQuotation = async (req, res) => {
         }
 
         // ── Final order: [bg, wrap_start, ...original, wrap_end] ─────────
-        // letterhead drawn first (behind), then original content shifted down
         const newContents = srcDoc.context.obj([
           bgRef,
           wrapStartRef,
