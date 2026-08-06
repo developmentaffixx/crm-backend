@@ -5,10 +5,15 @@ const fs   = require('fs');
 /**
  * POST /api/settings/company/generate-sample-quotation
  *
- * Accepts an uploaded PDF, DOCX, or DOC file.
- * Extracts the text content from the document, then renders it
- * as a PDF using the company's quotation letterhead as the background.
- * Returns the PDF inline.
+ * Strategy:
+ *   PDF uploads  → use pdf-lib to embed the quotation letterhead image as a
+ *                  full-page background BEHIND every page of the original PDF.
+ *                  All original text, tables, images and formatting are preserved
+ *                  100% — only the background changes.
+ *
+ *   DOCX/DOC     → extract text with mammoth, render with PDFKit + letterhead.
+ *
+ * Returns the resulting PDF inline.
  */
 exports.generateSampleQuotation = async (req, res) => {
   try {
@@ -19,205 +24,222 @@ exports.generateSampleQuotation = async (req, res) => {
     const { mimetype, originalname, buffer } = req.file;
     const extLower = originalname.toLowerCase();
 
-    // ─── Extract text from uploaded document ─────────────────────────────────
-    let extractedText = '';
-
     const isPdf  = mimetype === 'application/pdf' || extLower.endsWith('.pdf');
     const isDocx = mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
                    || extLower.endsWith('.docx');
     const isDoc  = mimetype === 'application/msword' || extLower.endsWith('.doc');
 
-    if (isPdf) {
-      try {
-        // pdf-parse has a known issue where it tries to load a local test file
-        // when the module is first required. Suppress that by setting the
-        // PDFJS_DISABLE_WORKER env var and using the low-level import path.
-        const pdfParse = require('pdf-parse/lib/pdf-parse.js');
-        const data = await pdfParse(buffer);
-        extractedText = data.text || '';
-      } catch (pdfErr) {
-        console.error('PDF parse error:', pdfErr.message);
-        return res.status(422).json({
-          message: 'Could not extract text from PDF. Make sure the PDF contains selectable text (not scanned images).',
-        });
-      }
-    } else if (isDocx || isDoc) {
-      try {
-        const mammoth = require('mammoth');
-        const result  = await mammoth.extractRawText({ buffer });
-        extractedText = result.value || '';
-      } catch (docErr) {
-        console.error('DOCX/DOC parse error:', docErr.message);
-        if (isDoc) {
-          return res.status(422).json({
-            message: 'Legacy .doc format could not be extracted. Please convert to .docx or PDF and try again.',
-          });
-        }
-        return res.status(422).json({
-          message: 'Could not extract text from the document.',
-        });
-      }
-    } else {
+    if (!isPdf && !isDocx && !isDoc) {
       return res.status(400).json({
         message: 'Unsupported file type. Please upload a PDF, DOCX, or DOC file.',
       });
     }
 
-    if (!extractedText.trim()) {
-      return res.status(422).json({
-        message: 'No text content could be extracted. The document may be image-only or empty.',
-      });
-    }
-
-    // ─── Fetch company settings for letterhead ───────────────────────────────
+    // ─── Fetch company settings ───────────────────────────────────────────────
     const [companyRows] = await db.query('SELECT * FROM company_settings WHERE id = 1');
-    const company = companyRows[0] || {};
+    const company       = companyRows[0] || {};
+    const letterheadUrl = company.quotation_letterhead_url || null;
 
-    // ─── Download quotation letterhead image ─────────────────────────────────
-    let letterheadBuffer = null;
-    const letterheadUrl  = company.quotation_letterhead_url;
+    // ─── Download letterhead image ────────────────────────────────────────────
+    let letterheadBytes = null;
+    let letterheadMime  = 'image/png';
+
     if (letterheadUrl) {
       try {
         if (letterheadUrl.startsWith('http')) {
           const https = require('https');
           const http  = require('http');
-          letterheadBuffer = await new Promise((resolve, reject) => {
+          letterheadBytes = await new Promise((resolve, reject) => {
             const client = letterheadUrl.startsWith('https') ? https : http;
             client.get(letterheadUrl, (resp) => {
               const chunks = [];
-              resp.on('data', chunk => chunks.push(chunk));
-              resp.on('end',  () => resolve(Buffer.concat(chunks)));
+              resp.on('data',  chunk => chunks.push(chunk));
+              resp.on('end',   () => resolve(Buffer.concat(chunks)));
               resp.on('error', reject);
             }).on('error', reject);
           });
+          letterheadMime = letterheadUrl.match(/\.jpe?g($|\?)/i) ? 'image/jpeg' : 'image/png';
         } else {
           const p = path.join(__dirname, '../../', letterheadUrl);
-          if (fs.existsSync(p)) letterheadBuffer = fs.readFileSync(p);
+          if (fs.existsSync(p)) {
+            letterheadBytes = fs.readFileSync(p);
+            letterheadMime  = p.match(/\.jpe?g$/i) ? 'image/jpeg' : 'image/png';
+          }
         }
       } catch (e) {
-        console.error('Letterhead load error:', e.message);
-        // Non-fatal — continue without letterhead
+        console.error('Letterhead load error (non-fatal):', e.message);
+        letterheadBytes = null;
       }
     }
 
-    // ─── Build PDF using PDFKit ───────────────────────────────────────────────
-    const PDFDocument = require('pdfkit');
+    const baseName = originalname.replace(/\.[^.]+$/, '');
 
-    const doc = new PDFDocument({
-      size: 'A4',
-      margins: { top: 60, bottom: 60, left: 50, right: 50 },
-      bufferPages: false,
-    });
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PDF PATH — embed letterhead behind every page using pdf-lib
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (isPdf) {
+      const { PDFDocument, PDFName } = require('pdf-lib');
 
-    // Collect chunks BEFORE writing anything (important — must be set up first)
+      let srcDoc;
+      try {
+        srcDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+      } catch (loadErr) {
+        return res.status(422).json({
+          message: 'Could not parse the uploaded PDF. It may be corrupted or password-protected.',
+        });
+      }
+
+      // If no letterhead, return original PDF unchanged
+      if (!letterheadBytes) {
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="${baseName}_quotation.pdf"`);
+        res.setHeader('Content-Length', buffer.length);
+        return res.send(buffer);
+      }
+
+      // Embed letterhead image (try PNG, fall back to JPEG)
+      let letterheadImage = null;
+      try {
+        letterheadImage = letterheadMime === 'image/jpeg'
+          ? await srcDoc.embedJpg(letterheadBytes)
+          : await srcDoc.embedPng(letterheadBytes);
+      } catch (_) {
+        // Try the other format
+        try {
+          letterheadImage = letterheadMime === 'image/jpeg'
+            ? await srcDoc.embedPng(letterheadBytes)
+            : await srcDoc.embedJpg(letterheadBytes);
+        } catch (imgErr) {
+          console.error('Cannot embed letterhead image:', imgErr.message);
+          // Proceed without letterhead
+          letterheadImage = null;
+        }
+      }
+
+      if (letterheadImage) {
+        for (const page of srcDoc.getPages()) {
+          const { width, height } = page.getSize();
+
+          // ── Add image to page XObject resources ──────────────────────────
+          let resources = page.node.get(PDFName.of('Resources'));
+          if (!resources) {
+            resources = srcDoc.context.obj({});
+            page.node.set(PDFName.of('Resources'), resources);
+          }
+          let xObjs = resources.get(PDFName.of('XObject'));
+          if (!xObjs) {
+            xObjs = srcDoc.context.obj({});
+            resources.set(PDFName.of('XObject'), xObjs);
+          }
+          xObjs.set(PDFName.of('LH_BG'), letterheadImage.ref);
+
+          // ── Build background drawing stream ───────────────────────────────
+          // q … Q wraps the image draw so it doesn't affect other graphics state
+          // The CTM scales the 1×1 image unit to fill the full page
+          const bgOps   = `q\n${width} 0 0 ${height} 0 0 cm\n/LH_BG Do\nQ\n`;
+          const bgStream = srcDoc.context.flateStream(bgOps);
+          const bgRef    = srcDoc.context.register(bgStream);
+
+          // ── Prepend background stream to page Contents ────────────────────
+          // Prepending means the letterhead is drawn first (below existing content)
+          const existing = page.node.get(PDFName.of('Contents'));
+          let contentsArray;
+
+          if (!existing) {
+            contentsArray = srcDoc.context.obj([bgRef]);
+          } else if (existing.constructor.name === 'PDFArray') {
+            contentsArray = srcDoc.context.obj([bgRef, ...existing.asArray()]);
+          } else {
+            // Single ref (PDFRef) or stream
+            contentsArray = srcDoc.context.obj([bgRef, existing]);
+          }
+
+          page.node.set(PDFName.of('Contents'), contentsArray);
+        }
+      }
+
+      const pdfBytes  = await srcDoc.save();
+      const pdfBuffer = Buffer.from(pdfBytes);
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${baseName}_quotation.pdf"`);
+      res.setHeader('Content-Length', pdfBuffer.length);
+      return res.send(pdfBuffer);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // DOCX / DOC PATH — extract text + PDFKit render + letterhead
+    // ═══════════════════════════════════════════════════════════════════════════
+    let extractedText = '';
+    try {
+      const mammoth = require('mammoth');
+      const result  = await mammoth.extractRawText({ buffer });
+      extractedText = result.value || '';
+    } catch (docErr) {
+      console.error('DOCX/DOC parse error:', docErr.message);
+      return res.status(422).json({
+        message: isDoc
+          ? 'Legacy .doc could not be extracted. Please convert to .docx or PDF.'
+          : 'Could not extract text from the document.',
+      });
+    }
+
+    if (!extractedText.trim()) {
+      return res.status(422).json({ message: 'No text content found in the document.' });
+    }
+
+    const PDFDocument2 = require('pdfkit');
+    const doc = new PDFDocument({ size: 'A4', margins: { top: 60, bottom: 60, left: 50, right: 50 } });
+
     const chunks = [];
-    doc.on('data',  chunk => chunks.push(chunk));
-
+    doc.on('data',  c => chunks.push(c));
     const pdfReady = new Promise((resolve, reject) => {
       doc.on('end',   () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
     });
 
-    // Register NotoSans fonts
-    const fontsDir        = path.join(__dirname, '../../fonts');
-    const notoRegularPath = path.join(fontsDir, 'NotoSans-Regular.ttf');
-    const notoBoldPath    = path.join(fontsDir, 'NotoSans-Bold.ttf');
+    const fontsDir = path.join(__dirname, '../../fonts');
+    const rPath    = path.join(fontsDir, 'NotoSans-Regular.ttf');
+    const bPath    = path.join(fontsDir, 'NotoSans-Bold.ttf');
+    const FREG     = fs.existsSync(rPath) ? 'NotoSans'      : 'Helvetica';
+    const FBOLD    = fs.existsSync(bPath) ? 'NotoSans-Bold' : 'Helvetica-Bold';
+    if (fs.existsSync(rPath)) doc.registerFont('NotoSans',      rPath);
+    if (fs.existsSync(bPath)) doc.registerFont('NotoSans-Bold', bPath);
 
-    const hasRegular = fs.existsSync(notoRegularPath);
-    const hasBold    = fs.existsSync(notoBoldPath);
+    const PW = 595.28, PH = 841.89, LM = 50, CW = PW - LM - 50;
+    const TOP = 110, BOT = 760;
 
-    const FONT_REGULAR = hasRegular ? 'NotoSans'      : 'Helvetica';
-    const FONT_BOLD    = hasBold    ? 'NotoSans-Bold' : 'Helvetica-Bold';
-
-    if (hasRegular) doc.registerFont('NotoSans',      notoRegularPath);
-    if (hasBold)    doc.registerFont('NotoSans-Bold', notoBoldPath);
-
-    // Page geometry
-    const PAGE_WIDTH    = 595.28;
-    const PAGE_HEIGHT   = 841.89;
-    const LEFT_MARGIN   = 50;
-    const RIGHT_MARGIN  = 50;
-    const CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN;
-    const TOP_START     = 110;  // space for letterhead header area
-    const BOTTOM_LIMIT  = 760;  // stop before letterhead footer area
-
-    // Add letterhead background image
-    const addLetterheadBg = () => {
-      if (letterheadBuffer) {
-        try {
-          doc.image(letterheadBuffer, 0, 0, { width: PAGE_WIDTH, height: PAGE_HEIGHT });
-        } catch (_) { /* ignore bad image */ }
+    const addBg = () => {
+      if (letterheadBytes) {
+        try { doc.image(letterheadBytes, 0, 0, { width: PW, height: PH }); } catch (_) {}
       }
     };
+    addBg();
+    doc.y = TOP;
+    doc.on('pageAdded', () => { addBg(); doc.y = TOP; });
 
-    addLetterheadBg();
-    doc.y = TOP_START;
+    const chkPage = (h = 16) => { if (doc.y > BOT - h) doc.addPage(); };
 
-    doc.on('pageAdded', () => {
-      addLetterheadBg();
-      doc.y = TOP_START;
-    });
-
-    const checkNewPage = (minSpace = 16) => {
-      if (doc.y > BOTTOM_LIMIT - minSpace) doc.addPage();
-    };
-
-    const resetX = () => { doc.x = LEFT_MARGIN; };
-
-    // ─── Render extracted text ────────────────────────────────────────────────
-    const rawLines = extractedText.split('\n');
-
-    for (const rawLine of rawLines) {
-      const line    = rawLine.trimEnd();
-      const trimmed = line.trim();
-
-      if (!trimmed) {
-        doc.moveDown(0.4);
-        continue;
-      }
-
-      checkNewPage(14);
-      resetX();
-
-      // Heuristic: ALL-CAPS short lines → bold heading
-      const isHeading =
-        (trimmed === trimmed.toUpperCase() &&
-         trimmed.length > 3 &&
-         trimmed.length < 80 &&
-         !/^\d/.test(trimmed) &&
-         !/^[^a-zA-Z]/.test(trimmed)) ||
-        /^(ARTICLE|SECTION|CLAUSE|SCHEDULE|ANNEXURE|EXHIBIT|CHAPTER)\s/i.test(trimmed);
-
-      if (isHeading) {
+    for (const rawLine of extractedText.split('\n')) {
+      const t = rawLine.trim();
+      if (!t) { doc.moveDown(0.4); continue; }
+      chkPage(14);
+      doc.x = LM;
+      const isH = (t === t.toUpperCase() && t.length > 3 && t.length < 80 && /[A-Z]/.test(t)) ||
+                  /^(ARTICLE|SECTION|CLAUSE|SCHEDULE|ANNEXURE)\s/i.test(t);
+      if (isH) {
         doc.moveDown(0.3);
-        doc.fontSize(11)
-           .font(FONT_BOLD)
-           .text(trimmed, LEFT_MARGIN, doc.y, {
-             width: CONTENT_WIDTH,
-             align: 'left',
-             lineGap: 2,
-           });
+        doc.fontSize(11).font(FBOLD).text(t, LM, doc.y, { width: CW, lineGap: 2 });
         doc.moveDown(0.15);
       } else {
-        // Numbered/bullet list items get a slight indent
-        const isList = /^(\d+[\.\)]\s|\([a-z]\)\s|[•\-]\s)/.test(trimmed);
-        const indent = isList ? 10 : 0;
-
-        doc.fontSize(9.5)
-           .font(FONT_REGULAR)
-           .text(trimmed, LEFT_MARGIN + indent, doc.y, {
-             width: CONTENT_WIDTH - indent,
-             align: 'justify',
-             lineGap: 2,
-           });
+        const indent = /^(\d+[\.\)]\s|\([a-z]\)\s|[•\-]\s)/.test(t) ? 10 : 0;
+        doc.fontSize(9.5).font(FREG).text(t, LM + indent, doc.y, { width: CW - indent, align: 'justify', lineGap: 2 });
       }
     }
 
-    // ─── Finalize and send ────────────────────────────────────────────────────
     doc.end();
     const pdfBuffer = await pdfReady;
 
-    const baseName = originalname.replace(/\.[^.]+$/, '');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${baseName}_quotation.pdf"`);
     res.setHeader('Content-Length', pdfBuffer.length);
@@ -225,9 +247,6 @@ exports.generateSampleQuotation = async (req, res) => {
 
   } catch (err) {
     console.error('Sample quotation generation error:', err);
-    return res.status(500).json({
-      message: 'Failed to generate sample quotation PDF',
-      error: err.message,
-    });
+    return res.status(500).json({ message: 'Failed to generate sample quotation PDF', error: err.message });
   }
 };
