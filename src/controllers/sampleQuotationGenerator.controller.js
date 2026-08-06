@@ -150,7 +150,7 @@ exports.generateSampleQuotation = async (req, res) => {
         return res.send(pdfBuffer);
       }
 
-      // ── Step 5: prepend background to every page ───────────────────────────
+      // ── Step 5: prepend background + shift content down on every page ────────
       _step = 'prepend_letterhead_to_pages';
 
       // Helper: resolve a PDFRef to the actual object.
@@ -160,13 +160,17 @@ exports.generateSampleQuotation = async (req, res) => {
       const resolveRef = (val) =>
         val instanceof PDFRef ? srcDoc.context.lookup(val) : val;
 
+      // How many points to shift content DOWN so it clears the letterhead header.
+      // PDF coordinates are bottom-up, so -OFFSET_Y moves content downward.
+      // Read from query param ?offset=80 so it can be tuned without redeploying.
+      const CONTENT_OFFSET_Y = parseInt(req.query.offset || '80', 10);
+
       const pages = srcDoc.getPages();
 
       for (const page of pages) {
         const { width, height } = page.getSize();
 
-        // Add image reference to page's XObject resource dictionary.
-        // Always resolve through resolveRef in case the value is a PDFRef.
+        // ── Add letterhead image to XObject resources ─────────────────────
         let resources = resolveRef(page.node.get(PDFName.of('Resources')));
         if (!resources) {
           resources = srcDoc.context.obj({});
@@ -179,23 +183,41 @@ exports.generateSampleQuotation = async (req, res) => {
         }
         xObjs.set(PDFName.of('LH_BG'), letterheadImage.ref);
 
-        // Build a content stream that draws the image scaled to full page size
-        // q … Q saves/restores graphics state; the CTM scales 1-unit image to page
+        // ── Build streams ─────────────────────────────────────────────────
+        // 1. Full-page letterhead background
         const bgOps    = `q\n${width} 0 0 ${height} 0 0 cm\n/LH_BG Do\nQ\n`;
         const bgStream = srcDoc.context.flateStream(bgOps);
         const bgRef    = srcDoc.context.register(bgStream);
 
-        // Prepend (not append!) so letterhead is drawn BEHIND existing content
+        // 2. Wrap-start: save state + translate down by CONTENT_OFFSET_Y
+        //    PDF Y-axis is bottom-up → negative Y = move down visually
+        const wrapStart    = srcDoc.context.flateStream(`q\n1 0 0 1 0 -${CONTENT_OFFSET_Y} cm\n`);
+        const wrapStartRef = srcDoc.context.register(wrapStart);
+
+        // 3. Wrap-end: restore graphics state
+        const wrapEnd    = srcDoc.context.flateStream('Q\n');
+        const wrapEndRef = srcDoc.context.register(wrapEnd);
+
+        // ── Get existing content refs ─────────────────────────────────────
         const existing = page.node.get(PDFName.of('Contents'));
-        let contentsArray;
+        let existingRefs;
         if (!existing) {
-          contentsArray = srcDoc.context.obj([bgRef]);
+          existingRefs = [];
         } else if (existing.constructor.name === 'PDFArray') {
-          contentsArray = srcDoc.context.obj([bgRef, ...existing.asArray()]);
+          existingRefs = existing.asArray();
         } else {
-          contentsArray = srcDoc.context.obj([bgRef, existing]);
+          existingRefs = [existing];
         }
-        page.node.set(PDFName.of('Contents'), contentsArray);
+
+        // ── Final order: [bg, wrap_start, ...original, wrap_end] ─────────
+        // letterhead drawn first (behind), then original content shifted down
+        const newContents = srcDoc.context.obj([
+          bgRef,
+          wrapStartRef,
+          ...existingRefs,
+          wrapEndRef,
+        ]);
+        page.node.set(PDFName.of('Contents'), newContents);
       }
 
       // ── Step 6: save and return ────────────────────────────────────────────
