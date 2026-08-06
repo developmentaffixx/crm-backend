@@ -3,44 +3,64 @@ const path = require('path');
 const fs   = require('fs');
 
 /**
+ * GET /api/settings/company/sample-quotation-status
+ * Health check — reports which packages are available on this server.
+ * Useful for diagnosing 500s remotely without SSH access.
+ */
+exports.statusCheck = (req, res) => {
+  const checks = {};
+
+  try { require('pdf-lib');  checks.pdf_lib   = 'ok'; } catch (e) { checks.pdf_lib   = e.message; }
+  try { require('mammoth');  checks.mammoth   = 'ok'; } catch (e) { checks.mammoth   = e.message; }
+  try { require('pdfkit');   checks.pdfkit    = 'ok'; } catch (e) { checks.pdfkit    = e.message; }
+  try { require('pdf-parse/lib/pdf-parse.js'); checks.pdf_parse = 'ok'; } catch (e) { checks.pdf_parse = e.message; }
+
+  const fontsDir    = path.join(__dirname, '../../fonts');
+  checks.fonts_dir  = fs.existsSync(fontsDir) ? 'exists' : 'MISSING';
+  checks.noto_regular = fs.existsSync(path.join(fontsDir, 'NotoSans-Regular.ttf')) ? 'ok' : 'missing';
+
+  return res.json({ status: 'online', checks });
+};
+
+/**
  * POST /api/settings/company/generate-sample-quotation
  *
  * Strategy:
- *   PDF uploads  → use pdf-lib to embed the quotation letterhead image as a
- *                  full-page background BEHIND every page of the original PDF.
- *                  All original text, tables, images and formatting are preserved
- *                  100% — only the background changes.
- *
- *   DOCX/DOC     → extract text with mammoth, render with PDFKit + letterhead.
- *
- * Returns the resulting PDF inline.
+ *   PDF  → pdf-lib: embed quotation letterhead image as full-page background
+ *          behind every page. Original formatting/tables/images preserved 100%.
+ *   DOCX → mammoth: extract text, render with PDFKit + letterhead background.
  */
 exports.generateSampleQuotation = async (req, res) => {
+  let _step = 'init';
   try {
+    // ── Step 1: validate upload ──────────────────────────────────────────────
+    _step = 'validate_file';
     if (!req.file) {
-      return res.status(400).json({ message: 'No file uploaded' });
+      return res.status(400).json({ message: 'No file uploaded. Make sure the field name is "document".' });
     }
 
     const { mimetype, originalname, buffer } = req.file;
     const extLower = originalname.toLowerCase();
 
-    const isPdf  = mimetype === 'application/pdf' || extLower.endsWith('.pdf');
+    const isPdf  = mimetype === 'application/pdf'      || extLower.endsWith('.pdf');
     const isDocx = mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
                    || extLower.endsWith('.docx');
-    const isDoc  = mimetype === 'application/msword' || extLower.endsWith('.doc');
+    const isDoc  = mimetype === 'application/msword'   || extLower.endsWith('.doc');
 
     if (!isPdf && !isDocx && !isDoc) {
       return res.status(400).json({
-        message: 'Unsupported file type. Please upload a PDF, DOCX, or DOC file.',
+        message: `Unsupported file type: "${mimetype}". Please upload PDF, DOCX, or DOC.`,
       });
     }
 
-    // ─── Fetch company settings ───────────────────────────────────────────────
+    // ── Step 2: fetch company + letterhead ───────────────────────────────────
+    _step = 'fetch_company';
     const [companyRows] = await db.query('SELECT * FROM company_settings WHERE id = 1');
-    const company       = companyRows[0] || {};
-    const letterheadUrl = company.quotation_letterhead_url || null;
+    const company        = companyRows[0] || {};
+    const letterheadUrl  = company.quotation_letterhead_url || null;
 
-    // ─── Download letterhead image ────────────────────────────────────────────
+    // ── Step 3: download letterhead image ────────────────────────────────────
+    _step = 'download_letterhead';
     let letterheadBytes = null;
     let letterheadMime  = 'image/png';
 
@@ -67,29 +87,32 @@ exports.generateSampleQuotation = async (req, res) => {
           }
         }
       } catch (e) {
-        console.error('Letterhead load error (non-fatal):', e.message);
+        console.warn('Letterhead load failed (non-fatal):', e.message);
         letterheadBytes = null;
       }
     }
 
     const baseName = originalname.replace(/\.[^.]+$/, '');
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PDF PATH — embed letterhead behind every page using pdf-lib
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════════════════
+    // PDF PATH — embed letterhead using pdf-lib (preserves all original content)
+    // ════════════════════════════════════════════════════════════════════════════
     if (isPdf) {
+      _step = 'load_pdf_lib';
       const { PDFDocument, PDFName } = require('pdf-lib');
 
+      _step = 'parse_uploaded_pdf';
       let srcDoc;
       try {
         srcDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
       } catch (loadErr) {
         return res.status(422).json({
-          message: 'Could not parse the uploaded PDF. It may be corrupted or password-protected.',
+          message: 'Could not parse the PDF. It may be corrupted or heavily password-protected.',
+          error: loadErr.message,
         });
       }
 
-      // If no letterhead, return original PDF unchanged
+      // No letterhead → return original unchanged
       if (!letterheadBytes) {
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `inline; filename="${baseName}_quotation.pdf"`);
@@ -97,67 +120,77 @@ exports.generateSampleQuotation = async (req, res) => {
         return res.send(buffer);
       }
 
-      // Embed letterhead image (try PNG, fall back to JPEG)
+      // ── Step 4: embed letterhead image ─────────────────────────────────────
+      _step = 'embed_letterhead_image';
       let letterheadImage = null;
-      try {
-        letterheadImage = letterheadMime === 'image/jpeg'
-          ? await srcDoc.embedJpg(letterheadBytes)
-          : await srcDoc.embedPng(letterheadBytes);
-      } catch (_) {
-        // Try the other format
+
+      // Try primary format, then fallback to the other
+      const tryEmbed = async (doc, bytes, mime) => {
         try {
-          letterheadImage = letterheadMime === 'image/jpeg'
-            ? await srcDoc.embedPng(letterheadBytes)
-            : await srcDoc.embedJpg(letterheadBytes);
-        } catch (imgErr) {
-          console.error('Cannot embed letterhead image:', imgErr.message);
-          // Proceed without letterhead
-          letterheadImage = null;
+          return mime === 'image/jpeg'
+            ? await doc.embedJpg(bytes)
+            : await doc.embedPng(bytes);
+        } catch (_) {
+          return mime === 'image/jpeg'
+            ? await doc.embedPng(bytes)
+            : await doc.embedJpg(bytes);
         }
+      };
+
+      try {
+        letterheadImage = await tryEmbed(srcDoc, letterheadBytes, letterheadMime);
+      } catch (imgErr) {
+        console.warn('Could not embed letterhead image:', imgErr.message);
+        // Proceed without letterhead — still return the original PDF
+        const pdfBytes  = await srcDoc.save();
+        const pdfBuffer = Buffer.from(pdfBytes);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="${baseName}_quotation.pdf"`);
+        res.setHeader('Content-Length', pdfBuffer.length);
+        return res.send(pdfBuffer);
       }
 
-      if (letterheadImage) {
-        for (const page of srcDoc.getPages()) {
-          const { width, height } = page.getSize();
+      // ── Step 5: prepend background to every page ───────────────────────────
+      _step = 'prepend_letterhead_to_pages';
+      const pages = srcDoc.getPages();
 
-          // ── Add image to page XObject resources ──────────────────────────
-          let resources = page.node.get(PDFName.of('Resources'));
-          if (!resources) {
-            resources = srcDoc.context.obj({});
-            page.node.set(PDFName.of('Resources'), resources);
-          }
-          let xObjs = resources.get(PDFName.of('XObject'));
-          if (!xObjs) {
-            xObjs = srcDoc.context.obj({});
-            resources.set(PDFName.of('XObject'), xObjs);
-          }
-          xObjs.set(PDFName.of('LH_BG'), letterheadImage.ref);
+      for (const page of pages) {
+        const { width, height } = page.getSize();
 
-          // ── Build background drawing stream ───────────────────────────────
-          // q … Q wraps the image draw so it doesn't affect other graphics state
-          // The CTM scales the 1×1 image unit to fill the full page
-          const bgOps   = `q\n${width} 0 0 ${height} 0 0 cm\n/LH_BG Do\nQ\n`;
-          const bgStream = srcDoc.context.flateStream(bgOps);
-          const bgRef    = srcDoc.context.register(bgStream);
-
-          // ── Prepend background stream to page Contents ────────────────────
-          // Prepending means the letterhead is drawn first (below existing content)
-          const existing = page.node.get(PDFName.of('Contents'));
-          let contentsArray;
-
-          if (!existing) {
-            contentsArray = srcDoc.context.obj([bgRef]);
-          } else if (existing.constructor.name === 'PDFArray') {
-            contentsArray = srcDoc.context.obj([bgRef, ...existing.asArray()]);
-          } else {
-            // Single ref (PDFRef) or stream
-            contentsArray = srcDoc.context.obj([bgRef, existing]);
-          }
-
-          page.node.set(PDFName.of('Contents'), contentsArray);
+        // Add image reference to page's XObject resource dictionary
+        let resources = page.node.get(PDFName.of('Resources'));
+        if (!resources) {
+          resources = srcDoc.context.obj({});
+          page.node.set(PDFName.of('Resources'), resources);
         }
+        let xObjs = resources.get(PDFName.of('XObject'));
+        if (!xObjs) {
+          xObjs = srcDoc.context.obj({});
+          resources.set(PDFName.of('XObject'), xObjs);
+        }
+        xObjs.set(PDFName.of('LH_BG'), letterheadImage.ref);
+
+        // Build a content stream that draws the image scaled to full page size
+        // q … Q saves/restores graphics state; the CTM scales 1-unit image to page
+        const bgOps    = `q\n${width} 0 0 ${height} 0 0 cm\n/LH_BG Do\nQ\n`;
+        const bgStream = srcDoc.context.flateStream(bgOps);
+        const bgRef    = srcDoc.context.register(bgStream);
+
+        // Prepend (not append!) so letterhead is drawn BEHIND existing content
+        const existing = page.node.get(PDFName.of('Contents'));
+        let contentsArray;
+        if (!existing) {
+          contentsArray = srcDoc.context.obj([bgRef]);
+        } else if (existing.constructor.name === 'PDFArray') {
+          contentsArray = srcDoc.context.obj([bgRef, ...existing.asArray()]);
+        } else {
+          contentsArray = srcDoc.context.obj([bgRef, existing]);
+        }
+        page.node.set(PDFName.of('Contents'), contentsArray);
       }
 
+      // ── Step 6: save and return ────────────────────────────────────────────
+      _step = 'save_pdf';
       const pdfBytes  = await srcDoc.save();
       const pdfBuffer = Buffer.from(pdfBytes);
 
@@ -167,20 +200,21 @@ exports.generateSampleQuotation = async (req, res) => {
       return res.send(pdfBuffer);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // DOCX / DOC PATH — extract text + PDFKit render + letterhead
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════════════════════════════════
+    // DOCX / DOC PATH — extract text → PDFKit render → letterhead background
+    // ════════════════════════════════════════════════════════════════════════════
+    _step = 'extract_docx_text';
     let extractedText = '';
     try {
       const mammoth = require('mammoth');
       const result  = await mammoth.extractRawText({ buffer });
       extractedText = result.value || '';
     } catch (docErr) {
-      console.error('DOCX/DOC parse error:', docErr.message);
       return res.status(422).json({
         message: isDoc
           ? 'Legacy .doc could not be extracted. Please convert to .docx or PDF.'
           : 'Could not extract text from the document.',
+        error: docErr.message,
       });
     }
 
@@ -188,11 +222,12 @@ exports.generateSampleQuotation = async (req, res) => {
       return res.status(422).json({ message: 'No text content found in the document.' });
     }
 
-    const PDFDocument2 = require('pdfkit');
-    const doc = new PDFDocument({ size: 'A4', margins: { top: 60, bottom: 60, left: 50, right: 50 } });
+    _step = 'render_docx_pdf';
+    const PDFKit = require('pdfkit');
+    const doc    = new PDFKit({ size: 'A4', margins: { top: 60, bottom: 60, left: 50, right: 50 } });
 
-    const chunks = [];
-    doc.on('data',  c => chunks.push(c));
+    const chunks   = [];
+    doc.on('data', c => chunks.push(c));
     const pdfReady = new Promise((resolve, reject) => {
       doc.on('end',   () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
@@ -206,24 +241,21 @@ exports.generateSampleQuotation = async (req, res) => {
     if (fs.existsSync(rPath)) doc.registerFont('NotoSans',      rPath);
     if (fs.existsSync(bPath)) doc.registerFont('NotoSans-Bold', bPath);
 
-    const PW = 595.28, PH = 841.89, LM = 50, CW = PW - LM - 50;
-    const TOP = 110, BOT = 760;
+    const PW = 595.28, LM = 50, CW = PW - LM - 50, TOP = 110, BOT = 760;
 
     const addBg = () => {
       if (letterheadBytes) {
-        try { doc.image(letterheadBytes, 0, 0, { width: PW, height: PH }); } catch (_) {}
+        try { doc.image(letterheadBytes, 0, 0, { width: PW, height: 841.89 }); } catch (_) {}
       }
     };
     addBg();
     doc.y = TOP;
     doc.on('pageAdded', () => { addBg(); doc.y = TOP; });
 
-    const chkPage = (h = 16) => { if (doc.y > BOT - h) doc.addPage(); };
-
     for (const rawLine of extractedText.split('\n')) {
       const t = rawLine.trim();
       if (!t) { doc.moveDown(0.4); continue; }
-      chkPage(14);
+      if (doc.y > BOT - 14) doc.addPage();
       doc.x = LM;
       const isH = (t === t.toUpperCase() && t.length > 3 && t.length < 80 && /[A-Z]/.test(t)) ||
                   /^(ARTICLE|SECTION|CLAUSE|SCHEDULE|ANNEXURE)\s/i.test(t);
@@ -246,7 +278,11 @@ exports.generateSampleQuotation = async (req, res) => {
     return res.send(pdfBuffer);
 
   } catch (err) {
-    console.error('Sample quotation generation error:', err);
-    return res.status(500).json({ message: 'Failed to generate sample quotation PDF', error: err.message });
+    console.error(`[SampleQuotation] FAILED at step "${_step}":`, err.stack || err.message);
+    return res.status(500).json({
+      message: 'Failed to generate sample quotation PDF',
+      step: _step,
+      error: err.message,
+    });
   }
 };

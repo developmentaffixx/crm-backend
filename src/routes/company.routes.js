@@ -64,4 +64,7 @@ router.post(
   sampleQuotationCtrl.generateSampleQuotation,
 );
 
+// Status check — reports which packages are available on the server
+router.get('/sample-quotation-status', authenticate, requireAdmin, sampleQuotationCtrl.statusCheck);
+
 module.exports = router;
