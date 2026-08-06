@@ -3,8 +3,9 @@ const router  = express.Router();
 const multer  = require('multer');
 const { authenticate, requireAdmin } = require('../middleware/auth');
 const ctrl = require('../controllers/company.controller');
+const sampleQuotationCtrl = require('../controllers/sampleQuotationGenerator.controller');
 
-// Multer — store in memory, max 2MB
+// Multer — store in memory, max 2MB (images only)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 2 * 1024 * 1024 },
@@ -12,6 +13,25 @@ const upload = multer({
     const allowed = ['image/png', 'image/jpeg', 'image/svg+xml', 'image/x-icon', 'image/webp'];
     if (allowed.includes(file.mimetype)) cb(null, true);
     else cb(new Error('Only PNG, JPG, SVG, ICO, WEBP files are allowed'));
+  },
+});
+
+// Multer — for document uploads (PDF, DOCX, DOC), max 10MB
+const docUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/msword',
+    ];
+    const ext = file.originalname.toLowerCase();
+    if (allowed.includes(file.mimetype) || ext.endsWith('.pdf') || ext.endsWith('.docx') || ext.endsWith('.doc')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF, DOCX, or DOC files are allowed'));
+    }
   },
 });
 
@@ -34,5 +54,14 @@ router.delete('/remove-favicon',     authenticate, requireAdmin, ctrl.removeFavi
 router.delete('/remove-upi-qr',      authenticate, requireAdmin, ctrl.removeUpiQr);
 router.delete('/remove-letterhead',  authenticate, requireAdmin, ctrl.removeLetterhead);
 router.delete('/remove-quotation-letterhead', authenticate, requireAdmin, ctrl.removeQuotationLetterhead);
+
+// Sample Quotation Generator — upload PDF/DOCX/DOC, get back a PDF with quotation letterhead
+router.post(
+  '/generate-sample-quotation',
+  authenticate,
+  requireAdmin,
+  docUpload.single('document'),
+  sampleQuotationCtrl.generateSampleQuotation,
+);
 
 module.exports = router;
