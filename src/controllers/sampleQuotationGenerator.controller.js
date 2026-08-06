@@ -152,18 +152,27 @@ exports.generateSampleQuotation = async (req, res) => {
 
       // ── Step 5: prepend background to every page ───────────────────────────
       _step = 'prepend_letterhead_to_pages';
+
+      // Helper: resolve a PDFRef to the actual object.
+      // Real-world PDFs store Resources as indirect references (PDFRef),
+      // not inline dicts. Calling .get() on a PDFRef throws "not a function".
+      const { PDFRef } = require('pdf-lib');
+      const resolveRef = (val) =>
+        val instanceof PDFRef ? srcDoc.context.lookup(val) : val;
+
       const pages = srcDoc.getPages();
 
       for (const page of pages) {
         const { width, height } = page.getSize();
 
-        // Add image reference to page's XObject resource dictionary
-        let resources = page.node.get(PDFName.of('Resources'));
+        // Add image reference to page's XObject resource dictionary.
+        // Always resolve through resolveRef in case the value is a PDFRef.
+        let resources = resolveRef(page.node.get(PDFName.of('Resources')));
         if (!resources) {
           resources = srcDoc.context.obj({});
           page.node.set(PDFName.of('Resources'), resources);
         }
-        let xObjs = resources.get(PDFName.of('XObject'));
+        let xObjs = resolveRef(resources.get(PDFName.of('XObject')));
         if (!xObjs) {
           xObjs = srcDoc.context.obj({});
           resources.set(PDFName.of('XObject'), xObjs);
