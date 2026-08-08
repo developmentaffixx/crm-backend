@@ -401,7 +401,7 @@ exports.update = async (req, res) => {
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
 
-    if (Object.keys(updates).length === 0 && req.body.project_id === undefined && req.body.service_id === undefined && req.body.collaborators === undefined) {
+    if (Object.keys(updates).length === 0 && req.body.project_id === undefined && req.body.service_id === undefined && req.body.collaborators === undefined && req.body.cycle_id === undefined) {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
@@ -438,6 +438,17 @@ exports.update = async (req, res) => {
         'UPDATE project_tasks SET service_id = ? WHERE task_id = ?',
         [req.body.service_id || null, req.params.id]
       );
+    }
+
+    // Update cycle link if cycle_id provided
+    if (req.body.cycle_id !== undefined) {
+      await db.query('DELETE FROM cycle_tasks WHERE task_id = ?', [req.params.id]);
+      if (req.body.cycle_id) {
+        await db.query(
+          'INSERT IGNORE INTO cycle_tasks (cycle_id, task_id) VALUES (?, ?)',
+          [req.body.cycle_id, req.params.id]
+        );
+      }
     }
 
     // Update collaborators if provided
