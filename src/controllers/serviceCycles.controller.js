@@ -213,23 +213,29 @@ exports.getCycleDetail = async (req, res) => {
        JOIN tasks t ON t.id = ct.task_id AND t.deleted = 0
        LEFT JOIN users ua ON ua.id = t.assigned_to
        WHERE ct.cycle_id = ?
-       ORDER BY t.created_at DESC`,
+       ORDER BY t.deadline ASC, t.created_at DESC`,
       [cycleId]
     );
 
-    // Get tasks by date range (deadline falls within cycle period) — from project_tasks
-    const [dateRangeTasks] = await db.query(
-      `SELECT DISTINCT t.id, t.title, t.status, t.priority, t.deadline, t.start_date,
-              CONCAT(ua.first_name, ' ', ua.last_name) AS assigned_to_name
-       FROM project_tasks pt
-       JOIN tasks t ON t.id = pt.task_id AND t.deleted = 0
-       LEFT JOIN users ua ON ua.id = t.assigned_to
-       WHERE pt.project_id = ?
-         AND t.deadline >= ? AND t.deadline <= ?
-         AND t.id NOT IN (SELECT task_id FROM cycle_tasks WHERE cycle_id = ?)
-       ORDER BY t.deadline ASC`,
-      [projectId, cycle.start_date, cycle.end_date, cycleId]
-    );
+    // Date-range fallback ONLY for project-level cycles (no project_service_id).
+    // For service-scoped cycles, tasks must be explicitly linked via cycle_tasks —
+    // never bleed tasks from other services based on date range alone.
+    let dateRangeTasks = [];
+    if (!cycle.project_service_id) {
+      const [rows] = await db.query(
+        `SELECT DISTINCT t.id, t.title, t.status, t.priority, t.deadline, t.start_date,
+                CONCAT(ua.first_name, ' ', ua.last_name) AS assigned_to_name
+         FROM project_tasks pt
+         JOIN tasks t ON t.id = pt.task_id AND t.deleted = 0
+         LEFT JOIN users ua ON ua.id = t.assigned_to
+         WHERE pt.project_id = ?
+           AND t.deadline >= ? AND t.deadline <= ?
+           AND t.id NOT IN (SELECT task_id FROM cycle_tasks WHERE cycle_id = ?)
+         ORDER BY t.deadline ASC`,
+        [projectId, cycle.start_date, cycle.end_date, cycleId]
+      );
+      dateRangeTasks = rows;
+    }
 
     cycle.tasks = [...linkedTasks, ...dateRangeTasks];
 
