@@ -68,7 +68,7 @@ function formatDate(date) {
 exports.listCycles = async (req, res) => {
   try {
     const projectId = req.params.projectId;
-    const { project_service_id } = req.query;
+    const { project_service_id, status } = req.query;
 
     let whereClause = 'sc.project_id = ?';
     const params = [projectId];
@@ -76,6 +76,12 @@ exports.listCycles = async (req, res) => {
     if (project_service_id) {
       whereClause = 'sc.project_service_id = ?';
       params[0] = project_service_id;
+    }
+
+    // Optional status filter (e.g. status=active to get only active cycles)
+    if (status) {
+      whereClause += ' AND sc.status = ?';
+      params.push(status);
     }
 
     const [cycles] = await db.query(
