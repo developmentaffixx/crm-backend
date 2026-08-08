@@ -37,12 +37,11 @@ exports.list = async (req, res) => {
       if (req.socialAccessLevel >= 2) {
         // SMM lead with full access — see all plans (no extra filter)
       } else {
-        where += ` AND (p.created_by = ? OR p.id IN (
-          SELECT plan_id FROM content_calendar_posts WHERE assigned_to = ?
-          UNION SELECT plan_id FROM content_calendar_shoots WHERE assigned_to = ?
-          UNION SELECT plan_id FROM content_calendar_ads WHERE assigned_to = ?
+        // Show plans for projects the user is a member of (or created by them)
+        where += ` AND (p.created_by = ? OR p.project_id IN (
+          SELECT project_id FROM project_members WHERE user_id = ?
         ))`;
-        params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+        params.push(req.user.id, req.user.id);
       }
     }
 
@@ -82,7 +81,8 @@ exports.list = async (req, res) => {
         if (cycle_id) { fbWhere += ' AND p.cycle_id = ?'; fbParams.push(cycle_id); }
         if (month) { fbWhere += ' AND p.plan_month = ?'; fbParams.push(month); }
         if (status) { fbWhere += ' AND p.status = ?'; fbParams.push(status); }
-        fbWhere += ' AND p.created_by = ?'; fbParams.push(req.user.id);
+        fbWhere += ' AND (p.created_by = ? OR p.project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))';
+        fbParams.push(req.user.id, req.user.id);
         const [result] = await db.query(
           `SELECT p.*, l.business_name AS client_name, pr.title AS project_title,
                   CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
@@ -133,18 +133,15 @@ exports.getOne = async (req, res) => {
     const plan = plans[0];
 
     if (!req.user.is_admin && plan.created_by !== req.user.id) {
-      // Allow if user is assigned to any slot in this plan or has full social access
+      // Allow if user is a member of the plan's project, or has full social access
       if (req.socialAccessLevel >= 2) {
         // SMM lead — allow
       } else {
-        const [assigned] = await db.query(
-          `SELECT 1 FROM content_calendar_posts WHERE plan_id = ? AND assigned_to = ?
-           UNION SELECT 1 FROM content_calendar_shoots WHERE plan_id = ? AND assigned_to = ?
-           UNION SELECT 1 FROM content_calendar_ads WHERE plan_id = ? AND assigned_to = ?
-           LIMIT 1`,
-          [plan.id, req.user.id, plan.id, req.user.id, plan.id, req.user.id]
+        const [member] = await db.query(
+          `SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ? LIMIT 1`,
+          [plan.project_id, req.user.id]
         );
-        if (assigned.length === 0) {
+        if (member.length === 0) {
           return res.status(403).json({ message: 'Access denied' });
         }
       }
@@ -582,13 +579,15 @@ exports.calendarView = async (req, res) => {
     if (client_id) { planWhere += ' AND p.client_id = ?'; planParams.push(client_id); }
     if (project_id) { planWhere += ' AND p.project_id = ?'; planParams.push(project_id); }
     if (!req.user.is_admin) {
-      // Show plans created by user OR plans where user has assigned slots
-      planWhere += ` AND (p.created_by = ? OR p.id IN (
-        SELECT plan_id FROM content_calendar_posts WHERE assigned_to = ?
-        UNION SELECT plan_id FROM content_calendar_shoots WHERE assigned_to = ?
-        UNION SELECT plan_id FROM content_calendar_ads WHERE assigned_to = ?
-      ))`;
-      planParams.push(req.user.id, req.user.id, req.user.id, req.user.id);
+      if (req.socialAccessLevel >= 2) {
+        // SMM lead with full access — see all plans (no extra filter)
+      } else {
+        // Show plans for projects the user is a member of (or created by them)
+        planWhere += ` AND (p.created_by = ? OR p.project_id IN (
+          SELECT project_id FROM project_members WHERE user_id = ?
+        ))`;
+        planParams.push(req.user.id, req.user.id);
+      }
     }
 
     // Get plan IDs
@@ -615,7 +614,8 @@ exports.calendarView = async (req, res) => {
         else if (month) { fallbackWhere += ' AND p.plan_month = ?'; fallbackParams.push(month); }
         if (client_id) { fallbackWhere += ' AND p.client_id = ?'; fallbackParams.push(client_id); }
         if (project_id) { fallbackWhere += ' AND p.project_id = ?'; fallbackParams.push(project_id); }
-        fallbackWhere += ' AND p.created_by = ?'; fallbackParams.push(req.user.id);
+        fallbackWhere += ' AND (p.created_by = ? OR p.project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))';
+        fallbackParams.push(req.user.id, req.user.id);
         const [rows] = await db.query(
           `SELECT p.id, p.client_id, p.project_id, p.cycle_id, l.business_name AS client_name, pr.title AS project_title
            FROM content_calendar_plans p
