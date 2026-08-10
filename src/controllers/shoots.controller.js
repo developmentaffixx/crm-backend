@@ -155,7 +155,7 @@ exports.create = async (req, res) => {
     }
     const shootPrefix = `SHT-${yy}${mm}${dd}-${clientCode}`;
     const [lastShoot] = await db.query(
-      `SELECT shoot_id_code FROM shoots ORDER BY id DESC LIMIT 1`
+      `SELECT shoot_id_code FROM shoots WHERE deleted = 0 ORDER BY id DESC LIMIT 1`
     );
     let shootSeq = 1;
     if (lastShoot.length > 0 && lastShoot[0].shoot_id_code) {
