@@ -226,7 +226,7 @@ exports.update = async (req, res) => {
       'client_brand_id', 'project_campaign_name', 'shoot_date', 'reporting_time',
       'location_type', 'exact_address', 'city', 'maps_link',
       'photographers', 'videographers', 'shoot_manager_id',
-      'post_start_time', 'post_end_time', 'post_duration_minutes'
+      'post_start_time', 'post_end_time', 'post_duration_minutes', 'in_summary'
     ];
 
     const updates = {};
@@ -256,6 +256,12 @@ exports.update = async (req, res) => {
     // If member submits post-duration data and current status is 'approved',
     // move to pending_completion for admin sign-off (close request)
     if (req.body.post_start_time && req.body.post_end_time && shoot.status === 'approved') {
+      // Validate in_summary — minimum 30 words
+      const summary = (req.body.in_summary || '').trim();
+      const wordCount = summary.split(/\s+/).filter(Boolean).length;
+      if (wordCount < 30) {
+        return res.status(400).json({ message: 'In Summary must be at least 30 words' });
+      }
       updates.status = 'pending_completion';
     }
 
