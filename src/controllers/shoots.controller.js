@@ -155,13 +155,13 @@ exports.create = async (req, res) => {
     }
     const shootPrefix = `SHT-${yy}${mm}${dd}-${clientCode}`;
     const [lastShoot] = await db.query(
-      `SELECT shoot_id_code FROM shoots WHERE shoot_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
-      [`${shootPrefix}-%`]
+      `SELECT shoot_id_code FROM shoots ORDER BY id DESC LIMIT 1`
     );
     let shootSeq = 1;
     if (lastShoot.length > 0 && lastShoot[0].shoot_id_code) {
       const parts = lastShoot[0].shoot_id_code.split('-');
-      shootSeq = parseInt(parts[parts.length - 1], 10) + 1;
+      const lastNum = parseInt(parts[parts.length - 1], 10);
+      if (!isNaN(lastNum)) shootSeq = lastNum + 1;
     }
     const shoot_id_code = `${shootPrefix}-${String(shootSeq).padStart(3, '0')}`;
 
