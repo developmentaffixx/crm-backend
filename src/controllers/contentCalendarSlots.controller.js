@@ -708,30 +708,37 @@ exports.pendingCount = async (req, res) => {
       }
     }
 
-    // My assigned pending work (slots assigned to me or rejected back to me)
+    // My assigned pending work — total and per-type
     let myPending = 0;
+    let myPendingPosts = 0;
+    let myPendingShoots = 0;
+    let myPendingAds = 0;
     try {
       const [mp] = await db.query(
         `SELECT 
-          (SELECT COUNT(*) FROM content_calendar_posts WHERE assigned_to = ? AND slot_status IN ('assigned','rejected')) +
-          (SELECT COUNT(*) FROM content_calendar_shoots WHERE assigned_to = ? AND slot_status IN ('assigned','rejected')) +
-          (SELECT COUNT(*) FROM content_calendar_ads WHERE assigned_to = ? AND slot_status IN ('assigned','rejected'))
-          AS total`,
+          (SELECT COUNT(*) FROM content_calendar_posts WHERE assigned_to = ? AND slot_status IN ('assigned','rejected')) AS posts,
+          (SELECT COUNT(*) FROM content_calendar_shoots WHERE assigned_to = ? AND slot_status IN ('assigned','rejected')) AS shoots,
+          (SELECT COUNT(*) FROM content_calendar_ads WHERE assigned_to = ? AND slot_status IN ('assigned','rejected')) AS ads`,
         [userId, userId, userId]
       );
-      myPending = mp[0]?.total || 0;
+      myPendingPosts  = mp[0]?.posts  || 0;
+      myPendingShoots = mp[0]?.shoots || 0;
+      myPendingAds    = mp[0]?.ads    || 0;
+      myPending = myPendingPosts + myPendingShoots + myPendingAds;
     } catch (e) {
       // Fallback: try old enum values
       try {
         const [mp] = await db.query(
           `SELECT 
-            (SELECT COUNT(*) FROM content_calendar_posts WHERE assigned_to = ? AND slot_status IN ('picked_up','rejected')) +
-            (SELECT COUNT(*) FROM content_calendar_shoots WHERE assigned_to = ? AND slot_status IN ('picked_up','rejected')) +
-            (SELECT COUNT(*) FROM content_calendar_ads WHERE assigned_to = ? AND slot_status IN ('picked_up','rejected'))
-            AS total`,
+            (SELECT COUNT(*) FROM content_calendar_posts WHERE assigned_to = ? AND slot_status IN ('picked_up','rejected')) AS posts,
+            (SELECT COUNT(*) FROM content_calendar_shoots WHERE assigned_to = ? AND slot_status IN ('picked_up','rejected')) AS shoots,
+            (SELECT COUNT(*) FROM content_calendar_ads WHERE assigned_to = ? AND slot_status IN ('picked_up','rejected')) AS ads`,
           [userId, userId, userId]
         );
-        myPending = mp[0]?.total || 0;
+        myPendingPosts  = mp[0]?.posts  || 0;
+        myPendingShoots = mp[0]?.shoots || 0;
+        myPendingAds    = mp[0]?.ads    || 0;
+        myPending = myPendingPosts + myPendingShoots + myPendingAds;
       } catch (e2) { /* ignore */ }
     }
 
@@ -739,6 +746,9 @@ exports.pendingCount = async (req, res) => {
       unread_notifications: unreadCount,
       pending_approval: pendingApproval,
       my_pending_work: myPending,
+      my_pending_posts: myPendingPosts,
+      my_pending_shoots: myPendingShoots,
+      my_pending_ads: myPendingAds,
       total_badge: unreadCount + myPending,
     });
   } catch (err) {
