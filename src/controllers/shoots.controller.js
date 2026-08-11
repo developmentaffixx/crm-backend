@@ -136,11 +136,12 @@ exports.create = async (req, res) => {
   const {
     client_brand_id, project_campaign_name, shoot_date, reporting_time,
     location_type, exact_address, city, maps_link,
-    photographers, videographers, shoot_manager_id
+    photographers, videographers, shoot_manager_id,
+    calendar_slot_id,
   } = req.body;
 
   try {
-    // Generate shoot_id_code: SHT-YYMMDD-CLIENT-###
+    // Generate shoot_id_code
     const shootDateObj = shoot_date ? new Date(shoot_date) : new Date();
     const yy = String(shootDateObj.getFullYear()).slice(-2);
     const mm = String(shootDateObj.getMonth() + 1).padStart(2, '0');
@@ -149,14 +150,10 @@ exports.create = async (req, res) => {
     let clientCode = 'GEN';
     if (toInt(client_brand_id)) {
       const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [toInt(client_brand_id)]);
-      if (clientRows.length > 0 && clientRows[0].client_code) {
-        clientCode = clientRows[0].client_code;
-      }
+      if (clientRows.length > 0 && clientRows[0].client_code) clientCode = clientRows[0].client_code;
     }
     const shootPrefix = `SHT-${yy}${mm}${dd}-${clientCode}`;
-    const [lastShoot] = await db.query(
-      `SELECT shoot_id_code FROM shoots WHERE deleted = 0 ORDER BY id DESC LIMIT 1`
-    );
+    const [lastShoot] = await db.query(`SELECT shoot_id_code FROM shoots WHERE deleted = 0 ORDER BY id DESC LIMIT 1`);
     let shootSeq = 1;
     if (lastShoot.length > 0 && lastShoot[0].shoot_id_code) {
       const parts = lastShoot[0].shoot_id_code.split('-');
@@ -170,8 +167,8 @@ exports.create = async (req, res) => {
         (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
          location_type, exact_address, city, maps_link,
          photographers, videographers, shoot_manager_id,
-         status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
+         calendar_slot_id, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
       [
         shoot_id_code,
         toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
@@ -179,9 +176,29 @@ exports.create = async (req, res) => {
         photographers ? JSON.stringify(photographers) : null,
         videographers ? JSON.stringify(videographers) : null,
         toInt(shoot_manager_id),
-        req.user.id
+        toInt(calendar_slot_id),
+        req.user.id,
       ]
     );
+
+    // ─── Sync slot to submitted if linked ─────────────────────────────────────
+    if (toInt(calendar_slot_id)) {
+      await db.query(
+        `UPDATE content_calendar_shoots SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+        [toInt(calendar_slot_id)]
+      );
+      res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: toInt(calendar_slot_id) });
+
+      const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_shoots WHERE id = ?', [toInt(calendar_slot_id)]);
+      if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+        await db.query(
+          `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+           VALUES (?, ?, 'slot_submitted', 'shoot', ?, 'Shoot slot submitted for approval', 'Shoot details filled. Please review.', '/social/content-calendar')`,
+          [slotInfo[0].assigned_by, req.user.id, toInt(calendar_slot_id)]
+        );
+        res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+      }
+    }
 
     const [rows] = await db.query(
       `SELECT s.*, l.business_name AS client_brand_name
@@ -265,8 +282,8 @@ exports.update = async (req, res) => {
       updates.status = 'pending_completion';
     }
 
-    // If rejected at stage 1, resubmit resets to pending_approval
-    if (shoot.status === 'rejected' && !req.user.is_admin) {
+    // If rejected or approved (re-work), resubmit resets to pending_approval
+    if (['rejected', 'approved'].includes(shoot.status) && !req.user.is_admin) {
       updates.status = 'pending_approval';
     }
 
@@ -275,7 +292,7 @@ exports.update = async (req, res) => {
     await db.query(`UPDATE shoots SET ${setClauses} WHERE id = ?`, values);
 
     // ─── Sync to calendar slot: submit when shoot details are filled ──────────
-    if (shoot.calendar_slot_id && (shoot.status === 'rejected' || updates.status === 'pending_approval')) {
+    if (shoot.calendar_slot_id && (['rejected', 'approved'].includes(shoot.status) || updates.status === 'pending_approval')) {
       await db.query(
         `UPDATE content_calendar_shoots SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
         [shoot.calendar_slot_id]

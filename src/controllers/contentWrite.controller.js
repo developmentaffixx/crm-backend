@@ -113,29 +113,26 @@ exports.create = async (req, res) => {
   const {
     client_brand_id, project_id, service_id, platform, content_type,
     hook_opening_line, core_message, call_to_action,
-    caption_content, creative_suggestion, reference_links
+    caption_content, creative_suggestion, reference_links,
+    calendar_slot_id,
   } = req.body;
 
   const toNull = (val) => (val === '' || val === undefined || val === null) ? null : val;
-  const toInt = (val) => { const n = parseInt(val); return isNaN(n) ? null : n; };
+  const toInt  = (val) => { const n = parseInt(val); return isNaN(n) ? null : n; };
 
   try {
-    // Get client_brand_id from project if project_id is provided
+    // Resolve client_brand_id from project
     let resolvedClientBrandId = toInt(client_brand_id);
     if (toInt(project_id)) {
       const [projRows] = await db.query('SELECT client_id FROM projects WHERE id = ?', [toInt(project_id)]);
-      if (projRows.length > 0 && projRows[0].client_id) {
-        resolvedClientBrandId = projRows[0].client_id;
-      }
+      if (projRows.length > 0 && projRows[0].client_id) resolvedClientBrandId = projRows[0].client_id;
     }
 
-    // Generate content_id_code: CNT-CLIENT-###
+    // Generate content_id_code
     let clientCode = 'GEN';
     if (resolvedClientBrandId) {
       const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [resolvedClientBrandId]);
-      if (clientRows.length > 0 && clientRows[0].client_code) {
-        clientCode = clientRows[0].client_code;
-      }
+      if (clientRows.length > 0 && clientRows[0].client_code) clientCode = clientRows[0].client_code;
     }
     const [lastContent] = await db.query(
       `SELECT content_id_code FROM content_write_requests WHERE content_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
@@ -153,16 +150,37 @@ exports.create = async (req, res) => {
         (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
          hook_opening_line, core_message, call_to_action,
          caption_content, creative_suggestion, reference_links,
-         status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+         calendar_slot_id, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       [
         content_id_code,
-        resolvedClientBrandId, toInt(project_id), toInt(service_id), platform, content_type,
+        resolvedClientBrandId, toInt(project_id), toInt(service_id),
+        toNull(platform), content_type,
         toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
         toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
-        req.user.id
+        toInt(calendar_slot_id),
+        req.user.id,
       ]
     );
+
+    // ─── Sync slot to submitted if linked ────────────────────────────────────
+    if (toInt(calendar_slot_id)) {
+      await db.query(
+        `UPDATE content_calendar_posts SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+        [toInt(calendar_slot_id)]
+      );
+      res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: toInt(calendar_slot_id) });
+
+      const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [toInt(calendar_slot_id)]);
+      if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+        await db.query(
+          `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+           VALUES (?, ?, 'slot_submitted', 'post', ?, 'Post slot submitted for approval', 'Content has been filled and submitted.', '/social/content-calendar')`,
+          [slotInfo[0].assigned_by, req.user.id, toInt(calendar_slot_id)]
+        );
+        res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+      }
+    }
 
     const [rows] = await db.query(
       `SELECT cwr.*, l.business_name AS client_brand_name, p.title AS project_title
@@ -196,9 +214,9 @@ exports.update = async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    // Cannot edit if already approved/completed
-    if (!req.user.is_admin && ['approved', 'completed'].includes(request.status)) {
-      return res.status(403).json({ message: 'Cannot edit an approved/completed request' });
+    // Cannot edit if completed (fully done), but approved can still be re-worked
+    if (!req.user.is_admin && request.status === 'completed') {
+      return res.status(403).json({ message: 'Cannot edit a completed request' });
     }
 
     const allowed = [
@@ -214,8 +232,8 @@ exports.update = async (req, res) => {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
-    // If user resubmits after rejection, reset to pending
-    if (request.status === 'rejected') {
+    // If user resubmits after rejection OR re-works after approval, reset to pending
+    if (['rejected', 'approved'].includes(request.status)) {
       updates.status = 'pending';
     }
 

@@ -20,7 +20,6 @@ router.post(
   '/',
   [
     body('project_id').notEmpty().withMessage('Project is required'),
-    body('platform').notEmpty().withMessage('Platform is required'),
     body('content_type').notEmpty().withMessage('Content type is required'),
   ],
   contentWriteController.create
