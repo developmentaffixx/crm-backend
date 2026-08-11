@@ -803,7 +803,7 @@ exports.approvedShoots = async (req, res) => {
 
 exports.reschedule = async (req, res) => {
   try {
-    const { item_type, item_id, new_date } = req.body;
+    const { item_type, item_id, new_date, reason } = req.body;
 
     if (!item_type || !item_id) {
       return res.status(400).json({ message: 'item_type and item_id are required' });
@@ -811,6 +811,10 @@ exports.reschedule = async (req, res) => {
 
     if (!new_date) {
       return res.status(400).json({ message: 'new_date is required' });
+    }
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ message: 'A reason for rescheduling is required' });
     }
 
     if (item_type === 'post') {
@@ -821,24 +825,24 @@ exports.reschedule = async (req, res) => {
       if (postRows.length === 0) return res.status(404).json({ message: 'Post not found' });
 
       await db.query(
-        'UPDATE content_calendar_posts SET posting_date = ? WHERE id = ?',
-        [new_date, item_id]
+        'UPDATE content_calendar_posts SET posting_date = ?, reschedule_reason = ? WHERE id = ?',
+        [new_date, reason.trim(), item_id]
       );
     } else if (item_type === 'shoot') {
       await db.query(
-        'UPDATE content_calendar_shoots SET shoot_date = ? WHERE id = ?',
-        [new_date, item_id]
+        'UPDATE content_calendar_shoots SET shoot_date = ?, reschedule_reason = ? WHERE id = ?',
+        [new_date, reason.trim(), item_id]
       );
     } else if (item_type === 'ad') {
       await db.query(
-        'UPDATE content_calendar_ads SET start_date = ? WHERE id = ?',
-        [new_date, item_id]
+        'UPDATE content_calendar_ads SET start_date = ?, reschedule_reason = ? WHERE id = ?',
+        [new_date, reason.trim(), item_id]
       );
     } else {
       return res.status(400).json({ message: 'Invalid item_type' });
     }
 
-    res.emitSocket('content-calendar:updated', { item_type, item_id, new_date });
+    res.emitSocket('content-calendar:updated', { item_type, item_id, new_date, reason });
     return res.json({ message: 'Rescheduled successfully' });
   } catch (err) {
     console.error('Content calendar reschedule error:', err);
