@@ -639,13 +639,21 @@ exports.calendarView = async (req, res) => {
     try {
       const [rows] = await db.query(
         `SELECT cp.*, p.client_id, l.business_name AS client_name,
-                cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
-                cwr.content_type AS brief_content_type, cwr.platform AS brief_platform,
+                COALESCE(cwr.hook_opening_line, cwr2.hook_opening_line) AS brief_hook,
+                COALESCE(cwr.content_id_code, cwr2.content_id_code) AS brief_code,
+                COALESCE(cwr.content_type, cwr2.content_type) AS brief_content_type,
+                COALESCE(cwr.platform, cwr2.platform) AS brief_platform,
+                COALESCE(cwr.core_message, cwr2.core_message) AS brief_core_message,
+                COALESCE(cwr.call_to_action, cwr2.call_to_action) AS brief_cta,
+                COALESCE(cwr.caption_content, cwr2.caption_content) AS brief_caption,
+                COALESCE(cwr.creative_suggestion, cwr2.creative_suggestion) AS brief_creative,
+                COALESCE(cwr.status, cwr2.status) AS brief_status,
                 CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
          FROM content_calendar_posts cp
          JOIN content_calendar_plans p ON p.id = cp.plan_id
          LEFT JOIN leads l ON l.id = p.client_id
          LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
+         LEFT JOIN content_write_requests cwr2 ON cwr2.calendar_slot_id = cp.id AND cwr2.deleted = 0
          LEFT JOIN users au ON au.id = cp.assigned_to
          WHERE cp.plan_id IN (?)
          ORDER BY cp.id ASC`,
@@ -676,13 +684,20 @@ exports.calendarView = async (req, res) => {
     try {
       const [rows] = await db.query(
         `SELECT cs.*, p.client_id, l.business_name AS client_name,
-                s.shoot_id_code AS linked_shoot_code, s.project_campaign_name AS shoot_name,
-                s.shoot_date AS linked_shoot_date, s.city AS shoot_city,
+                COALESCE(s.shoot_id_code, s2.shoot_id_code) AS linked_shoot_code,
+                COALESCE(s.project_campaign_name, s2.project_campaign_name) AS shoot_name,
+                COALESCE(s.shoot_date, s2.shoot_date) AS linked_shoot_date,
+                COALESCE(s.city, s2.city) AS shoot_city,
+                COALESCE(s.location_type, s2.location_type) AS shoot_location_type,
+                COALESCE(s.exact_address, s2.exact_address) AS shoot_address,
+                COALESCE(s.reporting_time, s2.reporting_time) AS shoot_reporting_time,
+                COALESCE(s.status, s2.status) AS shoot_status,
                 CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
          FROM content_calendar_shoots cs
          JOIN content_calendar_plans p ON p.id = cs.plan_id
          LEFT JOIN leads l ON l.id = p.client_id
          LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
+         LEFT JOIN shoots s2 ON s2.calendar_slot_id = cs.id AND s2.deleted = 0
          LEFT JOIN users au ON au.id = cs.assigned_to
          WHERE cs.plan_id IN (?)
          ORDER BY cs.id ASC`,
@@ -712,10 +727,15 @@ exports.calendarView = async (req, res) => {
     try {
       const [rows] = await db.query(
         `SELECT ca.*, p.client_id, l.business_name AS client_name,
+                ac.campaign_name AS linked_campaign_name,
+                ac.campaign_id_code AS linked_campaign_code,
+                ac.status AS linked_campaign_status,
+                ac.notes AS linked_campaign_notes,
                 CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
          FROM content_calendar_ads ca
          JOIN content_calendar_plans p ON p.id = ca.plan_id
          LEFT JOIN leads l ON l.id = p.client_id
+         LEFT JOIN ad_campaigns ac ON ac.linked_calendar_ad_id = ca.id AND ac.deleted = 0
          LEFT JOIN users au ON au.id = ca.assigned_to
          WHERE ca.plan_id IN (?)
          ORDER BY ca.start_date ASC`,
