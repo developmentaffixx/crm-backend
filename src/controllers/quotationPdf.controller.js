@@ -177,7 +177,6 @@ exports.generatePdf = async (req, res) => {
 
     // Horizontal rule
     checkNewPage(30);
-    doc.moveTo(LEFT_MARGIN, doc.y).lineTo(PAGE_WIDTH - RIGHT_MARGIN, doc.y).strokeColor('#cccccc').lineWidth(0.5).stroke();
     doc.moveDown(0.5);
 
     // ─── Our Process / Roadmap ────────────────────────────────────────────────
@@ -242,10 +241,8 @@ exports.generatePdf = async (req, res) => {
         doc.moveDown(0.6);
       }
 
-      // Horizontal rule after process
-      checkNewPage(20);
-      doc.moveTo(LEFT_MARGIN, doc.y).lineTo(PAGE_WIDTH - RIGHT_MARGIN, doc.y).strokeColor('#cccccc').lineWidth(0.5).stroke();
-      doc.moveDown(0.5);
+      // Force page break: Plan & Terms go to page 2
+      doc.addPage();
     }
 
     // ─── Plan Includes ────────────────────────────────────────────────────────
@@ -303,11 +300,6 @@ exports.generatePdf = async (req, res) => {
         doc.fontSize(9).font(FONT_REGULAR).text(labelParts[i], LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH, lineGap: 2 });
       }
     }
-    doc.moveDown(0.5);
-
-    // Horizontal rule
-    checkNewPage(20);
-    doc.moveTo(LEFT_MARGIN, doc.y).lineTo(PAGE_WIDTH - RIGHT_MARGIN, doc.y).strokeColor('#cccccc').lineWidth(0.5).stroke();
     doc.moveDown(0.5);
 
     // ─── Terms & Conditions ───────────────────────────────────────────────────
