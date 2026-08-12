@@ -169,7 +169,10 @@ exports.create = async (req, res) => {
       insertId = result.insertId;
     } catch (insertErr) {
       // If calendar_slot_id column doesn't exist yet, insert without it
-      if (insertErr.code === 'ER_BAD_FIELD_ERROR' || String(insertErr.message).includes('calendar_slot_id')) {
+      if (insertErr.code === 'ER_BAD_FIELD_ERROR' ||
+          insertErr.errno === 1054 ||
+          String(insertErr.message).includes('calendar_slot_id') ||
+          String(insertErr.sqlMessage || '').includes('calendar_slot_id')) {
         const [result] = await db.query(
           `INSERT INTO content_write_requests 
             (content_id_code, client_brand_id, project_id, service_id, platform, content_type,

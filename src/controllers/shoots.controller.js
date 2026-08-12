@@ -187,7 +187,10 @@ exports.create = async (req, res) => {
       );
       insertId = result.insertId;
     } catch (insertErr) {
-      if (insertErr.code === 'ER_BAD_FIELD_ERROR' || String(insertErr.message).includes('calendar_slot_id')) {
+      if (insertErr.code === 'ER_BAD_FIELD_ERROR' ||
+          insertErr.errno === 1054 ||
+          String(insertErr.message).includes('calendar_slot_id') ||
+          String(insertErr.sqlMessage || '').includes('calendar_slot_id')) {
         const [result] = await db.query(
           `INSERT INTO shoots 
             (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
@@ -376,10 +379,26 @@ exports.approve = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Shoot not found' });
 
     const shoot = rows[0];
-    const { action, remarks } = req.body; // action: 'approve' or 'reject'
+    const { action, remarks } = req.body; // action: 'approve', 'reject', or 'rework'
 
-    if (!['approve', 'reject'].includes(action)) {
-      return res.status(400).json({ message: 'Action must be approve or reject' });
+    if (!['approve', 'reject', 'rework'].includes(action)) {
+      return res.status(400).json({ message: 'Action must be approve, reject, or rework' });
+    }
+
+    // Rework: admin sends back approved shoot for re-editing
+    if (action === 'rework') {
+      await db.query(
+        `UPDATE shoots SET status = 'rejected', approval_remarks = ? WHERE id = ?`,
+        [remarks || 'Admin requested re-work. Please update and resubmit.', req.params.id]
+      );
+      if (shoot.calendar_slot_id) {
+        await db.query(
+          `UPDATE content_calendar_shoots SET slot_status = 'rejected', rejection_reason = ? WHERE id = ?`,
+          [remarks || 'Admin requested re-work', shoot.calendar_slot_id]
+        );
+      }
+      const [updated] = await db.query('SELECT * FROM shoots WHERE id = ?', [req.params.id]);
+      return res.json(updated[0]);
     }
 
     // Stage 1: pending_approval

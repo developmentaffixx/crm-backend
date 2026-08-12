@@ -118,7 +118,10 @@ exports.create = async (req, res) => {
       );
       insertId = result.insertId;
     } catch (insertErr) {
-      if (insertErr.code === 'ER_BAD_FIELD_ERROR' || String(insertErr.message).includes('calendar_slot_id')) {
+      if (insertErr.code === 'ER_BAD_FIELD_ERROR' ||
+          insertErr.errno === 1054 ||
+          String(insertErr.message).includes('calendar_slot_id') ||
+          String(insertErr.sqlMessage || '').includes('calendar_slot_id')) {
         const [result] = await db.query(
           `INSERT INTO ad_campaigns 
             (project_id, campaign_name, platform, objective, budget, start_date, end_date,
@@ -190,14 +193,20 @@ exports.update = async (req, res) => {
 
     const campaign = existing[0];
 
-    // If re-working after approval/rejection, reset status to pending_approval
-    if (['rejected', 'approved', 'active'].includes(campaign.status) && !req.user.is_admin) {
+    // Non-admin re-editing after rejection/approval → reset to pending_approval
+    // Admin can set any status directly — don't override
+    if (!req.user.is_admin && ['rejected', 'approved', 'active'].includes(campaign.status)) {
       req.body.status = 'pending_approval';
     }
 
     const allowed = ['campaign_name', 'platform', 'objective', 'budget', 'start_date', 'end_date', 'assignment_type', 'assigned_to', 'status', 'notes'];
     const updates = {};
-    allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f] || null; });
+    allowed.forEach(f => {
+      if (req.body[f] !== undefined) {
+        // Don't null out notes if it's a status-only update
+        updates[f] = (f === 'notes' && req.body[f] === '') ? null : (req.body[f] ?? null);
+      }
+    });
 
     if (Object.keys(updates).length > 0) {
       const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
