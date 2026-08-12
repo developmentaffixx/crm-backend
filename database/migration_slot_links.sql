@@ -1,35 +1,41 @@
 -- ============================================================
 -- SMM Slot Links Migration
--- Run this on the live database to enable the full workflow:
--- Calendar → Fill → Submit → Approve/Reject → Re-work
+-- Run this on the live database to enable the full workflow
 -- ============================================================
 
 USE crm_task_module;
 
--- 1. Add calendar_slot_id to content_write_requests (links post slot to content write record)
+-- 1. Add calendar_slot_id to content_write_requests
 ALTER TABLE content_write_requests
   ADD COLUMN IF NOT EXISTS calendar_slot_id INT UNSIGNED DEFAULT NULL AFTER content_id_code;
 
--- 2. Add calendar_slot_id to shoots (links shoot slot to shoot record)
+-- 2. Make platform nullable (was NOT NULL, but platform field removed from modal)
+ALTER TABLE content_write_requests
+  MODIFY COLUMN platform VARCHAR(100) DEFAULT NULL;
+
+-- 3. Make service_type nullable (was NOT NULL enum, no longer required)
+ALTER TABLE content_write_requests
+  MODIFY COLUMN service_type VARCHAR(100) DEFAULT NULL;
+
+-- 4. Add calendar_slot_id to shoots
 ALTER TABLE shoots
   ADD COLUMN IF NOT EXISTS calendar_slot_id INT UNSIGNED DEFAULT NULL AFTER shoot_id_code;
 
--- 3. Add calendar_slot_id to ad_campaigns (links ad slot to ad campaign record)
---    Note: linked_calendar_ad_id already exists, calendar_slot_id is added for consistent naming
+-- 5. Add calendar_slot_id to ad_campaigns
 ALTER TABLE ad_campaigns
   ADD COLUMN IF NOT EXISTS calendar_slot_id INT UNSIGNED DEFAULT NULL AFTER id;
 
--- 4. Ensure submitted_at column exists on all three calendar tables
+-- 6. Ensure submitted_at column exists on all three calendar tables
 ALTER TABLE content_calendar_posts
-  ADD COLUMN IF NOT EXISTS submitted_at DATETIME DEFAULT NULL AFTER slot_status;
+  ADD COLUMN IF NOT EXISTS submitted_at DATETIME DEFAULT NULL;
 
 ALTER TABLE content_calendar_shoots
-  ADD COLUMN IF NOT EXISTS submitted_at DATETIME DEFAULT NULL AFTER slot_status;
+  ADD COLUMN IF NOT EXISTS submitted_at DATETIME DEFAULT NULL;
 
 ALTER TABLE content_calendar_ads
-  ADD COLUMN IF NOT EXISTS submitted_at DATETIME DEFAULT NULL AFTER slot_status;
+  ADD COLUMN IF NOT EXISTS submitted_at DATETIME DEFAULT NULL;
 
--- 5. Ensure smm_notifications table exists (from migration_smm_simplified_workflow.sql)
+-- 7. Ensure smm_notifications table exists
 CREATE TABLE IF NOT EXISTS smm_notifications (
   id                INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   user_id           INT UNSIGNED NOT NULL,

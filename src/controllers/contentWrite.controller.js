@@ -168,11 +168,13 @@ exports.create = async (req, res) => {
       );
       insertId = result.insertId;
     } catch (insertErr) {
-      // If calendar_slot_id column doesn't exist yet, insert without it
-      if (insertErr.code === 'ER_BAD_FIELD_ERROR' ||
-          insertErr.errno === 1054 ||
-          String(insertErr.message).includes('calendar_slot_id') ||
-          String(insertErr.sqlMessage || '').includes('calendar_slot_id')) {
+      const errMsg = String(insertErr.message || insertErr.sqlMessage || '');
+      const errCode = insertErr.code || '';
+      const errNo = insertErr.errno || 0;
+
+      // Missing column (calendar_slot_id not in DB yet) — retry without it
+      if (errCode === 'ER_BAD_FIELD_ERROR' || errNo === 1054 ||
+          errMsg.includes('calendar_slot_id')) {
         const [result] = await db.query(
           `INSERT INTO content_write_requests 
             (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
@@ -190,6 +192,52 @@ exports.create = async (req, res) => {
           ]
         );
         insertId = result.insertId;
+
+      // platform NOT NULL constraint — platform column hasn't been made nullable yet
+      } else if ((errCode === 'ER_BAD_NULL_ERROR' || errNo === 1048) &&
+                 errMsg.includes('platform')) {
+        // Insert with a default platform value to bypass the constraint
+        const [result] = await db.query(
+          `INSERT INTO content_write_requests 
+            (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
+             hook_opening_line, core_message, call_to_action,
+             caption_content, creative_suggestion, reference_links,
+             calendar_slot_id, status, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+          [
+            content_id_code,
+            resolvedClientBrandId, toInt(project_id), toInt(service_id),
+            'social_media', // default until migration runs
+            content_type,
+            toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
+            toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
+            slotIdVal, req.user.id,
+          ]
+        );
+        insertId = result.insertId;
+
+      // service_type NOT NULL constraint
+      } else if ((errCode === 'ER_BAD_NULL_ERROR' || errNo === 1048) &&
+                 errMsg.includes('service_type')) {
+        const [result] = await db.query(
+          `INSERT INTO content_write_requests 
+            (content_id_code, client_brand_id, project_id, service_id, platform, service_type, content_type,
+             hook_opening_line, core_message, call_to_action,
+             caption_content, creative_suggestion, reference_links,
+             calendar_slot_id, status, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+          [
+            content_id_code,
+            resolvedClientBrandId, toInt(project_id), toInt(service_id),
+            toNull(platform), 'social_media_management', // default
+            content_type,
+            toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
+            toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
+            slotIdVal, req.user.id,
+          ]
+        );
+        insertId = result.insertId;
+
       } else {
         throw insertErr;
       }
@@ -232,7 +280,11 @@ exports.create = async (req, res) => {
     return res.status(201).json(rows[0]);
   } catch (err) {
     console.error('Content write create error:', err);
-    return res.status(500).json({ message: 'Server error', detail: err.message });
+    return res.status(500).json({
+      message: err.sqlMessage || err.message || 'Server error',
+      detail: err.message,
+      code: err.code,
+    });
   }
 };
 
