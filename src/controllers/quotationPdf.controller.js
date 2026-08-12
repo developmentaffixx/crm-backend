@@ -135,7 +135,12 @@ exports.generatePdf = async (req, res) => {
         doc.fontSize(10).font(FONT_BOLD).text('Phone: ', LEFT_MARGIN, doc.y, { continued: true });
         doc.font(FONT_REGULAR).text(quotation.client_phone);
       }
-      doc.moveDown(0.5);
+      if (quotation.valid_until) {
+        resetX();
+        doc.fontSize(10).font(FONT_BOLD).text('Valid Until: ', LEFT_MARGIN, doc.y, { continued: true });
+        doc.font(FONT_REGULAR).text(quotation.valid_until);
+      }
+      doc.moveDown(0.7);
     }
 
     // Tagline
@@ -152,7 +157,7 @@ exports.generatePdf = async (req, res) => {
       resetX();
       const descLines = quotation.description.split('\n');
       for (const line of descLines) {
-        if (!line.trim()) { doc.moveDown(0.4); continue; }
+        if (!line.trim()) { doc.moveDown(0.5); continue; }
         checkNewPage(20);
         resetX();
         // Detect heading lines (short questions or section titles)
@@ -161,18 +166,19 @@ exports.generatePdf = async (req, res) => {
           line.trim() === 'Why Does SEO Take Time?' ||
           line.trim().startsWith('What is SEO');
         if (isHeading) {
-          doc.moveDown(0.3);
+          doc.moveDown(0.4);
           doc.fontSize(10).font(FONT_BOLD).text(line.trim(), LEFT_MARGIN, doc.y, {
-            width: CONTENT_WIDTH, align: 'left', lineGap: 2
+            width: CONTENT_WIDTH, align: 'left', lineGap: 3
           });
-          doc.moveDown(0.2);
+          doc.moveDown(0.3);
         } else {
           doc.fontSize(9).font(FONT_REGULAR).text(line.trim(), LEFT_MARGIN, doc.y, {
-            width: CONTENT_WIDTH, align: 'left', lineGap: 2
+            width: CONTENT_WIDTH, align: 'left', lineGap: 3
           });
+          doc.moveDown(0.2);
         }
       }
-      doc.moveDown(0.5);
+      doc.moveDown(0.7);
     }
 
     // Horizontal rule
@@ -193,22 +199,23 @@ exports.generatePdf = async (req, res) => {
 
         // Section title
         doc.fontSize(11).font(FONT_BOLD).text(sec.title, LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
-        doc.moveDown(0.2);
+        doc.moveDown(0.3);
 
         // Subtitle
         if (sec.subtitle) {
           resetX();
           doc.fontSize(9).font(FONT_BOLD).text(sec.subtitle, LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
-          doc.moveDown(0.3);
+          doc.moveDown(0.4);
         }
 
         // Items
         for (const item of (sec.items || [])) {
-          checkNewPage(12);
+          checkNewPage(14);
           resetX();
           doc.fontSize(9).font(FONT_REGULAR).text(`• ${item}`, LEFT_MARGIN + 16, doc.y, {
-            width: CONTENT_WIDTH - 16, lineGap: 1
+            width: CONTENT_WIDTH - 16, lineGap: 3
           });
+          doc.moveDown(0.1);
         }
 
         // Goal (for SEO)
@@ -250,31 +257,33 @@ exports.generatePdf = async (req, res) => {
       checkNewPage(40);
       resetX();
       doc.fontSize(14).font(FONT_BOLD).text(quotation.plan_title || 'Plan Includes', LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
-      doc.moveDown(0.5);
+      doc.moveDown(0.6);
 
       for (const item of planIncludes) {
-        checkNewPage(14);
+        checkNewPage(16);
         resetX();
 
         if (item.label && !item.value) {
           // Sub-header (bold, no bullet)
-          doc.moveDown(0.3);
+          doc.moveDown(0.4);
           doc.fontSize(10).font(FONT_BOLD).text(item.label, LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
-          doc.moveDown(0.2);
+          doc.moveDown(0.3);
         } else if (item.label && item.value) {
           // Label: value
           doc.fontSize(9).font(FONT_BOLD).text(`• ${item.label}: `, LEFT_MARGIN + 16, doc.y, {
             width: CONTENT_WIDTH - 16, continued: true
           });
           doc.font(FONT_REGULAR).text(item.value);
+          doc.moveDown(0.15);
         } else if (item.value) {
           // Plain bullet
           doc.fontSize(9).font(FONT_REGULAR).text(`• ${item.value}`, LEFT_MARGIN + 16, doc.y, {
-            width: CONTENT_WIDTH - 16, lineGap: 1
+            width: CONTENT_WIDTH - 16, lineGap: 3
           });
+          doc.moveDown(0.15);
         }
       }
-      doc.moveDown(0.5);
+      doc.moveDown(0.7);
     }
 
     // ─── Investment ───────────────────────────────────────────────────────────
@@ -287,37 +296,37 @@ exports.generatePdf = async (req, res) => {
     // If label has newlines (SEO has extra text), split it
     const labelParts = label.split('\n').filter(l => l.trim());
     doc.fontSize(11).font(FONT_BOLD).text('Investment', LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
-    doc.moveDown(0.2);
+    doc.moveDown(0.3);
     resetX();
     doc.fontSize(10).font(FONT_REGULAR).text(`${amount} ${labelParts[0] || '/ Month'}`, LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
 
     // Additional investment info lines (e.g., SEO recommended commitment)
     if (labelParts.length > 1) {
       for (let i = 1; i < labelParts.length; i++) {
-        doc.moveDown(0.3);
+        doc.moveDown(0.4);
         checkNewPage(14);
         resetX();
-        doc.fontSize(9).font(FONT_REGULAR).text(labelParts[i], LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH, lineGap: 2 });
+        doc.fontSize(9).font(FONT_REGULAR).text(labelParts[i], LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH, lineGap: 3 });
       }
     }
-    doc.moveDown(0.5);
+    doc.moveDown(0.7);
 
     // ─── Terms & Conditions ───────────────────────────────────────────────────
     if (terms.length > 0) {
       checkNewPage(40);
       resetX();
       doc.fontSize(12).font(FONT_BOLD).text('Terms & Conditions', LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
-      doc.moveDown(0.4);
+      doc.moveDown(0.5);
 
       terms.forEach((term, idx) => {
-        checkNewPage(16);
+        checkNewPage(18);
         resetX();
         doc.fontSize(9).font(FONT_REGULAR).text(`${idx + 1}. ${term}`, LEFT_MARGIN + 10, doc.y, {
-          width: CONTENT_WIDTH - 10, lineGap: 2
+          width: CONTENT_WIDTH - 10, lineGap: 3
         });
-        doc.moveDown(0.2);
+        doc.moveDown(0.3);
       });
-      doc.moveDown(0.5);
+      doc.moveDown(0.7);
     }
 
     // ─── Bank Account Details ─────────────────────────────────────────────────
