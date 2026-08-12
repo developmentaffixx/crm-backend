@@ -35,13 +35,15 @@ exports.list = async (req, res) => {
               p.title AS project_title,
               s.name AS service_name,
               CONCAT(u_creator.first_name, ' ', u_creator.last_name) AS created_by_name,
-              CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name
+              CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name,
+              ccp.posting_date AS slot_posting_date
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
        LEFT JOIN projects p ON p.id = cwr.project_id
        LEFT JOIN services s ON s.id = cwr.service_id
        LEFT JOIN users u_creator ON u_creator.id = cwr.created_by
        LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
+       LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
        WHERE ${where}
        ORDER BY cwr.created_at DESC`,
       params
@@ -76,13 +78,15 @@ exports.getOne = async (req, res) => {
               p.title AS project_title,
               s.name AS service_name,
               CONCAT(u_creator.first_name, ' ', u_creator.last_name) AS created_by_name,
-              CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name
+              CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name,
+              ccp.posting_date AS slot_posting_date
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
        LEFT JOIN projects p ON p.id = cwr.project_id
        LEFT JOIN services s ON s.id = cwr.service_id
        LEFT JOIN users u_creator ON u_creator.id = cwr.created_by
        LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
+       LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
        WHERE cwr.id = ? AND cwr.deleted = 0`,
       [req.params.id]
     );

@@ -101,15 +101,38 @@ exports.create = async (req, res) => {
     const slotIdVal = linked_calendar_ad_id ? parseInt(linked_calendar_ad_id) : null;
     const initStatus = status || (slotIdVal ? 'pending_approval' : 'draft');
 
+    // Generate campaign_id_code: ADS-CLIENT-###
+    let clientCode = 'GEN';
+    try {
+      if (project_id) {
+        const [projRows] = await db.query('SELECT client_id FROM projects WHERE id = ?', [project_id]);
+        if (projRows.length > 0 && projRows[0].client_id) {
+          const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [projRows[0].client_id]);
+          if (clientRows.length > 0 && clientRows[0].client_code) clientCode = clientRows[0].client_code;
+        }
+      }
+    } catch (e) { /* use GEN */ }
+    const [lastAd] = await db.query(
+      `SELECT campaign_id_code FROM ad_campaigns WHERE campaign_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
+      [`ADS-${clientCode}-%`]
+    ).catch(() => [[]]);
+    let adSeq = 1;
+    if (lastAd.length > 0 && lastAd[0]?.campaign_id_code) {
+      const parts = lastAd[0].campaign_id_code.split('-');
+      adSeq = parseInt(parts[parts.length - 1], 10) + 1;
+    }
+    const campaign_id_code = `ADS-${clientCode}-${String(adSeq).padStart(3, '0')}`;
+
     // Try with calendar_slot_id — fall back without it
     let insertId;
     try {
       const [result] = await db.query(
         `INSERT INTO ad_campaigns 
-          (project_id, campaign_name, platform, objective, budget, start_date, end_date,
+          (campaign_id_code, project_id, campaign_name, platform, objective, budget, start_date, end_date,
            assignment_type, assigned_to, notes, linked_calendar_ad_id, calendar_slot_id, status, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
+          campaign_id_code,
           project_id, campaign_name, platform || null, objective || null,
           budget || null, start_date || null, end_date || null,
           assignment_type || 'self', assigned_to || null, notes || null,
@@ -135,6 +158,10 @@ exports.create = async (req, res) => {
           ]
         );
         insertId = result.insertId;
+        // Try to update the id_code separately
+        try {
+          await db.query('UPDATE ad_campaigns SET campaign_id_code = ? WHERE id = ?', [campaign_id_code, insertId]);
+        } catch (e) { /* column may not exist yet */ }
       } else {
         throw insertErr;
       }

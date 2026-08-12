@@ -25,6 +25,10 @@ ALTER TABLE shoots
 ALTER TABLE ad_campaigns
   ADD COLUMN IF NOT EXISTS calendar_slot_id INT UNSIGNED DEFAULT NULL AFTER id;
 
+-- 5b. Add campaign_id_code for display IDs (e.g. ADS-CLIENT-001)
+ALTER TABLE ad_campaigns
+  ADD COLUMN IF NOT EXISTS campaign_id_code VARCHAR(50) DEFAULT NULL AFTER id;
+
 -- 6. Ensure submitted_at column exists on all three calendar tables
 ALTER TABLE content_calendar_posts
   ADD COLUMN IF NOT EXISTS submitted_at DATETIME DEFAULT NULL;
