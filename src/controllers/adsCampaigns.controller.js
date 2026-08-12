@@ -88,40 +88,93 @@ exports.getOne = async (req, res) => {
 // ─── CREATE ──────────────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
   try {
-    const { project_id, campaign_name, platform, objective, budget, start_date, end_date, assignment_type, assigned_to, notes, linked_calendar_ad_id, status } = req.body;
-    if (!project_id || !campaign_name) return res.status(400).json({ message: 'Project and campaign name are required' });
+    const {
+      project_id, campaign_name, platform, objective, budget,
+      start_date, end_date, assignment_type, assigned_to, notes,
+      linked_calendar_ad_id, status,
+    } = req.body;
 
-    const [result] = await db.query(
-      `INSERT INTO ad_campaigns (project_id, campaign_name, platform, objective, budget, start_date, end_date, assignment_type, assigned_to, notes, linked_calendar_ad_id, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [project_id, campaign_name, platform || null, objective || null, budget || null, start_date || null, end_date || null, assignment_type || 'self', assigned_to || null, notes || null, linked_calendar_ad_id || null, status || 'pending_approval', req.user.id]
-    );
+    if (!project_id || !campaign_name) {
+      return res.status(400).json({ message: 'Project and campaign name are required' });
+    }
 
-    // ─── Sync slot to submitted if linked ─────────────────────────────────────
-    if (linked_calendar_ad_id) {
-      await db.query(
-        'UPDATE content_calendar_ads SET linked_campaign_id = ?, slot_status = \'submitted\', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?',
-        [result.insertId, linked_calendar_ad_id]
+    const slotIdVal = linked_calendar_ad_id ? parseInt(linked_calendar_ad_id) : null;
+    const initStatus = status || (slotIdVal ? 'pending_approval' : 'draft');
+
+    // Try with calendar_slot_id — fall back without it
+    let insertId;
+    try {
+      const [result] = await db.query(
+        `INSERT INTO ad_campaigns 
+          (project_id, campaign_name, platform, objective, budget, start_date, end_date,
+           assignment_type, assigned_to, notes, linked_calendar_ad_id, calendar_slot_id, status, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          project_id, campaign_name, platform || null, objective || null,
+          budget || null, start_date || null, end_date || null,
+          assignment_type || 'self', assigned_to || null, notes || null,
+          slotIdVal, slotIdVal, initStatus, req.user.id,
+        ]
       );
-      res.emitSocket('content-calendar:slot-submitted', { item_type: 'ad', item_id: linked_calendar_ad_id });
-
-      const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_ads WHERE id = ?', [linked_calendar_ad_id]);
-      if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-        await db.query(
-          `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-           VALUES (?, ?, 'slot_submitted', 'ad', ?, 'Ad slot submitted for approval', 'Campaign details filled. Please review.', '/social/content-calendar')`,
-          [slotInfo[0].assigned_by, req.user.id, linked_calendar_ad_id]
+      insertId = result.insertId;
+    } catch (insertErr) {
+      if (insertErr.code === 'ER_BAD_FIELD_ERROR' || String(insertErr.message).includes('calendar_slot_id')) {
+        const [result] = await db.query(
+          `INSERT INTO ad_campaigns 
+            (project_id, campaign_name, platform, objective, budget, start_date, end_date,
+             assignment_type, assigned_to, notes, linked_calendar_ad_id, status, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            project_id, campaign_name, platform || null, objective || null,
+            budget || null, start_date || null, end_date || null,
+            assignment_type || 'self', assigned_to || null, notes || null,
+            slotIdVal, initStatus, req.user.id,
+          ]
         );
-        res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+        insertId = result.insertId;
+      } else {
+        throw insertErr;
       }
     }
 
-    const [campaign] = await db.query('SELECT * FROM ad_campaigns WHERE id = ?', [result.insertId]);
+    // Sync slot to submitted
+    if (slotIdVal) {
+      try {
+        await db.query(
+          `UPDATE content_calendar_ads SET linked_campaign_id = ?, slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+          [insertId, slotIdVal]
+        );
+        res.emitSocket('content-calendar:slot-submitted', { item_type: 'ad', item_id: slotIdVal });
+
+        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_ads WHERE id = ?', [slotIdVal]);
+        if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+          await db.query(
+            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+             VALUES (?, ?, 'slot_submitted', 'ad', ?, 'Ad slot submitted for approval', 'Campaign details filled. Please review.', '/social/content-calendar')`,
+            [slotInfo[0].assigned_by, req.user.id, slotIdVal]
+          );
+          res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+        }
+      } catch (slotErr) {
+        console.warn('Ad slot sync warning:', slotErr.message);
+      }
+    }
+
+    const [campaign] = await db.query(`
+      SELECT ac.*, p.title AS project_title,
+             CONCAT(ua.first_name, ' ', ua.last_name) AS assigned_to_name,
+             CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name
+      FROM ad_campaigns ac
+      LEFT JOIN projects p ON p.id = ac.project_id
+      LEFT JOIN users ua ON ua.id = ac.assigned_to
+      LEFT JOIN users uc ON uc.id = ac.created_by
+      WHERE ac.id = ?`, [insertId]);
+
     res.emitSocket('ads:created', campaign[0]);
     return res.status(201).json(campaign[0]);
   } catch (err) {
     console.error('Ads create error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: err.message });
   }
 };
 

@@ -145,40 +145,74 @@ exports.create = async (req, res) => {
     }
     const content_id_code = `CNT-${clientCode}-${String(contentSeq).padStart(3, '0')}`;
 
-    const [result] = await db.query(
-      `INSERT INTO content_write_requests 
-        (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
-         hook_opening_line, core_message, call_to_action,
-         caption_content, creative_suggestion, reference_links,
-         calendar_slot_id, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-      [
-        content_id_code,
-        resolvedClientBrandId, toInt(project_id), toInt(service_id),
-        toNull(platform), content_type,
-        toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
-        toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
-        toInt(calendar_slot_id),
-        req.user.id,
-      ]
-    );
+    // Try inserting with calendar_slot_id — fall back without it if column doesn't exist
+    let insertId;
+    const slotIdVal = toInt(calendar_slot_id);
 
-    // ─── Sync slot to submitted if linked ────────────────────────────────────
-    if (toInt(calendar_slot_id)) {
-      await db.query(
-        `UPDATE content_calendar_posts SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-        [toInt(calendar_slot_id)]
+    try {
+      const [result] = await db.query(
+        `INSERT INTO content_write_requests 
+          (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
+           hook_opening_line, core_message, call_to_action,
+           caption_content, creative_suggestion, reference_links,
+           calendar_slot_id, status, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+        [
+          content_id_code,
+          resolvedClientBrandId, toInt(project_id), toInt(service_id),
+          toNull(platform), content_type,
+          toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
+          toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
+          slotIdVal, req.user.id,
+        ]
       );
-      res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: toInt(calendar_slot_id) });
-
-      const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [toInt(calendar_slot_id)]);
-      if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-        await db.query(
-          `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-           VALUES (?, ?, 'slot_submitted', 'post', ?, 'Post slot submitted for approval', 'Content has been filled and submitted.', '/social/content-calendar')`,
-          [slotInfo[0].assigned_by, req.user.id, toInt(calendar_slot_id)]
+      insertId = result.insertId;
+    } catch (insertErr) {
+      // If calendar_slot_id column doesn't exist yet, insert without it
+      if (insertErr.code === 'ER_BAD_FIELD_ERROR' || String(insertErr.message).includes('calendar_slot_id')) {
+        const [result] = await db.query(
+          `INSERT INTO content_write_requests 
+            (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
+             hook_opening_line, core_message, call_to_action,
+             caption_content, creative_suggestion, reference_links,
+             status, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+          [
+            content_id_code,
+            resolvedClientBrandId, toInt(project_id), toInt(service_id),
+            toNull(platform), content_type,
+            toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
+            toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
+            req.user.id,
+          ]
         );
-        res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+        insertId = result.insertId;
+      } else {
+        throw insertErr;
+      }
+    }
+
+    // Sync slot to submitted if linked
+    if (slotIdVal) {
+      try {
+        await db.query(
+          `UPDATE content_calendar_posts SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+          [slotIdVal]
+        );
+        res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: slotIdVal });
+
+        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [slotIdVal]);
+        if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+          await db.query(
+            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+             VALUES (?, ?, 'slot_submitted', 'post', ?, 'Post slot submitted for approval', 'Content has been filled and submitted.', '/social/content-calendar')`,
+            [slotInfo[0].assigned_by, req.user.id, slotIdVal]
+          );
+          res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+        }
+      } catch (slotErr) {
+        // Don't fail the whole request if slot sync fails
+        console.warn('Slot sync warning:', slotErr.message);
       }
     }
 
@@ -188,14 +222,14 @@ exports.create = async (req, res) => {
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
        LEFT JOIN projects p ON p.id = cwr.project_id
        WHERE cwr.id = ?`,
-      [result.insertId]
+      [insertId]
     );
 
     res.emitSocket('content-write:created', rows[0]);
     return res.status(201).json(rows[0]);
   } catch (err) {
     console.error('Content write create error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: err.message });
   }
 };
 

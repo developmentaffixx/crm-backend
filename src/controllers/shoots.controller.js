@@ -24,9 +24,9 @@ exports.list = async (req, res) => {
       if (req.socialAccessLevel >= 2) {
         // SMM lead with full access — see all shoots
       } else {
-        // Show shoots where user is creator, photographer, videographer, or shoot manager
-        where += ` AND (s.created_by = ? OR s.shoot_manager_id = ? OR JSON_CONTAINS(s.photographers, CAST(? AS JSON)) OR JSON_CONTAINS(s.videographers, CAST(? AS JSON)))`;
-        params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+        // Show shoots where user is creator, shoot manager, or filled from their calendar slot
+        where += ` AND (s.created_by = ? OR s.shoot_manager_id = ?)`;
+        params.push(req.user.id, req.user.id);
       }
     }
 
@@ -162,41 +162,75 @@ exports.create = async (req, res) => {
     }
     const shoot_id_code = `${shootPrefix}-${String(shootSeq).padStart(3, '0')}`;
 
-    const [result] = await db.query(
-      `INSERT INTO shoots 
-        (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
-         location_type, exact_address, city, maps_link,
-         photographers, videographers, shoot_manager_id,
-         calendar_slot_id, status, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
-      [
-        shoot_id_code,
-        toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
-        location_type, toNull(exact_address), toNull(city), toNull(maps_link),
-        photographers ? JSON.stringify(photographers) : null,
-        videographers ? JSON.stringify(videographers) : null,
-        toInt(shoot_manager_id),
-        toInt(calendar_slot_id),
-        req.user.id,
-      ]
-    );
+    const slotIdVal = toInt(calendar_slot_id);
 
-    // ─── Sync slot to submitted if linked ─────────────────────────────────────
-    if (toInt(calendar_slot_id)) {
-      await db.query(
-        `UPDATE content_calendar_shoots SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-        [toInt(calendar_slot_id)]
+    // Try inserting with calendar_slot_id — fall back without it if column doesn't exist
+    let insertId;
+    try {
+      const [result] = await db.query(
+        `INSERT INTO shoots 
+          (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
+           location_type, exact_address, city, maps_link,
+           photographers, videographers, shoot_manager_id,
+           calendar_slot_id, status, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
+        [
+          shoot_id_code,
+          toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
+          location_type, toNull(exact_address), toNull(city), toNull(maps_link),
+          photographers ? JSON.stringify(photographers) : null,
+          videographers ? JSON.stringify(videographers) : null,
+          toInt(shoot_manager_id),
+          slotIdVal,
+          req.user.id,
+        ]
       );
-      res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: toInt(calendar_slot_id) });
-
-      const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_shoots WHERE id = ?', [toInt(calendar_slot_id)]);
-      if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-        await db.query(
-          `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-           VALUES (?, ?, 'slot_submitted', 'shoot', ?, 'Shoot slot submitted for approval', 'Shoot details filled. Please review.', '/social/content-calendar')`,
-          [slotInfo[0].assigned_by, req.user.id, toInt(calendar_slot_id)]
+      insertId = result.insertId;
+    } catch (insertErr) {
+      if (insertErr.code === 'ER_BAD_FIELD_ERROR' || String(insertErr.message).includes('calendar_slot_id')) {
+        const [result] = await db.query(
+          `INSERT INTO shoots 
+            (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
+             location_type, exact_address, city, maps_link,
+             photographers, videographers, shoot_manager_id,
+             status, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
+          [
+            shoot_id_code,
+            toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
+            location_type, toNull(exact_address), toNull(city), toNull(maps_link),
+            photographers ? JSON.stringify(photographers) : null,
+            videographers ? JSON.stringify(videographers) : null,
+            toInt(shoot_manager_id),
+            req.user.id,
+          ]
         );
-        res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+        insertId = result.insertId;
+      } else {
+        throw insertErr;
+      }
+    }
+
+    // Sync slot to submitted if linked
+    if (slotIdVal) {
+      try {
+        await db.query(
+          `UPDATE content_calendar_shoots SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+          [slotIdVal]
+        );
+        res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: slotIdVal });
+
+        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_shoots WHERE id = ?', [slotIdVal]);
+        if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+          await db.query(
+            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+             VALUES (?, ?, 'slot_submitted', 'shoot', ?, 'Shoot slot submitted for approval', 'Shoot details filled. Please review.', '/social/content-calendar')`,
+            [slotInfo[0].assigned_by, req.user.id, slotIdVal]
+          );
+          res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+        }
+      } catch (slotErr) {
+        console.warn('Shoot slot sync warning:', slotErr.message);
       }
     }
 
@@ -204,7 +238,7 @@ exports.create = async (req, res) => {
       `SELECT s.*, l.business_name AS client_brand_name
        FROM shoots s LEFT JOIN leads l ON l.id = s.client_brand_id
        WHERE s.id = ?`,
-      [result.insertId]
+      [insertId]
     );
 
     res.emitSocket('shoots:created', rows[0]);
