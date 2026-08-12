@@ -137,8 +137,11 @@ exports.generatePdf = async (req, res) => {
       }
       if (quotation.valid_until) {
         resetX();
+        // Format date as dd-mm-yyyy
+        const vDate = new Date(quotation.valid_until);
+        const formattedDate = `${String(vDate.getDate()).padStart(2, '0')}-${String(vDate.getMonth() + 1).padStart(2, '0')}-${vDate.getFullYear()}`;
         doc.fontSize(10).font(FONT_BOLD).text('Valid Until: ', LEFT_MARGIN, doc.y, { continued: true });
-        doc.font(FONT_REGULAR).text(quotation.valid_until);
+        doc.font(FONT_REGULAR).text(formattedDate);
       }
       doc.moveDown(0.7);
     }
@@ -341,7 +344,7 @@ exports.generatePdf = async (req, res) => {
       checkNewPage(60);
       resetX();
       doc.fontSize(12).font(FONT_BOLD).text('Bank Account Details', LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
-      doc.moveDown(0.4);
+      doc.moveDown(0.5);
 
       const bankDetails = [
         bankName && ['Bank', bankName],
@@ -352,10 +355,11 @@ exports.generatePdf = async (req, res) => {
       ].filter(Boolean);
 
       for (const [lbl, val] of bankDetails) {
-        checkNewPage(12);
+        checkNewPage(14);
         resetX();
         doc.fontSize(9).font(FONT_BOLD).text(`${lbl}: `, LEFT_MARGIN, doc.y, { continued: true });
         doc.font(FONT_REGULAR).text(val);
+        doc.moveDown(0.3);
       }
     }
 
