@@ -230,8 +230,9 @@ exports.update = async (req, res) => {
     const updates = {};
     allowed.forEach(f => {
       if (req.body[f] !== undefined) {
-        // Don't null out notes if it's a status-only update
-        updates[f] = (f === 'notes' && req.body[f] === '') ? null : (req.body[f] ?? null);
+        const val = req.body[f];
+        // Only null out empty strings for non-text fields; keep notes/campaign_name as-is
+        updates[f] = (val === '' || val === null) ? null : val;
       }
     });
 
