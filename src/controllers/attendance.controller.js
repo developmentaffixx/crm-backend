@@ -1119,14 +1119,12 @@ exports.adminGetToday = async (req, res) => {
     const ticketMap = {};
     for (const r of ticketLogs) ticketMap[r.user_id] = (parseInt(r.total_minutes) || 0) * 60;
 
-    // Fetch productive time (completed meetings today)
+    // Fetch productive time (meetings) — use actual timer logs, not scheduled times
     const [meetingLogs] = await db.query(
-      `SELECT COALESCE(mm.user_id, m.created_by) AS user_id,
-              SUM(TIMESTAMPDIFF(SECOND, m.start_time, m.end_time)) AS total_seconds
-       FROM meetings m
-       LEFT JOIN meeting_members mm ON mm.meeting_id = m.id
-       WHERE m.meeting_date = CURDATE() AND m.status = 'completed' AND m.deleted = 0
-       GROUP BY COALESCE(mm.user_id, m.created_by)`
+      `SELECT user_id, COALESCE(SUM(duration), 0) AS total_seconds
+       FROM meeting_time_logs
+       WHERE DATE(started_at) = CURDATE() AND ended_at IS NOT NULL AND duration > 0
+       GROUP BY user_id`
     );
     const meetingMap = {};
     for (const r of meetingLogs) meetingMap[r.user_id] = parseInt(r.total_seconds) || 0;
