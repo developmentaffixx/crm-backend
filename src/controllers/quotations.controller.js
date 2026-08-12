@@ -102,7 +102,7 @@ exports.getOne = async (req, res) => {
 exports.create = async (req, res) => {
   try {
     const {
-      lead_id, client_name, client_email, client_phone,
+      lead_id, client_name, brand_name, client_email, client_phone,
       service_title, service_type, tagline, description,
       process_sections, plan_title, plan_includes,
       investment_amount, investment_label,
@@ -116,15 +116,16 @@ exports.create = async (req, res) => {
     const quotation_number = await generateQuotationNumber();
 
     const [result] = await db.query(
-      `INSERT INTO quotations (quotation_number, lead_id, client_name, client_email, client_phone,
+      `INSERT INTO quotations (quotation_number, lead_id, client_name, brand_name, client_email, client_phone,
         service_title, service_type, tagline, description, process_sections, plan_title, plan_includes,
         investment_amount, investment_label, terms,
         bank_name, account_number, ifsc_code, branch, upi_id, valid_until, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         quotation_number,
         lead_id || null,
         client_name,
+        brand_name || null,
         client_email || null,
         client_phone || null,
         service_title,
@@ -132,7 +133,7 @@ exports.create = async (req, res) => {
         tagline || null,
         description || null,
         JSON.stringify(process_sections || []),
-        plan_title || 'Monthly Growth Plan',
+        plan_title || 'Monthly Deliverables - Growth Plan',
         JSON.stringify(plan_includes || []),
         parseFloat(investment_amount) || 0,
         investment_label || '/ Month',
@@ -163,7 +164,7 @@ exports.update = async (req, res) => {
     if (!existing.length) return res.status(404).json({ message: 'Quotation not found' });
 
     const {
-      lead_id, client_name, client_email, client_phone,
+      lead_id, client_name, brand_name, client_email, client_phone,
       service_title, service_type, tagline, description,
       process_sections, plan_title, plan_includes,
       investment_amount, investment_label,
@@ -172,7 +173,7 @@ exports.update = async (req, res) => {
 
     await db.query(
       `UPDATE quotations SET
-        lead_id = ?, client_name = ?, client_email = ?, client_phone = ?,
+        lead_id = ?, client_name = ?, brand_name = ?, client_email = ?, client_phone = ?,
         service_title = ?, service_type = ?, tagline = ?, description = ?,
         process_sections = ?, plan_title = ?, plan_includes = ?,
         investment_amount = ?, investment_label = ?, terms = ?,
@@ -181,6 +182,7 @@ exports.update = async (req, res) => {
       [
         lead_id !== undefined ? lead_id : existing[0].lead_id,
         client_name || existing[0].client_name,
+        brand_name !== undefined ? brand_name : existing[0].brand_name,
         client_email !== undefined ? client_email : existing[0].client_email,
         client_phone !== undefined ? client_phone : existing[0].client_phone,
         service_title || existing[0].service_title,

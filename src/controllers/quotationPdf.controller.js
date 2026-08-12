@@ -118,6 +118,26 @@ exports.generatePdf = async (req, res) => {
     });
     doc.moveDown(0.5);
 
+    // Client Details (left-aligned)
+    if (quotation.client_name || quotation.brand_name || quotation.client_phone) {
+      resetX();
+      if (quotation.client_name) {
+        doc.fontSize(10).font(FONT_BOLD).text('Client: ', LEFT_MARGIN, doc.y, { continued: true });
+        doc.font(FONT_REGULAR).text(quotation.client_name);
+      }
+      if (quotation.brand_name) {
+        resetX();
+        doc.fontSize(10).font(FONT_BOLD).text('Brand: ', LEFT_MARGIN, doc.y, { continued: true });
+        doc.font(FONT_REGULAR).text(quotation.brand_name);
+      }
+      if (quotation.client_phone) {
+        resetX();
+        doc.fontSize(10).font(FONT_BOLD).text('Phone: ', LEFT_MARGIN, doc.y, { continued: true });
+        doc.font(FONT_REGULAR).text(quotation.client_phone);
+      }
+      doc.moveDown(0.5);
+    }
+
     // Tagline
     if (quotation.tagline) {
       resetX();
@@ -309,18 +329,25 @@ exports.generatePdf = async (req, res) => {
     }
 
     // ─── Bank Account Details ─────────────────────────────────────────────────
-    if (quotation.bank_name || quotation.account_number) {
+    // Use quotation-level bank details, fallback to company settings
+    const bankName = quotation.bank_name || company.bank_name || '';
+    const bankAccount = quotation.account_number || company.bank_account_no || '';
+    const bankIfsc = quotation.ifsc_code || company.bank_ifsc || '';
+    const bankBranch = quotation.branch || company.bank_branch || '';
+    const bankUpi = quotation.upi_id || company.upi_id || '';
+
+    if (bankName || bankAccount) {
       checkNewPage(60);
       resetX();
       doc.fontSize(12).font(FONT_BOLD).text('Bank Account Details', LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
       doc.moveDown(0.4);
 
       const bankDetails = [
-        quotation.bank_name && ['Bank', quotation.bank_name],
-        quotation.account_number && ['Account No', quotation.account_number],
-        quotation.ifsc_code && ['IFSC', quotation.ifsc_code],
-        quotation.branch && ['Branch', quotation.branch],
-        quotation.upi_id && ['UPI', quotation.upi_id],
+        bankName && ['Bank', bankName],
+        bankAccount && ['Account No', bankAccount],
+        bankIfsc && ['IFSC', bankIfsc],
+        bankBranch && ['Branch', bankBranch],
+        bankUpi && ['UPI', bankUpi],
       ].filter(Boolean);
 
       for (const [lbl, val] of bankDetails) {
