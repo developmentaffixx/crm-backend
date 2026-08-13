@@ -245,6 +245,15 @@ exports.create = async (req, res) => {
     );
 
     res.emitSocket('shoots:created', rows[0]);
+
+    // Log submit to history
+    try {
+      await db.query(
+        `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+        ['shoots', insertId, 'submit', null, req.user.id]
+      );
+    } catch (e) { /* table may not exist */ }
+
     return res.status(201).json(rows[0]);
   } catch (err) {
     console.error('Shoots create error:', err);
@@ -322,6 +331,13 @@ exports.update = async (req, res) => {
     // If rejected or approved (re-work), resubmit resets to pending_approval
     if (['rejected', 'approved'].includes(shoot.status) && !req.user.is_admin) {
       updates.status = 'pending_approval';
+      // Log resubmit
+      try {
+        await db.query(
+          `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+          ['shoots', req.params.id, 'resubmit', null, req.user.id]
+        );
+      } catch (e) { /* table may not exist */ }
     }
 
     const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
@@ -391,6 +407,13 @@ exports.approve = async (req, res) => {
         `UPDATE shoots SET status = 'rejected', approval_remarks = ? WHERE id = ?`,
         [remarks || 'Admin requested re-work. Please update and resubmit.', req.params.id]
       );
+      // Log history
+      try {
+        await db.query(
+          `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+          ['shoots', req.params.id, 'rework', remarks || 'Admin requested re-work', req.user.id]
+        );
+      } catch (e) { /* table may not exist */ }
       if (shoot.calendar_slot_id) {
         await db.query(
           `UPDATE content_calendar_shoots SET slot_status = 'rejected', rejection_reason = ? WHERE id = ?`,
@@ -408,6 +431,14 @@ exports.approve = async (req, res) => {
         `UPDATE shoots SET status = ?, approved_by = ?, approved_at = NOW(), approval_remarks = ? WHERE id = ?`,
         [newStatus, req.user.id, remarks || null, req.params.id]
       );
+
+      // Log approval history
+      try {
+        await db.query(
+          `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+          ['shoots', req.params.id, action === 'approve' ? 'approve' : 'reject', remarks || null, req.user.id]
+        );
+      } catch (e) { /* table may not exist */ }
 
       // ─── Sync to calendar slot ──────────────────────────────────────────────
       if (shoot.calendar_slot_id) {

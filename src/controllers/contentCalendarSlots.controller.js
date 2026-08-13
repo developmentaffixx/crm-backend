@@ -596,6 +596,50 @@ exports.completeSlot = async (req, res) => {
 
     await db.query(`UPDATE ${table} SET slot_status = 'completed' WHERE id = ?`, [item_id]);
 
+    // ─── Sync status to linked record in respective module ─────────────────────
+    try {
+      if (item_type === 'post') {
+        await db.query(
+          `UPDATE content_write_requests SET status = 'completed' WHERE calendar_slot_id = ? AND deleted = 0`,
+          [item_id]
+        );
+        // Log to history
+        const [linkedWrite] = await db.query('SELECT id FROM content_write_requests WHERE calendar_slot_id = ? AND deleted = 0 LIMIT 1', [item_id]);
+        if (linkedWrite.length > 0) {
+          await db.query(
+            `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+            ['content_write', linkedWrite[0].id, 'approve', 'Marked as completed', userId]
+          );
+        }
+      } else if (item_type === 'shoot') {
+        await db.query(
+          `UPDATE shoots SET status = 'completed' WHERE calendar_slot_id = ? AND deleted = 0`,
+          [item_id]
+        );
+        const [linkedShoot] = await db.query('SELECT id FROM shoots WHERE calendar_slot_id = ? AND deleted = 0 LIMIT 1', [item_id]);
+        if (linkedShoot.length > 0) {
+          await db.query(
+            `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+            ['shoots', linkedShoot[0].id, 'approve', 'Marked as completed', userId]
+          );
+        }
+      } else if (item_type === 'ad') {
+        await db.query(
+          `UPDATE ad_campaigns SET status = 'completed' WHERE linked_calendar_ad_id = ? AND deleted = 0`,
+          [item_id]
+        );
+        const [linkedAd] = await db.query('SELECT id FROM ad_campaigns WHERE linked_calendar_ad_id = ? AND deleted = 0 LIMIT 1', [item_id]);
+        if (linkedAd.length > 0) {
+          await db.query(
+            `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+            ['ads', linkedAd[0].id, 'approve', 'Marked as completed', userId]
+          );
+        }
+      }
+    } catch (syncErr) {
+      console.warn('Complete slot sync warning:', syncErr.message);
+    }
+
     // Notify assigner
     if (slot.assigned_by) {
       await createSmmNotification(null, {

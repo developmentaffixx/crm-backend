@@ -281,6 +281,15 @@ exports.create = async (req, res) => {
     );
 
     res.emitSocket('content-write:created', rows[0]);
+
+    // Log submit to history
+    try {
+      await db.query(
+        `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+        ['content_write', insertId, 'submit', null, req.user.id]
+      );
+    } catch (e) { /* table may not exist */ }
+
     return res.status(201).json(rows[0]);
   } catch (err) {
     console.error('Content write create error:', err);
@@ -328,6 +337,13 @@ exports.update = async (req, res) => {
     // If user resubmits after rejection OR re-works after approval, reset to pending
     if (['rejected', 'approved'].includes(request.status)) {
       updates.status = 'pending';
+      // Log resubmit to history
+      try {
+        await db.query(
+          `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+          ['content_write', req.params.id, 'resubmit', null, req.user.id]
+        );
+      } catch (e) { /* table may not exist */ }
     }
 
     const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
@@ -402,6 +418,14 @@ exports.approve = async (req, res) => {
       [newStatus, admin_remarks || null, req.user.id, req.params.id]
     );
 
+    // Log approval history
+    try {
+      await db.query(
+        `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+        ['content_write', req.params.id, action === 'approve' ? 'approve' : 'rework', admin_remarks || null, req.user.id]
+      );
+    } catch (e) { /* table may not exist yet */ }
+
     // ─── Sync to calendar slot ────────────────────────────────────────────────
     const request = rows[0];
     if (request.calendar_slot_id) {
@@ -452,6 +476,26 @@ exports.approve = async (req, res) => {
   } catch (err) {
     console.error('Content write approve error:', err);
     return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/content-write/:id/history — approval/rework history
+ */
+exports.getHistory = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT h.*, CONCAT(u.first_name, ' ', u.last_name) AS acted_by_name
+       FROM smm_approval_history h
+       LEFT JOIN users u ON u.id = h.acted_by
+       WHERE h.module = 'content_write' AND h.record_id = ?
+       ORDER BY h.created_at DESC`,
+      [req.params.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    // Table may not exist yet
+    return res.json([]);
   }
 };
 

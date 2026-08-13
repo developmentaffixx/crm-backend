@@ -43,4 +43,7 @@ router.put(
 // DELETE /api/content-write/:id   — soft delete
 router.delete('/:id', param('id').isInt(), contentWriteController.remove);
 
+// GET /api/content-write/:id/history — get approval history
+router.get('/:id/history', param('id').isInt(), contentWriteController.getHistory);
+
 module.exports = router;

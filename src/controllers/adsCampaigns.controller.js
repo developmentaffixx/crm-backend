@@ -201,6 +201,15 @@ exports.create = async (req, res) => {
       WHERE ac.id = ?`, [insertId]);
 
     res.emitSocket('ads:created', campaign[0]);
+
+    // Log submit to history
+    try {
+      await db.query(
+        `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+        ['ads', insertId, 'submit', null, req.user.id]
+      );
+    } catch (e) { /* table may not exist */ }
+
     return res.status(201).json(campaign[0]);
   } catch (err) {
     console.error('Ads create error:', err);
@@ -245,6 +254,19 @@ exports.update = async (req, res) => {
     // Use linked_calendar_ad_id as the slot reference
     const slotId = campaign.linked_calendar_ad_id;
     if (slotId && updates.status) {
+      // Log approval history
+      try {
+        const histAction = updates.status === 'approved' || updates.status === 'active' ? 'approve'
+          : updates.status === 'rejected' ? 'rework'
+          : updates.status === 'pending_approval' ? 'resubmit'
+          : null;
+        if (histAction) {
+          await db.query(
+            `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+            ['ads', req.params.id, histAction, updates.notes || null, req.user.id]
+          );
+        }
+      } catch (e) { /* table may not exist */ }
       if (updates.status === 'pending_approval') {
         await db.query(
           `UPDATE content_calendar_ads SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
