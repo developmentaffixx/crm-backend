@@ -36,7 +36,8 @@ exports.list = async (req, res) => {
               s.name AS service_name,
               CONCAT(u_creator.first_name, ' ', u_creator.last_name) AS created_by_name,
               CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name,
-              ccp.posting_date AS slot_posting_date
+              ccp.posting_date AS slot_posting_date,
+              COALESCE(cwr.content_type, ccp.format) AS content_type
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
        LEFT JOIN projects p ON p.id = cwr.project_id

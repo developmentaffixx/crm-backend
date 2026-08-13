@@ -185,13 +185,16 @@ exports.assignSlot = async (req, res) => {
 
     if (item_type === 'post') {
       linkedItemType = 'content_write';
-      // Get plan's client_id and project_id
+      // Get plan's client_id, project_id, and post's format/platform
       const [planInfo] = await conn.query(
-        `SELECT p.client_id, p.project_id FROM content_calendar_plans p
+        `SELECT p.client_id, p.project_id, cp.format, cp.platform AS post_platform
+         FROM content_calendar_plans p
          JOIN ${table} cp ON cp.plan_id = p.id WHERE cp.id = ?`, [slotId]
       );
       const clientId = planInfo[0]?.client_id || null;
       const projectId = planInfo[0]?.project_id || null;
+      const postFormat = planInfo[0]?.format || 'static_post';
+      const postPlatform = planInfo[0]?.post_platform || 'Instagram';
 
       // Generate content_id_code
       let clientCode = 'GEN';
@@ -212,8 +215,8 @@ exports.assignSlot = async (req, res) => {
 
       const [writeResult] = await conn.query(
         `INSERT INTO content_write_requests (content_id_code, client_brand_id, project_id, platform, content_type, status, created_by, calendar_slot_id)
-         VALUES (?, ?, ?, 'Instagram', 'static_post', 'pending', ?, ?)`,
-        [contentCode, clientId, projectId, assigned_to, slotId]
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        [contentCode, clientId, projectId, postPlatform, postFormat, assigned_to, slotId]
       );
       linkedItemId = writeResult.insertId;
 
