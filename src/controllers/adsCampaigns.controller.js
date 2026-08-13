@@ -99,7 +99,7 @@ exports.create = async (req, res) => {
     }
 
     const slotIdVal = linked_calendar_ad_id ? parseInt(linked_calendar_ad_id) : null;
-    const initStatus = status || (slotIdVal ? 'pending_approval' : 'draft');
+    const initStatus = status || 'pending_approval';
 
     // Generate campaign_id_code: ADS-CLIENT-###
     let clientCode = 'GEN';
