@@ -1,4 +1,5 @@
 const bcrypt = require('bcryptjs');
+const jwt    = require('jsonwebtoken');
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
 const { sendTemplateEmail } = require('../services/email.service');
@@ -853,6 +854,61 @@ exports.uploadAvatar = async (req, res) => {
     return res.json({ message: 'Avatar uploaded', url });
   } catch (err) {
     console.error('uploadAvatar error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── IMPERSONATE USER (Access Profile) ─────────────────────────────────────────
+
+/**
+ * POST /api/settings/users/:id/impersonate
+ * Generate a short-lived token for the target user so admin can access their profile.
+ * Admin-only. Cannot impersonate yourself.
+ */
+exports.impersonateUser = async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+
+  if (userId === req.user.id) {
+    return res.status(400).json({ message: 'You cannot impersonate yourself' });
+  }
+
+  try {
+    const [rows] = await db.query(
+      'SELECT id, email, is_admin, first_name, last_name, is_active, deleted FROM users WHERE id = ? AND deleted = 0',
+      [userId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const targetUser = rows[0];
+
+    if (!targetUser.is_active) {
+      return res.status(400).json({ message: 'Cannot impersonate an inactive user' });
+    }
+
+    // Generate a short-lived token (60 seconds — enough for the redirect)
+    const payload = {
+      id:         targetUser.id,
+      email:      targetUser.email,
+      is_admin:   targetUser.is_admin === 1,
+      first_name: targetUser.first_name,
+      last_name:  targetUser.last_name,
+      impersonated_by: req.user.id,
+    };
+
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '60s' });
+
+    // Audit log
+    await logAudit(db, req.user.id, 'user_impersonated', 'user', userId, {
+      target_email: targetUser.email,
+      target_name: `${targetUser.first_name} ${targetUser.last_name}`,
+    }, req.ip);
+
+    return res.json({ token });
+  } catch (err) {
+    console.error('impersonateUser error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

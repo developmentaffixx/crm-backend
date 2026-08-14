@@ -61,6 +61,7 @@ router.put('/users/:id/reset-password',   [
 ], ctrl.resetPassword);
 router.get('/users/:id/role-history',     [param('id').isInt({ min: 1 })], ctrl.getUserRoleHistory);
 router.post('/users/:id/upload-avatar',   [param('id').isInt({ min: 1 })], upload.single('avatar'), ctrl.uploadAvatar);
+router.post('/users/:id/impersonate',    [param('id').isInt({ min: 1 })], ctrl.impersonateUser);
 
 // ─── Task Settings ────────────────────────────────────────────────────────────
 router.get('/task-settings', ctrl.getTaskSettings);
