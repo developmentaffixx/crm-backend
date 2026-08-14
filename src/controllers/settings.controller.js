@@ -898,7 +898,8 @@ exports.impersonateUser = async (req, res) => {
       impersonated_by: req.user.id,
     };
 
-    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '60s' });
+    // Generate a longer-lived token for the impersonation session (2 hours)
+    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '2h' });
 
     // Audit log
     await logAudit(db, req.user.id, 'user_impersonated', 'user', userId, {
