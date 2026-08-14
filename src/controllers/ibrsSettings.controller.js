@@ -1,8 +1,7 @@
 const db = require('../config/db');
-const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LIST all IBRS templates (optionally filter by industry_id)
+// LIST all IBRS configs (optionally filter by industry_id)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
@@ -21,15 +20,22 @@ exports.list = async (req, res) => {
     query += ' ORDER BY t.industry_id, t.sort_order';
 
     const [rows] = await db.query(query, params);
-    return res.json(rows);
+
+    // Parse sections JSON
+    const parsed = rows.map(row => ({
+      ...row,
+      sections: row.sections ? (typeof row.sections === 'string' ? JSON.parse(row.sections) : row.sections) : [],
+    }));
+
+    return res.json(parsed);
   } catch (err) {
-    console.error('IBRS templates list error:', err);
+    console.error('IBRS list error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET single IBRS template
+// GET single IBRS config
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getOne = async (req, res) => {
   try {
@@ -40,43 +46,55 @@ exports.getOne = async (req, res) => {
        WHERE t.id = ?`,
       [req.params.id]
     );
-    if (rows.length === 0) return res.status(404).json({ message: 'IBRS template not found' });
-    return res.json(rows[0]);
+    if (rows.length === 0) return res.status(404).json({ message: 'IBRS config not found' });
+
+    const row = rows[0];
+    row.sections = row.sections ? (typeof row.sections === 'string' ? JSON.parse(row.sections) : row.sections) : [];
+    return res.json(row);
   } catch (err) {
-    console.error('IBRS templates getOne error:', err);
+    console.error('IBRS getOne error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CREATE IBRS template (now with file upload)
+// CREATE IBRS config (industry + sections)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
-  const { industry_id, name, sort_order } = req.body;
-  const file = req.file;
+  const { industry_id, name, sections, sort_order } = req.body;
 
   if (!industry_id) return res.status(400).json({ message: 'Industry is required' });
-  if (!file) return res.status(400).json({ message: 'Document file is required' });
-  if (!name || !name.trim()) return res.status(400).json({ message: 'Document name is required' });
+  if (!sections || !Array.isArray(sections) || sections.length === 0) {
+    return res.status(400).json({ message: 'At least one section is required' });
+  }
+
+  // Validate each section has title
+  for (const section of sections) {
+    if (!section.title || !section.title.trim()) {
+      return res.status(400).json({ message: 'Each section must have a title' });
+    }
+  }
 
   try {
-    // Upload to Cloudinary
-    const resourceType = file.mimetype.startsWith('image/') ? 'image' : 'raw';
-    const { url, public_id } = await uploadToCloudinary(
-      file.buffer,
-      'crm/ibrs-documents',
-      resourceType
+    // Check if an IBRS already exists for this industry
+    const [existing] = await db.query(
+      'SELECT id FROM ibrs_templates WHERE industry_id = ? AND is_active = 1',
+      [industry_id]
     );
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'An IBRS already exists for this industry. Edit the existing one instead.' });
+    }
 
-    // Determine file type
-    let fileType = 'other';
-    if (file.mimetype === 'application/pdf') fileType = 'pdf';
-    else if (file.mimetype.startsWith('image/')) fileType = 'image';
+    const sectionsJson = JSON.stringify(sections.map((s, idx) => ({
+      title: s.title.trim(),
+      description: (s.description || '').trim(),
+      order: idx,
+    })));
 
     const [result] = await db.query(
-      `INSERT INTO ibrs_templates (industry_id, name, content, content_type, file_url, cloudinary_id, file_type, sort_order)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [industry_id, name.trim(), '', 'document', url, public_id, fileType, sort_order || 0]
+      `INSERT INTO ibrs_templates (industry_id, name, sections, content, content_type, sort_order)
+       VALUES (?, ?, ?, '', 'sections', ?)`,
+      [industry_id, (name || '').trim() || null, sectionsJson, sort_order || 0]
     );
 
     const [created] = await db.query(
@@ -86,61 +104,61 @@ exports.create = async (req, res) => {
        WHERE t.id = ?`,
       [result.insertId]
     );
-    return res.status(201).json(created[0]);
+
+    const row = created[0];
+    row.sections = row.sections ? (typeof row.sections === 'string' ? JSON.parse(row.sections) : row.sections) : [];
+    return res.status(201).json(row);
   } catch (err) {
-    console.error('IBRS templates create error:', err);
+    console.error('IBRS create error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UPDATE IBRS template
+// UPDATE IBRS config
 // ─────────────────────────────────────────────────────────────────────────────
 exports.update = async (req, res) => {
   try {
     const [rows] = await db.query('SELECT * FROM ibrs_templates WHERE id = ?', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ message: 'IBRS template not found' });
+    if (rows.length === 0) return res.status(404).json({ message: 'IBRS config not found' });
 
-    const { industry_id, name, sort_order, is_active } = req.body;
+    const { industry_id, name, sections, sort_order, is_active } = req.body;
     const current = rows[0];
 
-    let fileUrl = current.file_url;
-    let cloudinaryId = current.cloudinary_id;
-    let fileType = current.file_type;
-
-    // If new file uploaded, replace old one
-    if (req.file) {
-      // Delete old file from Cloudinary
-      if (current.cloudinary_id) {
-        const oldResourceType = current.file_type === 'image' ? 'image' : 'raw';
-        await deleteFromCloudinary(current.cloudinary_id, oldResourceType);
+    let sectionsJson = current.sections;
+    if (sections && Array.isArray(sections)) {
+      for (const section of sections) {
+        if (!section.title || !section.title.trim()) {
+          return res.status(400).json({ message: 'Each section must have a title' });
+        }
       }
+      sectionsJson = JSON.stringify(sections.map((s, idx) => ({
+        title: s.title.trim(),
+        description: (s.description || '').trim(),
+        order: idx,
+      })));
+    }
 
-      const resourceType = req.file.mimetype.startsWith('image/') ? 'image' : 'raw';
-      const { url, public_id } = await uploadToCloudinary(
-        req.file.buffer,
-        'crm/ibrs-documents',
-        resourceType
+    // If changing industry, check no conflict
+    const newIndustryId = industry_id !== undefined ? industry_id : current.industry_id;
+    if (industry_id && industry_id !== current.industry_id) {
+      const [existing] = await db.query(
+        'SELECT id FROM ibrs_templates WHERE industry_id = ? AND is_active = 1 AND id != ?',
+        [industry_id, req.params.id]
       );
-
-      fileUrl = url;
-      cloudinaryId = public_id;
-      if (req.file.mimetype === 'application/pdf') fileType = 'pdf';
-      else if (req.file.mimetype.startsWith('image/')) fileType = 'image';
-      else fileType = 'other';
+      if (existing.length > 0) {
+        return res.status(400).json({ message: 'An IBRS already exists for that industry.' });
+      }
     }
 
     await db.query(
       `UPDATE ibrs_templates SET
-        industry_id = ?, name = ?, content_type = ?, file_url = ?, cloudinary_id = ?, file_type = ?, sort_order = ?, is_active = ?
+        industry_id = ?, name = ?, sections = ?, content_type = 'sections', sort_order = ?, is_active = ?
        WHERE id = ?`,
       [
-        industry_id !== undefined ? industry_id : current.industry_id,
-        name !== undefined ? name.trim() : current.name,
-        'document',
-        fileUrl,
-        cloudinaryId,
-        fileType,
+        newIndustryId,
+        name !== undefined ? (name || '').trim() || null : current.name,
+        sectionsJson,
         sort_order !== undefined ? sort_order : current.sort_order,
         is_active !== undefined ? (is_active ? 1 : 0) : current.is_active,
         req.params.id,
@@ -154,31 +172,28 @@ exports.update = async (req, res) => {
        WHERE t.id = ?`,
       [req.params.id]
     );
-    return res.json(updated[0]);
+
+    const row = updated[0];
+    row.sections = row.sections ? (typeof row.sections === 'string' ? JSON.parse(row.sections) : row.sections) : [];
+    return res.json(row);
   } catch (err) {
-    console.error('IBRS templates update error:', err);
+    console.error('IBRS update error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DELETE (soft) IBRS template
+// DELETE (soft) IBRS config
 // ─────────────────────────────────────────────────────────────────────────────
 exports.remove = async (req, res) => {
   try {
     const [rows] = await db.query('SELECT * FROM ibrs_templates WHERE id = ?', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ message: 'IBRS template not found' });
-
-    // Delete from Cloudinary
-    if (rows[0].cloudinary_id) {
-      const resourceType = rows[0].file_type === 'image' ? 'image' : 'raw';
-      await deleteFromCloudinary(rows[0].cloudinary_id, resourceType);
-    }
+    if (rows.length === 0) return res.status(404).json({ message: 'IBRS config not found' });
 
     await db.query('UPDATE ibrs_templates SET is_active = 0 WHERE id = ?', [req.params.id]);
-    return res.json({ message: 'IBRS template deleted' });
+    return res.json({ message: 'IBRS config deleted' });
   } catch (err) {
-    console.error('IBRS templates delete error:', err);
+    console.error('IBRS delete error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
@@ -203,7 +218,7 @@ exports.getByProject = async (req, res) => {
 
     const industry = projectRows[0].industry;
     if (!industry) {
-      return res.json({ industry: null, templates: [] });
+      return res.json({ industry: null, sections: [] });
     }
 
     // Find matching industry in pitch_deck_industries by name
@@ -213,22 +228,35 @@ exports.getByProject = async (req, res) => {
     );
 
     if (industryRows.length === 0) {
-      return res.json({ industry: industry, industry_id: null, templates: [] });
+      return res.json({ industry: industry, industry_id: null, sections: [] });
     }
 
     const industryId = industryRows[0].id;
 
-    // Get IBRS templates for this industry
+    // Get IBRS config for this industry
     const [templates] = await db.query(
-      'SELECT * FROM ibrs_templates WHERE industry_id = ? AND is_active = 1 ORDER BY sort_order',
+      'SELECT * FROM ibrs_templates WHERE industry_id = ? AND is_active = 1 ORDER BY sort_order LIMIT 1',
       [industryId]
     );
+
+    if (templates.length === 0) {
+      return res.json({
+        industry: industryRows[0].name,
+        industry_id: industryId,
+        industry_icon: industryRows[0].icon,
+        sections: [],
+      });
+    }
+
+    const ibrs = templates[0];
+    const sections = ibrs.sections ? (typeof ibrs.sections === 'string' ? JSON.parse(ibrs.sections) : ibrs.sections) : [];
 
     return res.json({
       industry: industryRows[0].name,
       industry_id: industryId,
       industry_icon: industryRows[0].icon,
-      templates,
+      ibrs_name: ibrs.name,
+      sections,
     });
   } catch (err) {
     console.error('IBRS getByProject error:', err);
