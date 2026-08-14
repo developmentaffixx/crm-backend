@@ -127,10 +127,12 @@ exports.getOne = async (req, res) => {
               l.state AS lead_state,
               l.zip_code AS lead_zip,
               l.country AS lead_country,
-              CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+              CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
+              oa.gst_number AS lead_gstin
        FROM invoices i
        LEFT JOIN leads l ON l.id = i.lead_id
        LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN client_onboarding_a oa ON oa.client_id = i.lead_id
        WHERE i.id = ? AND i.deleted = 0`,
       [req.params.id]
     );

@@ -161,11 +161,11 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
     <!-- Company Info -->
     <div style="text-align:center;margin-bottom:24px;">
       <p style="font-size:14px;font-weight:600;color:#4a4340;margin:0;">${comp.company_name || 'Your Business'}</p>
+      ${(comp.gst_number || comp.gstin) ? `<p style="font-size:12px;font-weight:600;color:#4a4340;margin-top:4px;">GSTIN: ${comp.gst_number || comp.gstin}</p>` : ''}
       <div style="font-size:12px;color:#9a8e82;font-weight:400;margin-top:4px;line-height:1.6;">
         ${companyContact ? `<p style="margin:0;">${companyContact}</p>` : ''}
         ${companyAddr ? `<p style="margin:0;">${companyAddr}</p>` : ''}
       </div>
-      ${comp.gstin ? `<p style="font-size:12px;font-weight:600;color:#4a4340;margin-top:4px;">GSTIN: ${comp.gstin}</p>` : ''}
     </div>
 
     <!-- Issued To + Invoice Meta -->
@@ -174,6 +174,7 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
       <div style="flex:1;padding-right:16px;border-right:1px solid #e0d9d0;">
         <p style="font-size:11px;text-transform:uppercase;letter-spacing:2px;font-weight:600;color:#b8a994;margin-bottom:8px;">Issued To:</p>
         <p style="font-size:14px;font-weight:600;color:#4a4340;margin:0;">${invoice.lead_business || '—'}</p>
+        ${invoice.lead_gstin ? `<p style="font-size:12px;font-weight:600;color:#4a4340;margin-top:4px;">GSTIN: ${invoice.lead_gstin}</p>` : ''}
         <div style="font-size:12px;color:#6b5e50;margin-top:4px;line-height:1.6;">
           ${invoice.lead_name ? `<p style="margin:0;">${invoice.lead_name}</p>` : ''}
           ${invoice.lead_phone ? `<p style="margin:0;">${invoice.lead_phone}</p>` : ''}
