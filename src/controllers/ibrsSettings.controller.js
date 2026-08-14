@@ -92,8 +92,8 @@ exports.create = async (req, res) => {
     })));
 
     const [result] = await db.query(
-      `INSERT INTO ibrs_templates (industry_id, name, sections, content, content_type, sort_order)
-       VALUES (?, ?, ?, '', 'sections', ?)`,
+      `INSERT INTO ibrs_templates (industry_id, name, sections, content_type, sort_order)
+       VALUES (?, ?, ?, 'sections', ?)`,
       [industry_id, (name || '').trim() || null, sectionsJson, sort_order || 0]
     );
 
