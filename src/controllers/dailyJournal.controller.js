@@ -51,6 +51,9 @@ exports.list = async (req, res) => {
 
     // Parse JSON fields
     rows.forEach(row => {
+      if (row.work_categories && typeof row.work_categories === 'string') {
+        row.work_categories = JSON.parse(row.work_categories);
+      }
       if (row.activities_completed && typeof row.activities_completed === 'string') {
         row.activities_completed = JSON.parse(row.activities_completed);
       }
@@ -95,6 +98,9 @@ exports.getOne = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Entry not found' });
 
     const entry = rows[0];
+    if (entry.work_categories && typeof entry.work_categories === 'string') {
+      entry.work_categories = JSON.parse(entry.work_categories);
+    }
     if (entry.activities_completed && typeof entry.activities_completed === 'string') {
       entry.activities_completed = JSON.parse(entry.activities_completed);
     }
@@ -120,13 +126,11 @@ exports.create = async (req, res) => {
     const {
       project_id,
       journal_date,
-      activities_completed,
-      key_activities,
+      work_categories,
       client_communication,
       communication_summary,
       issues_delays,
       issues_details,
-      approvals_pending,
       leads_opportunities,
       tomorrow_priorities,
       escalation_required,
@@ -149,22 +153,20 @@ exports.create = async (req, res) => {
 
     const [result] = await db.query(
       `INSERT INTO smm_daily_journal
-        (project_id, journal_date, submitted_by, activities_completed, key_activities,
+        (project_id, journal_date, submitted_by, work_categories,
          client_communication, communication_summary, issues_delays, issues_details,
-         approvals_pending, leads_opportunities, tomorrow_priorities,
+         leads_opportunities, tomorrow_priorities,
          escalation_required, escalation_details, health_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         project_id,
         journal_date,
         req.user.id,
-        activities_completed ? JSON.stringify(activities_completed) : null,
-        key_activities || null,
+        work_categories ? JSON.stringify(work_categories) : null,
         client_communication || 'no',
         communication_summary || null,
         issues_delays ? JSON.stringify(issues_delays) : null,
         issues_details || null,
-        approvals_pending || null,
         leads_opportunities || null,
         tomorrow_priorities ? JSON.stringify(tomorrow_priorities) : null,
         escalation_required || 'no',
@@ -199,13 +201,11 @@ exports.update = async (req, res) => {
     }
 
     const {
-      activities_completed,
-      key_activities,
+      work_categories,
       client_communication,
       communication_summary,
       issues_delays,
       issues_details,
-      approvals_pending,
       leads_opportunities,
       tomorrow_priorities,
       escalation_required,
@@ -215,13 +215,11 @@ exports.update = async (req, res) => {
 
     await db.query(
       `UPDATE smm_daily_journal SET
-        activities_completed = ?,
-        key_activities = ?,
+        work_categories = ?,
         client_communication = ?,
         communication_summary = ?,
         issues_delays = ?,
         issues_details = ?,
-        approvals_pending = ?,
         leads_opportunities = ?,
         tomorrow_priorities = ?,
         escalation_required = ?,
@@ -229,13 +227,11 @@ exports.update = async (req, res) => {
         health_status = ?
        WHERE id = ?`,
       [
-        activities_completed ? JSON.stringify(activities_completed) : null,
-        key_activities || null,
+        work_categories ? JSON.stringify(work_categories) : null,
         client_communication || 'no',
         communication_summary || null,
         issues_delays ? JSON.stringify(issues_delays) : null,
         issues_details || null,
-        approvals_pending || null,
         leads_opportunities || null,
         tomorrow_priorities ? JSON.stringify(tomorrow_priorities) : null,
         escalation_required || 'no',
