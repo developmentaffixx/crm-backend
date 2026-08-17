@@ -5,8 +5,8 @@
 CREATE TABLE IF NOT EXISTS `smm_documents` (
   `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT,
   `title` varchar(255) NOT NULL,
-  `sections` json DEFAULT NULL COMMENT 'Array of {title, description} like IBRS sections',
-  `page_targets` json NOT NULL COMMENT 'Array of {page, visible} objects. page = content_writing|content_calendar|shoots|ads|daily_journal|report_centre|social_overview',
+  `sections` longtext DEFAULT NULL COMMENT 'JSON array of {title, description} like IBRS sections',
+  `page_targets` longtext NOT NULL COMMENT 'JSON array of {page, visible} objects',
   `sort_order` int NOT NULL DEFAULT 0,
   `is_active` tinyint(1) NOT NULL DEFAULT 1,
   `created_by` int(10) UNSIGNED DEFAULT NULL,

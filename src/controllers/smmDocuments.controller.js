@@ -11,17 +11,24 @@ const VALID_PAGE_TARGETS = [
   'report_centre',
 ];
 
-// Helper to parse JSON fields
+// Helper to parse JSON fields safely
 function parseRow(row) {
-  return {
-    ...row,
-    sections: row.sections
+  let sections = [];
+  let page_targets = [];
+
+  try {
+    sections = row.sections
       ? (typeof row.sections === 'string' ? JSON.parse(row.sections) : row.sections)
-      : [],
-    page_targets: row.page_targets
+      : [];
+  } catch (e) { sections = []; }
+
+  try {
+    page_targets = row.page_targets
       ? (typeof row.page_targets === 'string' ? JSON.parse(row.page_targets) : row.page_targets)
-      : [],
-  };
+      : [];
+  } catch (e) { page_targets = []; }
+
+  return { ...row, sections, page_targets };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,8 +46,8 @@ exports.list = async (req, res) => {
 
     return res.json(rows.map(parseRow));
   } catch (err) {
-    console.error('SMM Documents list error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('SMM Documents list error:', err.message, err.sqlMessage);
+    return res.status(500).json({ message: err.sqlMessage || err.message || 'Server error' });
   }
 };
 
@@ -54,7 +61,7 @@ exports.getByPage = async (req, res) => {
       return res.status(400).json({ message: 'Invalid page target' });
     }
 
-    // Get all active documents
+    // Get all active documents — filter in JS to avoid JSON_CONTAINS compatibility issues
     const [rows] = await db.query(
       `SELECT id, title, sections, page_targets
        FROM smm_documents
@@ -78,8 +85,8 @@ exports.getByPage = async (req, res) => {
 
     return res.json(results);
   } catch (err) {
-    console.error('SMM Documents getByPage error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('SMM Documents getByPage error:', err.message, err.sqlMessage);
+    return res.status(500).json({ message: err.sqlMessage || err.message || 'Server error' });
   }
 };
 
@@ -96,8 +103,8 @@ exports.getOne = async (req, res) => {
 
     return res.json(parseRow(rows[0]));
   } catch (err) {
-    console.error('SMM Documents getOne error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('SMM Documents getOne error:', err.message, err.sqlMessage);
+    return res.status(500).json({ message: err.sqlMessage || err.message || 'Server error' });
   }
 };
 
@@ -150,8 +157,8 @@ exports.create = async (req, res) => {
     const [created] = await db.query('SELECT * FROM smm_documents WHERE id = ?', [result.insertId]);
     return res.status(201).json(parseRow(created[0]));
   } catch (err) {
-    console.error('SMM Documents create error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('SMM Documents create error:', err.message, err.sqlMessage);
+    return res.status(500).json({ message: err.sqlMessage || err.message || 'Server error' });
   }
 };
 
@@ -218,8 +225,8 @@ exports.update = async (req, res) => {
     const [updated] = await db.query('SELECT * FROM smm_documents WHERE id = ?', [req.params.id]);
     return res.json(parseRow(updated[0]));
   } catch (err) {
-    console.error('SMM Documents update error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('SMM Documents update error:', err.message, err.sqlMessage);
+    return res.status(500).json({ message: err.sqlMessage || err.message || 'Server error' });
   }
 };
 
@@ -250,8 +257,8 @@ exports.togglePageVisibility = async (req, res) => {
 
     return res.json({ id: doc.id, page, visible: !!visible });
   } catch (err) {
-    console.error('SMM Documents togglePage error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('SMM Documents togglePage error:', err.message, err.sqlMessage);
+    return res.status(500).json({ message: err.sqlMessage || err.message || 'Server error' });
   }
 };
 
@@ -266,7 +273,7 @@ exports.remove = async (req, res) => {
     await db.query('UPDATE smm_documents SET is_active = 0 WHERE id = ?', [req.params.id]);
     return res.json({ message: 'Document deleted' });
   } catch (err) {
-    console.error('SMM Documents delete error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('SMM Documents delete error:', err.message, err.sqlMessage);
+    return res.status(500).json({ message: err.sqlMessage || err.message || 'Server error' });
   }
 };
