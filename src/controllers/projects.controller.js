@@ -65,7 +65,7 @@ exports.list = async (req, res) => {
               s.name AS service_name,
               CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
               (SELECT COUNT(*) FROM project_members pm2 WHERE pm2.project_id = p.id) AS member_count,
-              (SELECT COUNT(*) FROM project_services ps2 WHERE ps2.project_id = p.id) AS service_count
+              (SELECT COUNT(*) FROM project_services ps2 WHERE ps2.project_id = p.id AND ps2.status = 'active') AS service_count
        FROM projects p
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN services s ON s.id = p.service_id
