@@ -27,9 +27,6 @@ exports.updateCompanySettings = async (req, res) => {
       'social_linkedin', 'social_instagram', 'social_twitter', 'social_facebook',
       'bank_name', 'bank_branch', 'bank_account_no', 'bank_ifsc', 'bank_swift', 'bank_account_type',
       'upi_id',
-      'content_protection_enabled', 'cp_screenshot_block', 'cp_screen_record_block',
-      'cp_watermark_enabled', 'cp_watermark_opacity', 'cp_sensitive_data_hover',
-      'cp_right_click_block', 'cp_devtools_block',
     ];
 
     const updated = {};
