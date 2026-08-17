@@ -11,6 +11,19 @@ const VALID_PAGE_TARGETS = [
   'report_centre',
 ];
 
+// Helper to parse JSON fields
+function parseRow(row) {
+  return {
+    ...row,
+    sections: row.sections
+      ? (typeof row.sections === 'string' ? JSON.parse(row.sections) : row.sections)
+      : [],
+    page_targets: row.page_targets
+      ? (typeof row.page_targets === 'string' ? JSON.parse(row.page_targets) : row.page_targets)
+      : [],
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // LIST all SMM documents (admin settings view)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -24,14 +37,7 @@ exports.list = async (req, res) => {
        ORDER BY d.sort_order, d.created_at DESC`
     );
 
-    const parsed = rows.map(row => ({
-      ...row,
-      page_targets: row.page_targets
-        ? (typeof row.page_targets === 'string' ? JSON.parse(row.page_targets) : row.page_targets)
-        : [],
-    }));
-
-    return res.json(parsed);
+    return res.json(rows.map(parseRow));
   } catch (err) {
     console.error('SMM Documents list error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -39,7 +45,7 @@ exports.list = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET documents for a specific page (used by frontend pages)
+// GET documents for a specific page (only where page is visible=true)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getByPage = async (req, res) => {
   try {
@@ -48,16 +54,29 @@ exports.getByPage = async (req, res) => {
       return res.status(400).json({ message: 'Invalid page target' });
     }
 
+    // Get all active documents
     const [rows] = await db.query(
-      `SELECT id, title, content
+      `SELECT id, title, sections, page_targets
        FROM smm_documents
-       WHERE is_active = 1 AND is_visible = 1
-         AND JSON_CONTAINS(page_targets, ?)
-       ORDER BY sort_order, created_at DESC`,
-      [JSON.stringify(page)]
+       WHERE is_active = 1
+       ORDER BY sort_order, created_at DESC`
     );
 
-    return res.json(rows);
+    // Filter: only documents that have this page with visible = true
+    const results = [];
+    for (const row of rows) {
+      const parsed = parseRow(row);
+      const pageTarget = parsed.page_targets.find(pt => pt.page === page && pt.visible === true);
+      if (pageTarget) {
+        results.push({
+          id: parsed.id,
+          title: parsed.title,
+          sections: parsed.sections,
+        });
+      }
+    }
+
+    return res.json(results);
   } catch (err) {
     console.error('SMM Documents getByPage error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -75,12 +94,7 @@ exports.getOne = async (req, res) => {
     );
     if (rows.length === 0) return res.status(404).json({ message: 'Document not found' });
 
-    const row = rows[0];
-    row.page_targets = row.page_targets
-      ? (typeof row.page_targets === 'string' ? JSON.parse(row.page_targets) : row.page_targets)
-      : [];
-
-    return res.json(row);
+    return res.json(parseRow(rows[0]));
   } catch (err) {
     console.error('SMM Documents getOne error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -91,40 +105,50 @@ exports.getOne = async (req, res) => {
 // CREATE document (admin only)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
-  const { title, content, page_targets, is_visible, sort_order } = req.body;
+  const { title, sections, page_targets, sort_order } = req.body;
 
   if (!title || !title.trim()) {
     return res.status(400).json({ message: 'Title is required' });
+  }
+  if (!sections || !Array.isArray(sections) || sections.length === 0) {
+    return res.status(400).json({ message: 'At least one section is required' });
+  }
+  for (const section of sections) {
+    if (!section.title || !section.title.trim()) {
+      return res.status(400).json({ message: 'Each section must have a title' });
+    }
   }
   if (!page_targets || !Array.isArray(page_targets) || page_targets.length === 0) {
     return res.status(400).json({ message: 'At least one page target is required' });
   }
 
   // Validate page targets
-  const invalidTargets = page_targets.filter(t => !VALID_PAGE_TARGETS.includes(t));
-  if (invalidTargets.length > 0) {
-    return res.status(400).json({ message: `Invalid page targets: ${invalidTargets.join(', ')}` });
+  for (const pt of page_targets) {
+    if (!VALID_PAGE_TARGETS.includes(pt.page)) {
+      return res.status(400).json({ message: `Invalid page target: ${pt.page}` });
+    }
   }
 
   try {
+    const sectionsJson = JSON.stringify(sections.map((s, idx) => ({
+      title: s.title.trim(),
+      description: (s.description || '').trim(),
+      order: idx,
+    })));
+
+    const pageTargetsJson = JSON.stringify(page_targets.map(pt => ({
+      page: pt.page,
+      visible: pt.visible !== undefined ? !!pt.visible : true,
+    })));
+
     const [result] = await db.query(
-      `INSERT INTO smm_documents (title, content, page_targets, is_visible, sort_order, created_by)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        title.trim(),
-        content || null,
-        JSON.stringify(page_targets),
-        is_visible !== undefined ? (is_visible ? 1 : 0) : 1,
-        sort_order || 0,
-        req.user.id,
-      ]
+      `INSERT INTO smm_documents (title, sections, page_targets, sort_order, created_by)
+       VALUES (?, ?, ?, ?, ?)`,
+      [title.trim(), sectionsJson, pageTargetsJson, sort_order || 0, req.user.id]
     );
 
     const [created] = await db.query('SELECT * FROM smm_documents WHERE id = ?', [result.insertId]);
-    const row = created[0];
-    row.page_targets = typeof row.page_targets === 'string' ? JSON.parse(row.page_targets) : row.page_targets;
-
-    return res.status(201).json(row);
+    return res.status(201).json(parseRow(created[0]));
   } catch (err) {
     console.error('SMM Documents create error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -139,39 +163,60 @@ exports.update = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM smm_documents WHERE id = ? AND is_active = 1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Document not found' });
 
-    const { title, content, page_targets, is_visible, sort_order } = req.body;
+    const { title, sections, page_targets, sort_order } = req.body;
+    const current = parseRow(rows[0]);
 
-    if (page_targets && Array.isArray(page_targets)) {
-      const invalidTargets = page_targets.filter(t => !VALID_PAGE_TARGETS.includes(t));
-      if (invalidTargets.length > 0) {
-        return res.status(400).json({ message: `Invalid page targets: ${invalidTargets.join(', ')}` });
-      }
-      if (page_targets.length === 0) {
-        return res.status(400).json({ message: 'At least one page target is required' });
+    // Validate sections if provided
+    if (sections && Array.isArray(sections)) {
+      for (const section of sections) {
+        if (!section.title || !section.title.trim()) {
+          return res.status(400).json({ message: 'Each section must have a title' });
+        }
       }
     }
 
-    const current = rows[0];
+    // Validate page targets if provided
+    if (page_targets && Array.isArray(page_targets)) {
+      if (page_targets.length === 0) {
+        return res.status(400).json({ message: 'At least one page target is required' });
+      }
+      for (const pt of page_targets) {
+        if (!VALID_PAGE_TARGETS.includes(pt.page)) {
+          return res.status(400).json({ message: `Invalid page target: ${pt.page}` });
+        }
+      }
+    }
+
+    const newSections = sections
+      ? JSON.stringify(sections.map((s, idx) => ({
+          title: s.title.trim(),
+          description: (s.description || '').trim(),
+          order: idx,
+        })))
+      : JSON.stringify(current.sections);
+
+    const newPageTargets = page_targets
+      ? JSON.stringify(page_targets.map(pt => ({
+          page: pt.page,
+          visible: pt.visible !== undefined ? !!pt.visible : true,
+        })))
+      : JSON.stringify(current.page_targets);
 
     await db.query(
       `UPDATE smm_documents SET
-        title = ?, content = ?, page_targets = ?, is_visible = ?, sort_order = ?
+        title = ?, sections = ?, page_targets = ?, sort_order = ?
        WHERE id = ?`,
       [
         title !== undefined ? title.trim() : current.title,
-        content !== undefined ? content : current.content,
-        page_targets ? JSON.stringify(page_targets) : current.page_targets,
-        is_visible !== undefined ? (is_visible ? 1 : 0) : current.is_visible,
+        newSections,
+        newPageTargets,
         sort_order !== undefined ? sort_order : current.sort_order,
         req.params.id,
       ]
     );
 
     const [updated] = await db.query('SELECT * FROM smm_documents WHERE id = ?', [req.params.id]);
-    const row = updated[0];
-    row.page_targets = typeof row.page_targets === 'string' ? JSON.parse(row.page_targets) : row.page_targets;
-
-    return res.json(row);
+    return res.json(parseRow(updated[0]));
   } catch (err) {
     console.error('SMM Documents update error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -179,19 +224,33 @@ exports.update = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TOGGLE visibility (admin only)
+// TOGGLE page visibility for a document (admin only)
+// PATCH /api/smm-documents/:id/toggle-page
+// Body: { page: "content_writing", visible: true/false }
 // ─────────────────────────────────────────────────────────────────────────────
-exports.toggleVisibility = async (req, res) => {
+exports.togglePageVisibility = async (req, res) => {
   try {
     const [rows] = await db.query('SELECT * FROM smm_documents WHERE id = ? AND is_active = 1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Document not found' });
 
-    const newVisible = rows[0].is_visible ? 0 : 1;
-    await db.query('UPDATE smm_documents SET is_visible = ? WHERE id = ?', [newVisible, req.params.id]);
+    const { page, visible } = req.body;
+    if (!page || !VALID_PAGE_TARGETS.includes(page)) {
+      return res.status(400).json({ message: 'Invalid page target' });
+    }
 
-    return res.json({ id: rows[0].id, is_visible: !!newVisible });
+    const doc = parseRow(rows[0]);
+    const pageTargets = doc.page_targets.map(pt =>
+      pt.page === page ? { ...pt, visible: !!visible } : pt
+    );
+
+    await db.query(
+      'UPDATE smm_documents SET page_targets = ? WHERE id = ?',
+      [JSON.stringify(pageTargets), req.params.id]
+    );
+
+    return res.json({ id: doc.id, page, visible: !!visible });
   } catch (err) {
-    console.error('SMM Documents toggle error:', err);
+    console.error('SMM Documents togglePage error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

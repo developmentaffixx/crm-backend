@@ -21,8 +21,8 @@ router.post('/', requireAdmin, controller.create);
 // PUT /api/smm-documents/:id — update (admin only)
 router.put('/:id', requireAdmin, param('id').isInt(), controller.update);
 
-// PATCH /api/smm-documents/:id/toggle — toggle visibility (admin only)
-router.patch('/:id/toggle', requireAdmin, param('id').isInt(), controller.toggleVisibility);
+// PATCH /api/smm-documents/:id/toggle-page — toggle page visibility (admin only)
+router.patch('/:id/toggle-page', requireAdmin, param('id').isInt(), controller.togglePageVisibility);
 
 // DELETE /api/smm-documents/:id — soft delete (admin only)
 router.delete('/:id', requireAdmin, param('id').isInt(), controller.remove);
