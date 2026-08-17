@@ -73,4 +73,31 @@ router.post(
   controller.createNewCycle
 );
 
+// ─── Service Members ─────────────────────────────────────────────────────────
+
+// GET /api/projects/:projectId/services/:serviceId/members — list members for a service
+router.get(
+  '/:projectId/services/:serviceId/members',
+  [param('projectId').isInt(), param('serviceId').isInt()],
+  controller.listServiceMembers
+);
+
+// POST /api/projects/:projectId/services/:serviceId/members — add member to service
+router.post(
+  '/:projectId/services/:serviceId/members',
+  [
+    param('projectId').isInt(),
+    param('serviceId').isInt(),
+    body('user_id').isInt().withMessage('user_id is required'),
+  ],
+  controller.addServiceMember
+);
+
+// DELETE /api/projects/:projectId/services/:serviceId/members/:userId — remove member from service
+router.delete(
+  '/:projectId/services/:serviceId/members/:userId',
+  [param('projectId').isInt(), param('serviceId').isInt(), param('userId').isInt()],
+  controller.removeServiceMember
+);
+
 module.exports = router;

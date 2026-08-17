@@ -51,6 +51,15 @@ exports.list = async (req, res) => {
   try {
     const projectId = req.params.projectId;
 
+    let accessFilter = '';
+    const params = [projectId];
+
+    // Non-admins: only see services they are assigned to
+    if (!req.user.is_admin) {
+      accessFilter = ' AND EXISTS (SELECT 1 FROM project_service_members psm WHERE psm.project_service_id = ps.id AND psm.user_id = ?)';
+      params.push(req.user.id);
+    }
+
     const [rows] = await db.query(
       `SELECT ps.*,
               s.name AS service_name,
@@ -59,13 +68,14 @@ exports.list = async (req, res) => {
               CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
               (SELECT COUNT(*) FROM service_cycles sc WHERE sc.project_service_id = ps.id) AS cycle_count,
               (SELECT sc.title FROM service_cycles sc WHERE sc.project_service_id = ps.id ORDER BY sc.cycle_number DESC LIMIT 1) AS latest_cycle_number,
-              (SELECT sc.status FROM service_cycles sc WHERE sc.project_service_id = ps.id ORDER BY sc.cycle_number DESC LIMIT 1) AS latest_cycle_status
+              (SELECT sc.status FROM service_cycles sc WHERE sc.project_service_id = ps.id ORDER BY sc.cycle_number DESC LIMIT 1) AS latest_cycle_status,
+              (SELECT COUNT(*) FROM project_service_members psm2 WHERE psm2.project_service_id = ps.id) AS member_count
        FROM project_services ps
        JOIN services s ON s.id = ps.service_id
        LEFT JOIN users u ON u.id = ps.created_by
-       WHERE ps.project_id = ?
+       WHERE ps.project_id = ?${accessFilter}
        ORDER BY ps.created_at ASC`,
-      [projectId]
+      params
     );
 
     return res.json(rows);
@@ -500,5 +510,120 @@ exports.createNewCycle = async (req, res) => {
   } catch (err) {
     console.error('Create new cycle error:', err);
     return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SERVICE MEMBERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/projects/:projectId/services/:serviceId/members
+exports.listServiceMembers = async (req, res) => {
+  try {
+    const { projectId, serviceId } = req.params;
+
+    // Verify service exists
+    const [service] = await db.query(
+      'SELECT id FROM project_services WHERE id = ? AND project_id = ?',
+      [serviceId, projectId]
+    );
+    if (service.length === 0) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    const [members] = await db.query(
+      `SELECT psm.id AS membership_id, u.id, u.first_name, u.last_name, u.email, u.is_active, u.avatar_url
+       FROM project_service_members psm
+       JOIN users u ON u.id = psm.user_id
+       WHERE psm.project_service_id = ?
+       ORDER BY u.first_name, u.last_name`,
+      [serviceId]
+    );
+
+    return res.json(members);
+  } catch (err) {
+    console.error('List service members error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// POST /api/projects/:projectId/services/:serviceId/members
+exports.addServiceMember = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const { projectId, serviceId } = req.params;
+    const { user_id } = req.body;
+
+    // Only admins can manage service members
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: 'Only admins can manage service members' });
+    }
+
+    // Verify service exists
+    const [service] = await db.query(
+      'SELECT id FROM project_services WHERE id = ? AND project_id = ?',
+      [serviceId, projectId]
+    );
+    if (service.length === 0) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    // Check if already a member
+    const [existing] = await db.query(
+      'SELECT id FROM project_service_members WHERE project_service_id = ? AND user_id = ?',
+      [serviceId, user_id]
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({ message: 'User is already a member of this service' });
+    }
+
+    await db.query(
+      'INSERT INTO project_service_members (project_service_id, user_id) VALUES (?, ?)',
+      [serviceId, user_id]
+    );
+
+    // Also ensure user is in project_members (for the left-side summary)
+    await db.query(
+      'INSERT IGNORE INTO project_members (project_id, user_id) VALUES (?, ?)',
+      [projectId, user_id]
+    );
+
+    return res.status(201).json({ message: 'Member added to service' });
+  } catch (err) {
+    console.error('Add service member error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// DELETE /api/projects/:projectId/services/:serviceId/members/:userId
+exports.removeServiceMember = async (req, res) => {
+  try {
+    const { projectId, serviceId, userId } = req.params;
+
+    // Only admins can manage service members
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: 'Only admins can manage service members' });
+    }
+
+    // Verify service exists
+    const [service] = await db.query(
+      'SELECT id FROM project_services WHERE id = ? AND project_id = ?',
+      [serviceId, projectId]
+    );
+    if (service.length === 0) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    await db.query(
+      'DELETE FROM project_service_members WHERE project_service_id = ? AND user_id = ?',
+      [serviceId, userId]
+    );
+
+    return res.json({ message: 'Member removed from service' });
+  } catch (err) {
+    console.error('Remove service member error:', err);
+    return res.status(500).json({ message: 'Server error' });
   }
 };
