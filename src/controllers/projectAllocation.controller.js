@@ -26,6 +26,9 @@ exports.get = async (req, res) => {
     if (sheet.platforms_managed && typeof sheet.platforms_managed === 'string') {
       sheet.platforms_managed = JSON.parse(sheet.platforms_managed);
     }
+    if (sheet.shoot_sessions && typeof sheet.shoot_sessions === 'string') {
+      sheet.shoot_sessions = JSON.parse(sheet.shoot_sessions);
+    }
     if (sheet.team_allocation && typeof sheet.team_allocation === 'string') {
       sheet.team_allocation = JSON.parse(sheet.team_allocation);
     }
@@ -86,11 +89,7 @@ exports.save = async (req, res) => {
       commitment_insight_report,
       commitment_strategy_call,
       shoot_sessions,
-      shoot_hours,
-      community_dm_monitoring,
-      community_comment_monitoring,
-      community_review_monitoring,
-      community_lead_escalation,
+      community_management_frequency,
       ads_pre_ad_report,
       ads_post_ad_report,
       team_allocation,
@@ -110,12 +109,8 @@ exports.save = async (req, res) => {
       commitment_content_calendar: commitment_content_calendar || null,
       commitment_insight_report: commitment_insight_report || null,
       commitment_strategy_call: commitment_strategy_call || null,
-      shoot_sessions: shoot_sessions || null,
-      shoot_hours: shoot_hours || null,
-      community_dm_monitoring: community_dm_monitoring || 'Daily',
-      community_comment_monitoring: community_comment_monitoring || 'Daily',
-      community_review_monitoring: community_review_monitoring || 'Daily',
-      community_lead_escalation: community_lead_escalation || 'Daily',
+      shoot_sessions: shoot_sessions ? JSON.stringify(shoot_sessions) : null,
+      community_management_frequency: community_management_frequency || 'Daily',
       ads_pre_ad_report: ads_pre_ad_report ? 1 : 0,
       ads_post_ad_report: ads_post_ad_report ? 1 : 0,
       team_allocation: team_allocation ? JSON.stringify(team_allocation) : null,
@@ -157,6 +152,9 @@ exports.save = async (req, res) => {
     const result = saved[0];
     if (result.platforms_managed && typeof result.platforms_managed === 'string') {
       result.platforms_managed = JSON.parse(result.platforms_managed);
+    }
+    if (result.shoot_sessions && typeof result.shoot_sessions === 'string') {
+      result.shoot_sessions = JSON.parse(result.shoot_sessions);
     }
     if (result.team_allocation && typeof result.team_allocation === 'string') {
       result.team_allocation = JSON.parse(result.team_allocation);
