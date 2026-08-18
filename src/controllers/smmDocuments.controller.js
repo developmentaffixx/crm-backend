@@ -137,11 +137,16 @@ exports.create = async (req, res) => {
   }
 
   try {
-    const sectionsJson = JSON.stringify(sections.map((s, idx) => ({
-      title: s.title.trim(),
-      description: (s.description || '').trim(),
-      order: idx,
-    })));
+    const sectionsJson = JSON.stringify(sections.map((s, idx) => {
+      let description = (s.description || '').trim();
+      // Decode base64-encoded descriptions from frontend (avoids WAF blocking HTML)
+      if (s.encoded && description) {
+        try {
+          description = Buffer.from(description, 'base64').toString('utf8');
+        } catch (e) { /* use as-is if decode fails */ }
+      }
+      return { title: s.title.trim(), description, order: idx };
+    }));
 
     const pageTargetsJson = JSON.stringify(page_targets.map(pt => ({
       page: pt.page,
@@ -195,11 +200,15 @@ exports.update = async (req, res) => {
     }
 
     const newSections = sections
-      ? JSON.stringify(sections.map((s, idx) => ({
-          title: s.title.trim(),
-          description: (s.description || '').trim(),
-          order: idx,
-        })))
+      ? JSON.stringify(sections.map((s, idx) => {
+          let description = (s.description || '').trim();
+          if (s.encoded && description) {
+            try {
+              description = Buffer.from(description, 'base64').toString('utf8');
+            } catch (e) { /* use as-is */ }
+          }
+          return { title: s.title.trim(), description, order: idx };
+        }))
       : JSON.stringify(current.sections);
 
     const newPageTargets = page_targets
