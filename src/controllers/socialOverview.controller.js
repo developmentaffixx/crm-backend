@@ -13,12 +13,19 @@ exports.getProjects = async (req, res) => {
     let where = 'p.deleted = 0';
     const params = [];
 
+    // Month filter: show plans whose plan_month matches OR that have posts in the selected month
+    let monthCondition = '';
     if (month_year) {
-      // month_year = "2026-08" — match by year and month to handle any day value
       const [yr, mo] = month_year.split('-');
-      where += ' AND YEAR(p.plan_month) = ? AND MONTH(p.plan_month) = ?';
-      params.push(parseInt(yr), parseInt(mo));
+      const monthStart = `${month_year}-01`;
+      const monthEnd = new Date(parseInt(yr), parseInt(mo), 0).toISOString().split('T')[0]; // last day of month
+      monthCondition = ` AND (
+        (YEAR(p.plan_month) = ? AND MONTH(p.plan_month) = ?)
+        OR p.id IN (SELECT DISTINCT plan_id FROM content_calendar_posts WHERE posting_date >= ? AND posting_date <= ?)
+      )`;
+      params.push(parseInt(yr), parseInt(mo), monthStart, monthEnd);
     }
+    where += monthCondition;
 
     if (project_type) {
       where += ' AND pr.project_type = ?';
@@ -82,8 +89,13 @@ exports.getSummary = async (req, res) => {
 
     if (month_year) {
       const [yr, mo] = month_year.split('-');
-      where += ' AND YEAR(p.plan_month) = ? AND MONTH(p.plan_month) = ?';
-      params.push(parseInt(yr), parseInt(mo));
+      const monthStart = `${month_year}-01`;
+      const monthEnd = new Date(parseInt(yr), parseInt(mo), 0).toISOString().split('T')[0];
+      where += ` AND (
+        (YEAR(p.plan_month) = ? AND MONTH(p.plan_month) = ?)
+        OR p.id IN (SELECT DISTINCT plan_id FROM content_calendar_posts WHERE posting_date >= ? AND posting_date <= ?)
+      )`;
+      params.push(parseInt(yr), parseInt(mo), monthStart, monthEnd);
     }
 
     if (!isAdmin) {
