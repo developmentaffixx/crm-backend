@@ -14,8 +14,10 @@ exports.getProjects = async (req, res) => {
     const params = [];
 
     if (month_year) {
-      where += ' AND p.plan_month = ?';
-      params.push(`${month_year}-01`);
+      // month_year = "2026-08" — match by year and month to handle any day value
+      const [yr, mo] = month_year.split('-');
+      where += ' AND YEAR(p.plan_month) = ? AND MONTH(p.plan_month) = ?';
+      params.push(parseInt(yr), parseInt(mo));
     }
 
     if (project_type) {
@@ -79,8 +81,9 @@ exports.getSummary = async (req, res) => {
     const params = [];
 
     if (month_year) {
-      where += ' AND p.plan_month = ?';
-      params.push(`${month_year}-01`);
+      const [yr, mo] = month_year.split('-');
+      where += ' AND YEAR(p.plan_month) = ? AND MONTH(p.plan_month) = ?';
+      params.push(parseInt(yr), parseInt(mo));
     }
 
     if (!isAdmin) {
