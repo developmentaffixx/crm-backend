@@ -186,7 +186,6 @@ exports.getDeliverables = async (req, res) => {
          pas.project_id,
          pr.title AS project_name,
          COALESCE(pr.project_type, 'external') AS project_type,
-         l.business_name AS client_name,
          pas.platforms_managed,
          pas.commitment_reels,
          pas.commitment_static_posts,
@@ -195,14 +194,9 @@ exports.getDeliverables = async (req, res) => {
          pas.commitment_insight_report,
          pas.commitment_strategy_call,
          pas.shoot_sessions,
-         pas.shoot_hours,
-         pas.community_dm_monitoring,
-         pas.community_comment_monitoring,
-         pas.community_review_monitoring,
-         pas.community_lead_escalation,
+         pas.community_management_frequency,
          pas.ads_pre_ad_report,
-         pas.ads_post_ad_report,
-         pas.special_notes
+         pas.ads_post_ad_report
        FROM project_allocation_sheets pas
        JOIN projects pr ON pr.id = pas.project_id
        LEFT JOIN leads l ON l.id = pr.client_id
@@ -215,6 +209,7 @@ exports.getDeliverables = async (req, res) => {
     const result = rows.map(row => ({
       ...row,
       platforms_managed: row.platforms_managed ? (typeof row.platforms_managed === 'string' ? JSON.parse(row.platforms_managed) : row.platforms_managed) : [],
+      shoot_sessions: row.shoot_sessions ? (typeof row.shoot_sessions === 'string' ? JSON.parse(row.shoot_sessions) : row.shoot_sessions) : [],
     }));
 
     return res.json(result);
