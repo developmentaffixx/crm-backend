@@ -12,4 +12,7 @@ router.get('/projects', requireSocialAccess('social_overview'), controller.getPr
 // GET /api/social-overview/summary — summary cards data
 router.get('/summary', requireSocialAccess('social_overview'), controller.getSummary);
 
+// GET /api/social-overview/deliverables — SMM deliverables for active projects
+router.get('/deliverables', requireSocialAccess('social_overview'), controller.getDeliverables);
+
 module.exports = router;

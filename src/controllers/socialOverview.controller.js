@@ -163,3 +163,63 @@ exports.getSummary = async (req, res) => {
     return res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
+
+/**
+ * GET /api/social-overview/deliverables
+ * Returns SMM service deliverables for all active projects that have allocation sheets
+ */
+exports.getDeliverables = async (req, res) => {
+  try {
+    const { search } = req.query;
+
+    let where = `pr.status = 'active' AND pr.deleted = 0`;
+    const params = [];
+
+    if (search) {
+      where += ' AND (pr.title LIKE ? OR COALESCE(l.business_name, "") LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    const [rows] = await db.query(
+      `SELECT
+         pas.id AS allocation_id,
+         pas.project_id,
+         pr.title AS project_name,
+         COALESCE(pr.project_type, 'external') AS project_type,
+         l.business_name AS client_name,
+         pas.platforms_managed,
+         pas.commitment_reels,
+         pas.commitment_static_posts,
+         pas.commitment_stories,
+         pas.commitment_content_calendar,
+         pas.commitment_insight_report,
+         pas.commitment_strategy_call,
+         pas.shoot_sessions,
+         pas.shoot_hours,
+         pas.community_dm_monitoring,
+         pas.community_comment_monitoring,
+         pas.community_review_monitoring,
+         pas.community_lead_escalation,
+         pas.ads_pre_ad_report,
+         pas.ads_post_ad_report,
+         pas.special_notes
+       FROM project_allocation_sheets pas
+       JOIN projects pr ON pr.id = pas.project_id
+       LEFT JOIN leads l ON l.id = pr.client_id
+       WHERE ${where}
+       ORDER BY pr.title ASC`,
+      params
+    );
+
+    // Parse JSON fields
+    const result = rows.map(row => ({
+      ...row,
+      platforms_managed: row.platforms_managed ? (typeof row.platforms_managed === 'string' ? JSON.parse(row.platforms_managed) : row.platforms_managed) : [],
+    }));
+
+    return res.json(result);
+  } catch (err) {
+    console.error('Social overview getDeliverables error:', err.message, err.sql || '');
+    return res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
