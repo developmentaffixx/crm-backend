@@ -1,51 +1,6 @@
 const db = require('../config/db');
 const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
 
-// Lazy-load puppeteer to avoid startup issues
-let puppeteerModule = null;
-function getPuppeteer() {
-  if (!puppeteerModule) puppeteerModule = require('puppeteer');
-  return puppeteerModule;
-}
-
-// Find Chrome executable — tries multiple locations
-async function launchBrowser() {
-  const puppeteer = getPuppeteer();
-
-  // Try 1: Default puppeteer bundled Chrome
-  try {
-    const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-    return browser;
-  } catch (e) { /* continue */ }
-
-  // Try 2: System chromium paths
-  const paths = [
-    '/usr/bin/chromium-browser',
-    '/usr/bin/chromium',
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/snap/bin/chromium',
-  ];
-
-  for (const execPath of paths) {
-    try {
-      const fs = require('fs');
-      if (fs.existsSync(execPath)) {
-        const browser = await puppeteer.launch({ headless: 'new', executablePath: execPath, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-        return browser;
-      }
-    } catch (e) { /* continue */ }
-  }
-
-  // Try 3: Use channel
-  try {
-    const browser = await puppeteer.launch({ headless: 'new', channel: 'chrome', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-    return browser;
-  } catch (e) { /* continue */ }
-
-  throw new Error('Chrome/Chromium not found. Run: npx puppeteer browsers install chrome');
-}
-
 // JSON fields that are stored/parsed
 const JSON_FIELDS = [
   'platform',
@@ -302,11 +257,14 @@ exports.deleteImage = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EXPORT PDF — GET /api/monthly-reports/:id/pdf
-// Generates landscape PDF with branded styling, returns as download
+// Generates landscape PDF with PDFKit (no Chrome needed), returns as download
 // ─────────────────────────────────────────────────────────────────────────────
 exports.exportPdf = async (req, res) => {
-  let browser = null;
   try {
+    const PDFDocument = require('pdfkit');
+    const https = require('https');
+    const http = require('http');
+
     const [rows] = await db.query(
       `SELECT mr.*, p.title AS project_title, l.business_name AS client_name,
               CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
@@ -320,221 +278,258 @@ exports.exportPdf = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Report not found' });
 
     const report = parseRow(rows[0]);
-    const html = buildPdfHtml(report);
 
-    browser = await launchBrowser();
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    await new Promise(r => setTimeout(r, 1500));
-
-    const pdfBuffer = await page.pdf({
-      width: '1280px',
-      height: '720px',
-      printBackground: true,
-      landscape: true,
-      margin: { top: '0', right: '0', bottom: '0', left: '0' },
-    });
-    await browser.close();
+    // Create landscape PDF (1280x720 points like a slide)
+    const doc = new PDFDocument({ size: [1280, 720], margin: 0, autoFirstPage: false });
 
     const filename = `${report.project_title || 'Report'}_${report.reporting_month}.pdf`.replace(/[^a-zA-Z0-9_\-.]/g, '_');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    return res.send(pdfBuffer);
+    doc.pipe(res);
+
+    const brand = { dark: '#5D3A1A', accent: '#C49A6C', text: '#333333', light: '#F8F5F2' };
+    const monthLabel = report.reporting_month ? new Date(report.reporting_month + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }).toUpperCase() : '';
+    const platformLabel = Array.isArray(report.platform) ? report.platform.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ') : 'Instagram';
+
+    // Helper: add a new slide page
+    const addSlide = () => { doc.addPage(); };
+
+    // Helper: draw slide title
+    const slideTitle = (title) => {
+      doc.font('Helvetica-Bold').fontSize(30).fillColor(brand.dark).text(title, 80, 60, { width: 1120 });
+      return 110;
+    };
+
+    // Helper: draw table
+    const drawTable = (headers, rows, startY) => {
+      const colWidth = 1120 / headers.length;
+      let y = startY;
+
+      // Header row
+      doc.rect(80, y, 1120, 36).fill('#F3F3F3');
+      headers.forEach((h, i) => {
+        doc.font('Helvetica-Bold').fontSize(10).fillColor('#555').text(h, 80 + i * colWidth + 14, y + 12, { width: colWidth - 28 });
+      });
+      y += 36;
+
+      // Data rows
+      rows.forEach((row, rIdx) => {
+        if (rIdx % 2 === 1) doc.rect(80, y, 1120, 34).fill('#FAFAFA');
+        row.forEach((cell, i) => {
+          doc.font('Helvetica').fontSize(12).fillColor(brand.text).text(String(cell || '-'), 80 + i * colWidth + 14, y + 10, { width: colWidth - 28 });
+        });
+        y += 34;
+        doc.moveTo(80, y).lineTo(1200, y).strokeColor('#E5E5E5').lineWidth(0.5).stroke();
+      });
+      return y;
+    };
+
+    // ─── SLIDE 1: Cover ───────────────────────────────────────────────────
+    addSlide();
+    doc.rect(0, 0, 1280, 720).fill(brand.light);
+    doc.font('Helvetica-Bold').fontSize(52).fillColor(brand.dark)
+      .text(report.project_title || report.client_name || 'Monthly Report', 80, 240, { width: 1120, align: 'center' });
+    doc.font('Helvetica-Bold').fontSize(34).fillColor(brand.accent)
+      .text('REPORT', 80, 310, { width: 1120, align: 'center' });
+    doc.font('Helvetica').fontSize(18).fillColor('#666')
+      .text(monthLabel, 80, 370, { width: 1120, align: 'center' });
+    doc.font('Helvetica').fontSize(13).fillColor('#999')
+      .text(platformLabel, 80, 400, { width: 1120, align: 'center' });
+
+    // ─── SLIDE 2: Executive Summary ───────────────────────────────────────
+    if (report.executive_summary) {
+      addSlide();
+      const y = slideTitle('Executive Summary');
+      doc.font('Helvetica').fontSize(13).fillColor(brand.text)
+        .text(report.executive_summary, 80, y, { width: 1120, lineGap: 6 });
+    }
+
+    // ─── SLIDE 3: Content Overview ────────────────────────────────────────
+    if (report.content_overview && report.content_overview.length > 0) {
+      addSlide();
+      const y = slideTitle('Content Overview');
+      drawTable(
+        ['CONTENT TYPE', 'PLANNED', 'PUBLISHED'],
+        report.content_overview.map(r => [r.type, r.planned, r.published]),
+        y + 10
+      );
+    }
+
+    // ─── SLIDE 4: Most Viewed Posts ───────────────────────────────────────
+    if (report.most_viewed_posts && report.most_viewed_posts.length > 0) {
+      for (const [idx, post] of report.most_viewed_posts.entries()) {
+        addSlide();
+        const y = slideTitle(`Most Viewed Post ${idx + 1}`);
+        let textX = 80;
+        let textW = 1120;
+
+        // Try to fetch and embed image
+        if (post.image_url) {
+          try {
+            const imgBuffer = await fetchImageBuffer(post.image_url);
+            doc.image(imgBuffer, 80, y, { width: 220, height: 220 });
+            textX = 320;
+            textW = 880;
+          } catch (e) { /* skip image if fetch fails */ }
+        }
+
+        let ty = y;
+        doc.font('Helvetica').fontSize(12).fillColor(brand.text);
+        doc.text(`Views: ${post.views || '-'}  |  Reach: ${post.reach || '-'}`, textX, ty, { width: textW }); ty += 22;
+        doc.text(`Likes: ${post.likes || '-'}  |  Comments: ${post.comments || '-'}  |  Shares: ${post.shares || '-'}  |  Saves: ${post.saves || '-'}`, textX, ty, { width: textW }); ty += 22;
+        doc.text(`Profile Activities: ${post.profile_activities || '-'}  |  Reposts: ${post.reposts || '-'}`, textX, ty, { width: textW }); ty += 22;
+        doc.text(`Followers: ${post.follower_pct || '-'}%  |  Non-Followers: ${post.non_follower_pct || '-'}%`, textX, ty, { width: textW }); ty += 22;
+        doc.text(`Gender — Women: ${post.gender_female_pct || '-'}%  |  Men: ${post.gender_male_pct || '-'}%`, textX, ty, { width: textW }); ty += 30;
+
+        if (post.analysis) {
+          doc.font('Helvetica').fontSize(11).fillColor('#555')
+            .text(post.analysis, textX, ty, { width: textW, lineGap: 4 });
+        }
+      }
+    }
+
+    // ─── SLIDE 5: Account Performance ─────────────────────────────────────
+    if (report.account_performance) {
+      addSlide();
+      const y = slideTitle('Account Performance');
+      const ap = report.account_performance;
+      const metrics = [
+        ['VIEWS', ap.views, ap.prev_views],
+        ['ACCOUNTS REACHED', ap.accounts_reached, ap.prev_accounts_reached],
+        ['CONTENT SHARED', ap.content_shared, ap.prev_content_shared],
+        ['PROFILE VISITS', ap.profile_visits, ap.prev_profile_visits],
+        ['INTERACTIONS', ap.interactions, ap.prev_interactions],
+        ['NEW FOLLOWERS', ap.new_followers, ap.prev_new_followers],
+        ['EXTERNAL LINK TAPS', ap.external_link_taps, ap.prev_external_link_taps],
+      ];
+      const hasPrev = metrics.some(m => m[2]);
+      const headers = hasPrev ? ['METRIC', 'THIS MONTH', 'PREVIOUS MONTH'] : ['METRIC', 'THIS MONTH'];
+      const tableRows = metrics.map(m => hasPrev ? [m[0], m[1], m[2]] : [m[0], m[1]]);
+      drawTable(headers, tableRows, y + 10);
+    }
+
+    // ─── SLIDE 6: Meta Ads ────────────────────────────────────────────────
+    if (report.ads_campaigns && report.ads_campaigns.length > 0) {
+      addSlide();
+      let y = slideTitle('Meta Ads Campaign Results');
+      report.ads_campaigns.forEach((camp, i) => {
+        doc.font('Helvetica-Bold').fontSize(14).fillColor(brand.dark)
+          .text(camp.name || `Campaign ${i + 1}`, 80, y, { width: 1120 });
+        y += 22;
+        doc.font('Helvetica').fontSize(12).fillColor(brand.text);
+        doc.text(`Ad Budget: Rs.${camp.total_spent || '0'} + GST Rs.${camp.gst_amount || '0'} = Rs.${camp.total_with_gst || '0'}`, 80, y, { width: 1120 }); y += 18;
+        doc.text(`Messages: ${camp.messages || '0'}  |  Calls: ${camp.calls || '0'}  |  Total Enquiries: ${camp.enquiries || '0'}`, 80, y, { width: 1120 }); y += 18;
+        if (camp.ad_breakdown && camp.ad_breakdown.length > 0) {
+          doc.font('Helvetica').fontSize(11).fillColor('#777')
+            .text('Ad-wise: ' + camp.ad_breakdown.map(b => `${b.creative_name} – ${b.result_count}`).join('  |  '), 80, y, { width: 1120 });
+          y += 18;
+        }
+        y += 16;
+      });
+    }
+
+    // ─── SLIDE 7: Most Performed Posts ────────────────────────────────────
+    if (report.most_performed_posts && report.most_performed_posts.length > 0) {
+      addSlide();
+      const y = slideTitle('Most Performed Posts');
+      let px = 80, py = y + 10;
+      for (const post of report.most_performed_posts) {
+        if (px + 190 > 1200) { px = 80; py += 210; }
+        if (post.image_url) {
+          try {
+            const imgBuf = await fetchImageBuffer(post.image_url);
+            doc.image(imgBuf, px, py, { width: 170, height: 170 });
+          } catch (e) {
+            doc.rect(px, py, 170, 170).fill('#F0F0F0');
+          }
+        } else {
+          doc.rect(px, py, 170, 170).fill('#F0F0F0');
+        }
+        doc.font('Helvetica-Bold').fontSize(11).fillColor(brand.dark)
+          .text(`${post.view_count || '-'} views`, px, py + 175, { width: 170, align: 'center' });
+        px += 190;
+      }
+    }
+
+    // ─── SLIDE 8: Demographics ────────────────────────────────────────────
+    if (report.audience_demographics) {
+      addSlide();
+      let y = slideTitle('Audience Demographics');
+      const demo = report.audience_demographics;
+      let colX = 80;
+
+      // Cities
+      if (demo.cities && demo.cities.length > 0) {
+        doc.font('Helvetica-Bold').fontSize(13).fillColor(brand.dark).text('Top Cities', colX, y + 10);
+        let cy = y + 30;
+        demo.cities.forEach(c => {
+          doc.font('Helvetica').fontSize(12).fillColor(brand.text).text(`${c.name}: ${c.pct}%`, colX, cy);
+          cy += 20;
+        });
+        colX += 350;
+      }
+
+      // Age Ranges
+      if (demo.age_ranges && demo.age_ranges.length > 0) {
+        doc.font('Helvetica-Bold').fontSize(13).fillColor(brand.dark).text('Age Ranges', colX, y + 10);
+        let cy = y + 30;
+        demo.age_ranges.forEach(a => {
+          doc.font('Helvetica').fontSize(12).fillColor(brand.text).text(`${a.range}: ${a.pct}%`, colX, cy);
+          cy += 20;
+        });
+        colX += 350;
+      }
+
+      // Gender
+      if (demo.gender) {
+        doc.font('Helvetica-Bold').fontSize(13).fillColor(brand.dark).text('Gender', colX, y + 10);
+        doc.font('Helvetica').fontSize(12).fillColor(brand.text)
+          .text(`Women: ${demo.gender.female_pct || '-'}%`, colX, y + 30)
+          .text(`Men: ${demo.gender.male_pct || '-'}%`, colX, y + 50);
+      }
+    }
+
+    // ─── SLIDE 9: Recommendations ─────────────────────────────────────────
+    if (report.recommendations && report.recommendations.filter(r => r).length > 0) {
+      addSlide();
+      let y = slideTitle('Recommendations for Next Month');
+      report.recommendations.filter(r => r).forEach((rec, i) => {
+        doc.font('Helvetica').fontSize(14).fillColor(brand.accent).text('✓', 80, y + 6);
+        doc.font('Helvetica').fontSize(14).fillColor(brand.text).text(rec, 110, y + 4, { width: 1090 });
+        y += 36;
+      });
+    }
+
+    // ─── SLIDE 10: Conclusion ─────────────────────────────────────────────
+    if (report.conclusion) {
+      addSlide();
+      const y = slideTitle('Conclusion');
+      doc.font('Helvetica').fontSize(13).fillColor(brand.text)
+        .text(report.conclusion, 80, y, { width: 1120, lineGap: 6 });
+    }
+
+    doc.end();
   } catch (err) {
-    if (browser) try { await browser.close(); } catch(e) {}
     console.error('Monthly report PDF export error:', err.message, err.stack);
-    return res.status(500).json({ message: 'Failed to generate PDF: ' + err.message, stack: err.stack, code: err.code });
+    if (!res.headersSent) {
+      return res.status(500).json({ message: 'Failed to generate PDF: ' + err.message });
+    }
   }
 };
 
-// ─── PDF HTML BUILDER ────────────────────────────────────────────────────────
-
-function buildPdfHtml(report) {
-  const brandColor = '#5D3A1A';
-  const accentColor = '#C49A6C';
-  const monthLabel = report.reporting_month ? new Date(report.reporting_month + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }).toUpperCase() : '';
-  const platformLabel = Array.isArray(report.platform)
-    ? report.platform.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')
-    : (report.platform || 'Instagram');
-
-  // Helper for slides
-  const slide = (content) => `<div class="slide">${content}</div>`;
-
-  let slides = '';
-
-  // ─── SLIDE 1: Cover ─────────────────────────────────────────────────────
-  slides += slide(`
-    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;text-align:center;">
-      <h1 style="font-size:56px;font-weight:800;color:${brandColor};margin:0;letter-spacing:-1px;">${report.project_title || report.client_name || 'Monthly Report'}</h1>
-      <h2 style="font-size:36px;font-weight:700;color:${accentColor};margin:10px 0 0;">REPORT</h2>
-      <p style="font-size:20px;color:#666;margin-top:20px;">${monthLabel}</p>
-      <p style="font-size:14px;color:#999;margin-top:8px;">${platformLabel}</p>
-    </div>
-  `);
-
-  // ─── SLIDE 2: Executive Summary ─────────────────────────────────────────
-  if (report.executive_summary) {
-    slides += slide(`
-      <h2 class="slide-title">Executive Summary</h2>
-      <div class="slide-body"><p>${(report.executive_summary || '').replace(/\n/g, '</p><p>')}</p></div>
-    `);
-  }
-
-  // ─── SLIDE 3: Content Overview ──────────────────────────────────────────
-  if (report.content_overview && report.content_overview.length > 0) {
-    let tableRows = report.content_overview.map(r =>
-      `<tr><td>${r.type}</td><td><strong>${r.planned || '-'}</strong></td><td><strong>${r.published || '-'}</strong></td></tr>`
-    ).join('');
-    slides += slide(`
-      <h2 class="slide-title">Content Overview</h2>
-      <table class="data-table">
-        <thead><tr><th>CONTENT TYPE</th><th>PLANNED</th><th>PUBLISHED</th></tr></thead>
-        <tbody>${tableRows}</tbody>
-      </table>
-    `);
-  }
-
-  // ─── SLIDE 4: Most Viewed Posts ─────────────────────────────────────────
-  if (report.most_viewed_posts && report.most_viewed_posts.length > 0) {
-    report.most_viewed_posts.forEach((post, idx) => {
-      const imgHtml = post.image_url ? `<img src="${post.image_url}" style="width:250px;height:250px;object-fit:cover;border-radius:12px;flex-shrink:0;" />` : '';
-      slides += slide(`
-        <h2 class="slide-title">Most Viewed Post ${idx + 1}</h2>
-        <div style="display:flex;gap:30px;align-items:flex-start;">
-          ${imgHtml}
-          <div style="flex:1;font-size:13px;line-height:1.7;color:#333;">
-            <p><strong>Views:</strong> ${post.views || '-'} | <strong>Reach:</strong> ${post.reach || '-'}</p>
-            <p><strong>Likes:</strong> ${post.likes || '-'} | <strong>Comments:</strong> ${post.comments || '-'} | <strong>Shares:</strong> ${post.shares || '-'} | <strong>Saves:</strong> ${post.saves || '-'}</p>
-            <p><strong>Profile Activities:</strong> ${post.profile_activities || '-'} | <strong>Reposts:</strong> ${post.reposts || '-'}</p>
-            <p><strong>Followers:</strong> ${post.follower_pct || '-'}% | <strong>Non-Followers:</strong> ${post.non_follower_pct || '-'}%</p>
-            <p><strong>Gender:</strong> Women ${post.gender_female_pct || '-'}% | Men ${post.gender_male_pct || '-'}%</p>
-            ${post.analysis ? `<p style="margin-top:12px;">${post.analysis}</p>` : ''}
-          </div>
-        </div>
-      `);
-    });
-  }
-
-  // ─── SLIDE 5: Account Performance ───────────────────────────────────────
-  if (report.account_performance) {
-    const ap = report.account_performance;
-    const metrics = [
-      { label: 'VIEWS', key: 'views' },
-      { label: 'ACCOUNTS REACHED', key: 'accounts_reached' },
-      { label: 'CONTENT SHARED', key: 'content_shared' },
-      { label: 'PROFILE VISITS', key: 'profile_visits' },
-      { label: 'INTERACTIONS', key: 'interactions' },
-      { label: 'NEW FOLLOWERS', key: 'new_followers' },
-      { label: 'EXTERNAL LINK TAPS', key: 'external_link_taps' },
-    ];
-    const hasPrev = metrics.some(m => ap[`prev_${m.key}`]);
-    let tableRows = metrics.map(m => {
-      let row = `<tr><td>${m.label}</td><td><strong>${ap[m.key] || '-'}</strong></td>`;
-      if (hasPrev) row += `<td>${ap[`prev_${m.key}`] || '-'}</td>`;
-      row += '</tr>';
-      return row;
-    }).join('');
-    slides += slide(`
-      <h2 class="slide-title">Account Performance</h2>
-      <table class="data-table">
-        <thead><tr><th>METRIC</th><th>THIS MONTH</th>${hasPrev ? '<th>PREVIOUS MONTH</th>' : ''}</tr></thead>
-        <tbody>${tableRows}</tbody>
-      </table>
-    `);
-  }
-
-  // ─── SLIDE 6: Meta Ads ──────────────────────────────────────────────────
-  if (report.ads_campaigns && report.ads_campaigns.length > 0) {
-    let adsContent = '';
-    report.ads_campaigns.forEach((camp, i) => {
-      adsContent += `<div style="margin-bottom:24px;">`;
-      adsContent += `<h3 style="font-size:16px;color:${brandColor};margin:0 0 8px;">${camp.name || `Campaign ${i + 1}`}</h3>`;
-      adsContent += `<p style="font-size:13px;color:#555;">Ad Budget: ₹${camp.total_spent || '0'} + GST ₹${camp.gst_amount || '0'} = ₹${camp.total_with_gst || '0'}</p>`;
-      adsContent += `<p style="font-size:13px;color:#555;">Messages: ${camp.messages || '0'} | Calls: ${camp.calls || '0'} | Total Enquiries: ${camp.enquiries || '0'}</p>`;
-      if (camp.ad_breakdown && camp.ad_breakdown.length > 0) {
-        adsContent += `<p style="font-size:12px;color:#888;margin-top:6px;"><strong>Ad-wise:</strong> ${camp.ad_breakdown.map(b => `${b.creative_name} – ${b.result_count}`).join(' | ')}</p>`;
+// Helper: fetch image from URL as buffer (for embedding in PDFKit)
+function fetchImageBuffer(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? require('https') : require('http');
+    client.get(url, (response) => {
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        return fetchImageBuffer(response.headers.location).then(resolve).catch(reject);
       }
-      adsContent += `</div>`;
-    });
-    slides += slide(`<h2 class="slide-title">Meta Ads Campaign Results</h2><div class="slide-body">${adsContent}</div>`);
-  }
-
-  // ─── SLIDE 7: Most Performed Posts ──────────────────────────────────────
-  if (report.most_performed_posts && report.most_performed_posts.length > 0) {
-    let grid = report.most_performed_posts.map(p =>
-      `<div style="text-align:center;">
-        ${p.image_url ? `<img src="${p.image_url}" style="width:180px;height:180px;object-fit:cover;border-radius:8px;" />` : '<div style="width:180px;height:180px;background:#f0f0f0;border-radius:8px;"></div>'}
-        <p style="margin:6px 0 0;font-size:12px;font-weight:700;color:${brandColor};">↗ ${p.view_count || '-'}</p>
-      </div>`
-    ).join('');
-    slides += slide(`<h2 class="slide-title">Most Performed Posts</h2><div style="display:flex;flex-wrap:wrap;gap:16px;justify-content:center;">${grid}</div>`);
-  }
-
-  // ─── SLIDE 8: Audience Demographics ─────────────────────────────────────
-  if (report.audience_demographics) {
-    const demo = report.audience_demographics;
-    let demoContent = '<div style="display:flex;gap:40px;justify-content:center;">';
-    // Cities
-    if (demo.cities && demo.cities.length > 0) {
-      demoContent += `<div><h4 style="font-size:14px;color:${brandColor};margin-bottom:8px;">Top Cities</h4>`;
-      demo.cities.forEach(c => { demoContent += `<p style="font-size:13px;color:#555;">${c.name}: <strong>${c.pct}%</strong></p>`; });
-      demoContent += '</div>';
-    }
-    // Age
-    if (demo.age_ranges && demo.age_ranges.length > 0) {
-      demoContent += `<div><h4 style="font-size:14px;color:${brandColor};margin-bottom:8px;">Age Ranges</h4>`;
-      demo.age_ranges.forEach(a => { demoContent += `<p style="font-size:13px;color:#555;">${a.range}: <strong>${a.pct}%</strong></p>`; });
-      demoContent += '</div>';
-    }
-    // Gender
-    if (demo.gender) {
-      demoContent += `<div><h4 style="font-size:14px;color:${brandColor};margin-bottom:8px;">Gender</h4>`;
-      demoContent += `<p style="font-size:13px;color:#555;">Women: <strong>${demo.gender.female_pct || '-'}%</strong></p>`;
-      demoContent += `<p style="font-size:13px;color:#555;">Men: <strong>${demo.gender.male_pct || '-'}%</strong></p>`;
-      demoContent += '</div>';
-    }
-    demoContent += '</div>';
-    slides += slide(`<h2 class="slide-title">Audience Demographics</h2>${demoContent}`);
-  }
-
-  // ─── SLIDE 9: Recommendations ───────────────────────────────────────────
-  if (report.recommendations && report.recommendations.length > 0) {
-    const recList = report.recommendations.filter(r => r).map(r => `<li style="margin-bottom:12px;font-size:15px;color:#333;">${r}</li>`).join('');
-    slides += slide(`<h2 class="slide-title">Recommendations for Next Month</h2><ul style="list-style:none;padding:0;">${recList.replace(/<li/g, '<li style="padding-left:28px;position:relative;margin-bottom:12px;font-size:15px;color:#333;"><span style="position:absolute;left:0;color:' + accentColor + ';">✓</span>')}</ul>`);
-  }
-
-  // ─── SLIDE 10: Conclusion ───────────────────────────────────────────────
-  if (report.conclusion) {
-    slides += slide(`
-      <h2 class="slide-title">Conclusion</h2>
-      <div class="slide-body"><p>${(report.conclusion || '').replace(/\n/g, '</p><p>')}</p></div>
-    `);
-  }
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', -apple-system, sans-serif; background: white; }
-  .slide {
-    width: 1280px; height: 720px; padding: 60px 80px;
-    page-break-after: always; position: relative; overflow: hidden;
-    display: flex; flex-direction: column; justify-content: center;
-  }
-  .slide-title {
-    font-size: 32px; font-weight: 700; color: ${brandColor};
-    margin-bottom: 24px; letter-spacing: -0.5px;
-  }
-  .slide-body { font-size: 15px; line-height: 1.8; color: #444; }
-  .slide-body p { margin-bottom: 12px; }
-  .data-table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-  .data-table th { text-align: left; padding: 14px 20px; background: #f8f8f8; border: 1px solid #e0e0e0; font-size: 12px; font-weight: 700; color: #555; letter-spacing: 0.5px; }
-  .data-table td { padding: 14px 20px; border: 1px solid #e0e0e0; font-size: 14px; color: #333; }
-  .data-table tr:nth-child(even) td { background: #fafafa; }
-</style>
-</head>
-<body>${slides}</body>
-</html>`;
+      if (response.statusCode !== 200) return reject(new Error(`HTTP ${response.statusCode}`));
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve(Buffer.concat(chunks)));
+      response.on('error', reject);
+    }).on('error', reject);
+  });
 }
