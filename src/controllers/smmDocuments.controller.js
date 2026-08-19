@@ -11,10 +11,15 @@ const VALID_PAGE_TARGETS = [
   'report_centre',
 ];
 
+// Valid access types
+const VALID_ACCESS_TYPES = ['all', 'roles', 'users', 'roles_and_users'];
+
 // Helper to parse JSON fields safely
 function parseRow(row) {
   let sections = [];
   let page_targets = [];
+  let allowed_roles = [];
+  let allowed_users = [];
 
   try {
     sections = row.sections
@@ -28,7 +33,42 @@ function parseRow(row) {
       : [];
   } catch (e) { page_targets = []; }
 
-  return { ...row, sections, page_targets };
+  try {
+    allowed_roles = row.allowed_roles
+      ? (typeof row.allowed_roles === 'string' ? JSON.parse(row.allowed_roles) : row.allowed_roles)
+      : [];
+  } catch (e) { allowed_roles = []; }
+
+  try {
+    allowed_users = row.allowed_users
+      ? (typeof row.allowed_users === 'string' ? JSON.parse(row.allowed_users) : row.allowed_users)
+      : [];
+  } catch (e) { allowed_users = []; }
+
+  return { ...row, sections, page_targets, allowed_roles, allowed_users };
+}
+
+// Helper: check if a user has access to a document based on permissions
+function userHasAccess(doc, userId, userRoleId) {
+  const accessType = doc.access_type || 'all';
+
+  if (accessType === 'all') return true;
+
+  if (accessType === 'roles') {
+    return Array.isArray(doc.allowed_roles) && doc.allowed_roles.includes(userRoleId);
+  }
+
+  if (accessType === 'users') {
+    return Array.isArray(doc.allowed_users) && doc.allowed_users.includes(userId);
+  }
+
+  if (accessType === 'roles_and_users') {
+    const roleMatch = Array.isArray(doc.allowed_roles) && doc.allowed_roles.includes(userRoleId);
+    const userMatch = Array.isArray(doc.allowed_users) && doc.allowed_users.includes(userId);
+    return roleMatch || userMatch;
+  }
+
+  return true; // fallback: allow
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,20 +101,26 @@ exports.getByPage = async (req, res) => {
       return res.status(400).json({ message: 'Invalid page target' });
     }
 
+    // Get current user info for permission filtering
+    const userId = req.user.id;
+    // Fetch role_id from DB (not in JWT payload)
+    const [userRows] = await db.query('SELECT role_id FROM users WHERE id = ?', [userId]);
+    const userRoleId = userRows[0]?.role_id || null;
+
     // Get all active documents — filter in JS to avoid JSON_CONTAINS compatibility issues
     const [rows] = await db.query(
-      `SELECT id, title, sections, page_targets
+      `SELECT id, title, sections, page_targets, access_type, allowed_roles, allowed_users
        FROM smm_documents
        WHERE is_active = 1
        ORDER BY sort_order, created_at DESC`
     );
 
-    // Filter: only documents that have this page with visible = true
+    // Filter: only documents that have this page with visible = true AND user has access
     const results = [];
     for (const row of rows) {
       const parsed = parseRow(row);
       const pageTarget = parsed.page_targets.find(pt => pt.page === page && pt.visible === true);
-      if (pageTarget) {
+      if (pageTarget && userHasAccess(parsed, userId, userRoleId)) {
         results.push({
           id: parsed.id,
           title: parsed.title,
@@ -112,7 +158,7 @@ exports.getOne = async (req, res) => {
 // CREATE document (admin only)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
-  const { title, sections, page_targets, sort_order } = req.body;
+  const { title, sections, page_targets, sort_order, access_type, allowed_roles, allowed_users } = req.body;
 
   if (!title || !title.trim()) {
     return res.status(400).json({ message: 'Title is required' });
@@ -136,6 +182,17 @@ exports.create = async (req, res) => {
     }
   }
 
+  // Validate access_type
+  const finalAccessType = access_type && VALID_ACCESS_TYPES.includes(access_type) ? access_type : 'all';
+
+  // Validate allowed_roles/allowed_users based on access_type
+  if ((finalAccessType === 'roles' || finalAccessType === 'roles_and_users') && (!allowed_roles || !Array.isArray(allowed_roles) || allowed_roles.length === 0)) {
+    return res.status(400).json({ message: 'At least one role must be selected' });
+  }
+  if ((finalAccessType === 'users' || finalAccessType === 'roles_and_users') && (!allowed_users || !Array.isArray(allowed_users) || allowed_users.length === 0)) {
+    return res.status(400).json({ message: 'At least one user must be selected' });
+  }
+
   try {
     const sectionsJson = JSON.stringify(sections.map((s, idx) => {
       let description = (s.description || '').trim();
@@ -153,10 +210,17 @@ exports.create = async (req, res) => {
       visible: pt.visible !== undefined ? !!pt.visible : true,
     })));
 
+    const allowedRolesJson = (finalAccessType === 'roles' || finalAccessType === 'roles_and_users')
+      ? JSON.stringify(allowed_roles.map(Number))
+      : null;
+    const allowedUsersJson = (finalAccessType === 'users' || finalAccessType === 'roles_and_users')
+      ? JSON.stringify(allowed_users.map(Number))
+      : null;
+
     const [result] = await db.query(
-      `INSERT INTO smm_documents (title, sections, page_targets, sort_order, created_by)
-       VALUES (?, ?, ?, ?, ?)`,
-      [title.trim(), sectionsJson, pageTargetsJson, sort_order || 0, req.user.id]
+      `INSERT INTO smm_documents (title, sections, page_targets, sort_order, access_type, allowed_roles, allowed_users, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [title.trim(), sectionsJson, pageTargetsJson, sort_order || 0, finalAccessType, allowedRolesJson, allowedUsersJson, req.user.id]
     );
 
     const [created] = await db.query('SELECT * FROM smm_documents WHERE id = ?', [result.insertId]);
@@ -175,7 +239,7 @@ exports.update = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM smm_documents WHERE id = ? AND is_active = 1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Document not found' });
 
-    const { title, sections, page_targets, sort_order } = req.body;
+    const { title, sections, page_targets, sort_order, access_type, allowed_roles, allowed_users } = req.body;
     const current = parseRow(rows[0]);
 
     // Validate sections if provided
@@ -199,6 +263,20 @@ exports.update = async (req, res) => {
       }
     }
 
+    // Determine final access_type
+    const finalAccessType = access_type && VALID_ACCESS_TYPES.includes(access_type) ? access_type : (current.access_type || 'all');
+
+    // Validate allowed_roles/allowed_users based on access_type
+    const finalAllowedRoles = allowed_roles !== undefined ? allowed_roles : current.allowed_roles;
+    const finalAllowedUsers = allowed_users !== undefined ? allowed_users : current.allowed_users;
+
+    if ((finalAccessType === 'roles' || finalAccessType === 'roles_and_users') && (!finalAllowedRoles || !Array.isArray(finalAllowedRoles) || finalAllowedRoles.length === 0)) {
+      return res.status(400).json({ message: 'At least one role must be selected' });
+    }
+    if ((finalAccessType === 'users' || finalAccessType === 'roles_and_users') && (!finalAllowedUsers || !Array.isArray(finalAllowedUsers) || finalAllowedUsers.length === 0)) {
+      return res.status(400).json({ message: 'At least one user must be selected' });
+    }
+
     const newSections = sections
       ? JSON.stringify(sections.map((s, idx) => {
           let description = (s.description || '').trim();
@@ -218,15 +296,25 @@ exports.update = async (req, res) => {
         })))
       : JSON.stringify(current.page_targets);
 
+    const allowedRolesJson = (finalAccessType === 'roles' || finalAccessType === 'roles_and_users')
+      ? JSON.stringify((allowed_roles !== undefined ? allowed_roles : current.allowed_roles || []).map(Number))
+      : null;
+    const allowedUsersJson = (finalAccessType === 'users' || finalAccessType === 'roles_and_users')
+      ? JSON.stringify((allowed_users !== undefined ? allowed_users : current.allowed_users || []).map(Number))
+      : null;
+
     await db.query(
       `UPDATE smm_documents SET
-        title = ?, sections = ?, page_targets = ?, sort_order = ?
+        title = ?, sections = ?, page_targets = ?, sort_order = ?, access_type = ?, allowed_roles = ?, allowed_users = ?
        WHERE id = ?`,
       [
         title !== undefined ? title.trim() : current.title,
         newSections,
         newPageTargets,
         sort_order !== undefined ? sort_order : current.sort_order,
+        finalAccessType,
+        allowedRolesJson,
+        allowedUsersJson,
         req.params.id,
       ]
     );
