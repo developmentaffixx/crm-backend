@@ -7,6 +7,7 @@ const leadSummaryController = require('../controllers/leadSummary.controller');
 const leadSwotController = require('../controllers/leadSwot.controller');
 const leadSwotNotesController = require('../controllers/leadSwotNotes.controller');
 const leadQualificationController = require('../controllers/leadQualification.controller');
+const leadQualificationScoreController = require('../controllers/leadQualificationScore.controller');
 const googleSheetSyncController = require('../controllers/googleSheetSync.controller');
 
 // All lead routes require authentication
@@ -128,5 +129,13 @@ router.get('/:id/qualification', param('id').isInt(), leadQualificationControlle
 
 // PUT  /api/leads/:id/qualification — save/update qualification checklist
 router.put('/:id/qualification', [param('id').isInt()], leadQualificationController.saveQualification);
+
+// ── Lead Qualification Score (New scoring system) ──────────────────────────────
+
+// GET  /api/leads/:id/qualification-score — get qualification score
+router.get('/:id/qualification-score', param('id').isInt(), leadQualificationScoreController.getScore);
+
+// PUT  /api/leads/:id/qualification-score — save/update qualification score
+router.put('/:id/qualification-score', [param('id').isInt()], leadQualificationScoreController.saveScore);
 
 module.exports = router;
