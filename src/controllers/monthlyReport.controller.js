@@ -1,6 +1,50 @@
 const db = require('../config/db');
 const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
-const puppeteer = require('puppeteer');
+
+// Lazy-load puppeteer to avoid startup issues
+let puppeteerModule = null;
+function getPuppeteer() {
+  if (!puppeteerModule) puppeteerModule = require('puppeteer');
+  return puppeteerModule;
+}
+
+// Find Chrome executable — tries multiple locations
+async function launchBrowser() {
+  const puppeteer = getPuppeteer();
+
+  // Try 1: Default puppeteer bundled Chrome
+  try {
+    const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    return browser;
+  } catch (e) { /* continue */ }
+
+  // Try 2: System chromium paths
+  const paths = [
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/snap/bin/chromium',
+  ];
+
+  for (const execPath of paths) {
+    try {
+      const fs = require('fs');
+      if (fs.existsSync(execPath)) {
+        const browser = await puppeteer.launch({ headless: 'new', executablePath: execPath, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+        return browser;
+      }
+    } catch (e) { /* continue */ }
+  }
+
+  // Try 3: Use channel
+  try {
+    const browser = await puppeteer.launch({ headless: 'new', channel: 'chrome', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    return browser;
+  } catch (e) { /* continue */ }
+
+  throw new Error('Chrome/Chromium not found. Run: npx puppeteer browsers install chrome');
+}
 
 // JSON fields that are stored/parsed
 const JSON_FIELDS = [
@@ -278,7 +322,7 @@ exports.exportPdf = async (req, res) => {
     const report = parseRow(rows[0]);
     const html = buildPdfHtml(report);
 
-    browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    browser = await launchBrowser();
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'networkidle0' });
     await new Promise(r => setTimeout(r, 1500));
