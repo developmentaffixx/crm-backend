@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
+const puppeteer = require('puppeteer');
 
 // JSON fields that are stored/parsed
 const JSON_FIELDS = [
@@ -262,8 +263,6 @@ exports.deleteImage = async (req, res) => {
 exports.exportPdf = async (req, res) => {
   let browser = null;
   try {
-    const puppeteer = require('puppeteer');
-
     const [rows] = await db.query(
       `SELECT mr.*, p.title AS project_title, l.business_name AS client_name,
               CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
