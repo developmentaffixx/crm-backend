@@ -260,6 +260,7 @@ exports.deleteImage = async (req, res) => {
 // Generates landscape PDF with branded styling, returns as download
 // ─────────────────────────────────────────────────────────────────────────────
 exports.exportPdf = async (req, res) => {
+  let browser = null;
   try {
     const puppeteer = require('puppeteer');
 
@@ -280,7 +281,7 @@ exports.exportPdf = async (req, res) => {
     // Build HTML for the PDF
     const html = buildPdfHtml(report);
 
-    const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+    browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await new Promise(r => setTimeout(r, 2000));
@@ -294,13 +295,14 @@ exports.exportPdf = async (req, res) => {
     });
     await browser.close();
 
-    const filename = `${report.project_title || 'Report'}_${report.reporting_month}_${report.platform}.pdf`.replace(/[^a-zA-Z0-9_\-.]/g, '_');
+    const filename = `${report.project_title || 'Report'}_${report.reporting_month}.pdf`.replace(/[^a-zA-Z0-9_\-.]/g, '_');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     return res.send(pdfBuffer);
   } catch (err) {
-    console.error('Monthly report PDF export error:', err);
-    return res.status(500).json({ message: 'Failed to generate PDF' });
+    if (browser) try { await browser.close(); } catch(e) {}
+    console.error('Monthly report PDF export error:', err.message, err.stack);
+    return res.status(500).json({ message: 'Failed to generate PDF: ' + err.message });
   }
 };
 
