@@ -33,11 +33,11 @@ router.get('/', controller.list);
 // POST /api/monthly-reports — create report
 router.post('/', controller.create);
 
+// GET /api/monthly-reports/:id/pdf — export as PDF (MUST be before /:id)
+router.get('/:id/pdf', param('id').isInt(), controller.exportPdf);
+
 // GET /api/monthly-reports/:id — get single report
 router.get('/:id', param('id').isInt(), controller.getOne);
-
-// GET /api/monthly-reports/:id/pdf — export as PDF
-router.get('/:id/pdf', param('id').isInt(), controller.exportPdf);
 
 // PUT /api/monthly-reports/:id — update report
 router.put('/:id', param('id').isInt(), controller.update);

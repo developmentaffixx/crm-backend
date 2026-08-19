@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS smm_monthly_reports (
   project_id      INT UNSIGNED NOT NULL,
   reporting_month VARCHAR(7) NOT NULL COMMENT 'YYYY-MM format',
   report_date     DATE DEFAULT NULL,
-  platform        ENUM('instagram', 'facebook', 'linkedin', 'youtube', 'twitter') NOT NULL DEFAULT 'instagram',
+  platform        JSON NOT NULL DEFAULT '["instagram"]' COMMENT 'JSON array of platforms e.g. ["instagram","facebook"]',
   status          ENUM('draft', 'submitted', 'approved') NOT NULL DEFAULT 'draft',
 
   -- Step 2: Executive Summary
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS smm_monthly_reports (
   created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 
-  UNIQUE KEY uq_project_month_platform (project_id, reporting_month, platform),
+  UNIQUE KEY uq_project_month (project_id, reporting_month),
   KEY idx_mpr_status (status),
   KEY idx_mpr_month (reporting_month),
   CONSTRAINT fk_mpr_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,

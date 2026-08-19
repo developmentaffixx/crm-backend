@@ -3,6 +3,7 @@ const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('.
 
 // JSON fields that are stored/parsed
 const JSON_FIELDS = [
+  'platform',
   'content_overview',
   'most_viewed_posts',
   'account_performance',
@@ -35,7 +36,7 @@ exports.list = async (req, res) => {
 
     if (project_id) { where += ' AND mr.project_id = ?'; params.push(project_id); }
     if (status) { where += ' AND mr.status = ?'; params.push(status); }
-    if (platform) { where += ' AND mr.platform = ?'; params.push(platform); }
+    if (platform) { where += ' AND JSON_CONTAINS(mr.platform, ?)'; params.push(JSON.stringify(platform)); }
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const [rows] = await db.query(
@@ -91,18 +92,15 @@ exports.getOne = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
   try {
-    const { project_id, reporting_month, platform } = req.body;
+    const { project_id, reporting_month } = req.body;
 
     if (!project_id || !reporting_month) {
       return res.status(400).json({ message: 'Project and reporting month are required' });
     }
 
-    const finalPlatform = platform && VALID_PLATFORMS.includes(platform) ? platform : 'instagram';
-
     const data = {
       project_id,
       reporting_month,
-      platform: finalPlatform,
       created_by: req.user.id,
     };
 
@@ -112,7 +110,7 @@ exports.create = async (req, res) => {
       if (req.body[f] !== undefined) data[f] = req.body[f];
     });
 
-    // JSON fields
+    // JSON fields (includes platform)
     JSON_FIELDS.forEach(f => {
       if (req.body[f] !== undefined) data[f] = JSON.stringify(req.body[f]);
     });
@@ -148,7 +146,7 @@ exports.update = async (req, res) => {
     }
 
     const updates = {};
-    const textFields = ['report_date', 'executive_summary', 'conclusion', 'status', 'platform'];
+    const textFields = ['report_date', 'executive_summary', 'conclusion', 'status'];
     textFields.forEach(f => {
       if (req.body[f] !== undefined) updates[f] = req.body[f];
     });
@@ -282,10 +280,10 @@ exports.exportPdf = async (req, res) => {
     // Build HTML for the PDF
     const html = buildPdfHtml(report);
 
-    const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    await new Promise(r => setTimeout(r, 1000));
+    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2000));
 
     const pdfBuffer = await page.pdf({
       width: '1280px',
@@ -312,7 +310,9 @@ function buildPdfHtml(report) {
   const brandColor = '#5D3A1A';
   const accentColor = '#C49A6C';
   const monthLabel = report.reporting_month ? new Date(report.reporting_month + '-01').toLocaleDateString('en-US', { month: 'long', year: 'numeric' }).toUpperCase() : '';
-  const platformLabel = (report.platform || 'instagram').charAt(0).toUpperCase() + (report.platform || 'instagram').slice(1);
+  const platformLabel = Array.isArray(report.platform)
+    ? report.platform.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')
+    : (report.platform || 'Instagram');
 
   // Helper for slides
   const slide = (content) => `<div class="slide">${content}</div>`;
