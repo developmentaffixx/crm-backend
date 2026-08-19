@@ -263,9 +263,6 @@ exports.exportPdf = async (req, res) => {
   let browser = null;
   try {
     const puppeteer = require('puppeteer');
-    const os = require('os');
-    const path = require('path');
-    const fs = require('fs');
 
     const [rows] = await db.query(
       `SELECT mr.*, p.title AS project_title, l.business_name AS client_name,
@@ -280,21 +277,12 @@ exports.exportPdf = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Report not found' });
 
     const report = parseRow(rows[0]);
-
-    // Build HTML for the PDF
     const html = buildPdfHtml(report);
 
-    // Use unique temp directory to avoid EEXIST errors
-    const tmpDir = path.join(os.tmpdir(), `mpr_pdf_${Date.now()}_${Math.random().toString(36).slice(2)}`);
-
-    browser = await puppeteer.launch({
-      headless: 'new',
-      userDataDir: tmpDir,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    });
+    browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await new Promise(r => setTimeout(r, 2000));
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    await new Promise(r => setTimeout(r, 1500));
 
     const pdfBuffer = await page.pdf({
       width: '1280px',
@@ -308,10 +296,6 @@ exports.exportPdf = async (req, res) => {
     const filename = `${report.project_title || 'Report'}_${report.reporting_month}.pdf`.replace(/[^a-zA-Z0-9_\-.]/g, '_');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-    // Cleanup temp dir in background
-    fs.rm(tmpDir, { recursive: true, force: true }, () => {});
-
     return res.send(pdfBuffer);
   } catch (err) {
     if (browser) try { await browser.close(); } catch(e) {}
