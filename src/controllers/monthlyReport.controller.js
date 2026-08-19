@@ -300,7 +300,7 @@ exports.exportPdf = async (req, res) => {
   } catch (err) {
     if (browser) try { await browser.close(); } catch(e) {}
     console.error('Monthly report PDF export error:', err.message, err.stack);
-    return res.status(500).json({ message: 'Failed to generate PDF: ' + err.message });
+    return res.status(500).json({ message: 'Failed to generate PDF: ' + err.message, stack: err.stack, code: err.code });
   }
 };
 
