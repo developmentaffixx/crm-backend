@@ -25,6 +25,7 @@
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.1",
     "pdfkit": "^0.19.1",
+    "pptxgenjs": "^4.0.1",
     "puppeteer": "^25.0.4",
     "socket.io": "^4.7.5"
   },
