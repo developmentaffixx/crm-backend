@@ -19,8 +19,28 @@ exports.list = async (req, res) => {
 
     if (!rows.length) return res.json([]);
 
-    // Fetch all reactions for these announcements in one query
     const ids = rows.map(r => r.id);
+
+    // Fetch read counts per announcement (for admin "seen by" indicator)
+    let readCountMap = {};
+    let totalActiveUsers = 0;
+    if (req.user.role === 'admin') {
+      const [userCount] = await db.query(
+        `SELECT COUNT(*) AS count FROM users WHERE status = 'active' AND deleted = 0`
+      );
+      totalActiveUsers = userCount[0].count;
+
+      const [readCounts] = await db.query(
+        `SELECT announcement_id, COUNT(*) AS read_count FROM announcement_reads
+         WHERE announcement_id IN (?) GROUP BY announcement_id`,
+        [ids]
+      );
+      for (const r of readCounts) {
+        readCountMap[r.announcement_id] = Number(r.read_count);
+      }
+    }
+
+    // Fetch all reactions for these announcements in one query
     const [reactions] = await db.query(
       `SELECT announcement_id, emoji, COUNT(*) AS count FROM announcement_reactions
        WHERE announcement_id IN (?) GROUP BY announcement_id, emoji`,
@@ -47,6 +67,10 @@ exports.list = async (req, res) => {
       ...a,
       reactions: reactionMap[a.id] || [],
       my_reaction: myReactionMap[a.id] || null,
+      ...(req.user.role === 'admin' ? {
+        read_count: readCountMap[a.id] || 0,
+        total_users: totalActiveUsers,
+      } : {}),
     }));
 
     return res.json(enriched);
@@ -220,6 +244,60 @@ exports.react = async (req, res) => {
     }
   } catch (err) {
     console.error('React error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/announcements/:id/read-analytics
+ * Admin: see who has read and who hasn't read an announcement
+ */
+exports.readAnalytics = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get all active users
+    const [allUsers] = await db.query(
+      `SELECT u.id, CONCAT(u.first_name, ' ', u.last_name) AS user_name,
+              u.designation, u.profile_image, u.department
+       FROM users u
+       WHERE u.status = 'active' AND u.deleted = 0`
+    );
+
+    // Get users who have read this announcement
+    const [readUsers] = await db.query(
+      `SELECT ar.user_id, ar.read_at
+       FROM announcement_reads ar
+       WHERE ar.announcement_id = ?`,
+      [id]
+    );
+
+    const readUserIds = new Set(readUsers.map(r => r.user_id));
+    const readAtMap = {};
+    for (const r of readUsers) {
+      readAtMap[r.user_id] = r.read_at;
+    }
+
+    const read = [];
+    const unread = [];
+
+    for (const user of allUsers) {
+      if (readUserIds.has(user.id)) {
+        read.push({ ...user, read_at: readAtMap[user.id] });
+      } else {
+        unread.push(user);
+      }
+    }
+
+    return res.json({
+      total_users: allUsers.length,
+      read_count: read.length,
+      unread_count: unread.length,
+      read,
+      unread,
+    });
+  } catch (err) {
+    console.error('Read analytics error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
