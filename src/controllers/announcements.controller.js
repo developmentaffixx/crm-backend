@@ -24,9 +24,9 @@ exports.list = async (req, res) => {
     // Fetch read counts per announcement (for admin "seen by" indicator)
     let readCountMap = {};
     let totalActiveUsers = 0;
-    if (req.user.role === 'admin') {
+    if (req.user.is_admin) {
       const [userCount] = await db.query(
-        `SELECT COUNT(*) AS count FROM users WHERE status = 'active' AND deleted = 0`
+        `SELECT COUNT(*) AS count FROM users WHERE is_active = 1 AND deleted = 0`
       );
       totalActiveUsers = userCount[0].count;
 
@@ -67,7 +67,7 @@ exports.list = async (req, res) => {
       ...a,
       reactions: reactionMap[a.id] || [],
       my_reaction: myReactionMap[a.id] || null,
-      ...(req.user.role === 'admin' ? {
+      ...(req.user.is_admin ? {
         read_count: readCountMap[a.id] || 0,
         total_users: totalActiveUsers,
       } : {}),
@@ -259,9 +259,9 @@ exports.readAnalytics = async (req, res) => {
     // Get all active users
     const [allUsers] = await db.query(
       `SELECT u.id, CONCAT(u.first_name, ' ', u.last_name) AS user_name,
-              u.designation, u.profile_image, u.department
+              u.designation, u.avatar_url, u.department
        FROM users u
-       WHERE u.status = 'active' AND u.deleted = 0`
+       WHERE u.is_active = 1 AND u.deleted = 0`
     );
 
     // Get users who have read this announcement
@@ -312,7 +312,7 @@ exports.getReactions = async (req, res) => {
     const [rows] = await db.query(
       `SELECT ar.emoji, ar.created_at,
               CONCAT(u.first_name, ' ', u.last_name) AS user_name,
-              u.designation, u.profile_image
+              u.designation, u.avatar_url
        FROM announcement_reactions ar
        INNER JOIN users u ON u.id = ar.user_id
        WHERE ar.announcement_id = ?
