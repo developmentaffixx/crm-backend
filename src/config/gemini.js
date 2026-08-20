@@ -3,7 +3,7 @@
  * Uses Gemini 2.0 Flash (free tier: 15 RPM, 1M tokens/day)
  */
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent';
 
 /**
  * Send a prompt to Gemini and get the response text.
