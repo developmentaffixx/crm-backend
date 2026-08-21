@@ -316,6 +316,13 @@ exports.getCycleDetail = async (req, res) => {
     // Feedback is stored in service_cycles.notes
     cycle.feedback = cycle.notes || '';
 
+    // If cycle is paused, hide tasks and tickets from non-admin users
+    if (cycle.status === 'paused' && !req.user.is_admin) {
+      cycle.tasks = [];
+      cycle.tickets = [];
+      cycle.is_paused_hidden = true; // flag for frontend to show message
+    }
+
     return res.json(cycle);
   } catch (err) {
     console.error('Get cycle detail error:', err);

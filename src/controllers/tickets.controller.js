@@ -332,6 +332,21 @@ exports.update = async (req, res) => {
       return res.status(403).json({ message: 'Closed tickets cannot be edited' });
     }
 
+    // If ticket belongs to a paused cycle (by project + date range), only admin can edit
+    if (!req.user.is_admin && ticket.project_id) {
+      const ticketDate = ticket.due_date || ticket.created_at;
+      const [pausedCycle] = await db.query(
+        `SELECT id FROM service_cycles
+         WHERE project_id = ? AND status = 'paused'
+           AND start_date <= ? AND end_date >= ?
+         LIMIT 1`,
+        [ticket.project_id, ticketDate, ticketDate]
+      );
+      if (pausedCycle.length > 0) {
+        return res.status(403).json({ message: 'This ticket belongs to a paused cycle. Only admins can edit it.' });
+      }
+    }
+
     if (!req.user.is_admin && ticket.reported_by !== req.user.id) {
       // Assigned member can ONLY update status and resolution_summary
       if (ticket.assigned_to === req.user.id) {

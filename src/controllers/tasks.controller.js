@@ -392,6 +392,20 @@ exports.update = async (req, res) => {
       return res.status(400).json({ message: 'Closed tasks cannot be edited' });
     }
 
+    // If task belongs to a paused cycle, only admin can edit
+    if (!req.user.is_admin) {
+      const [pausedCycle] = await db.query(
+        `SELECT sc.id FROM cycle_tasks ct
+         JOIN service_cycles sc ON sc.id = ct.cycle_id
+         WHERE ct.task_id = ? AND sc.status = 'paused'
+         LIMIT 1`,
+        [req.params.id]
+      );
+      if (pausedCycle.length > 0) {
+        return res.status(403).json({ message: 'This task belongs to a paused cycle. Only admins can edit it.' });
+      }
+    }
+
     // Admin has full access, otherwise only creator can edit
     if (!req.user.is_admin && task.created_by !== req.user.id) {
       return res.status(403).json({ message: 'Only the task creator can edit this task' });
