@@ -84,6 +84,13 @@ exports.list = async (req, res) => {
         (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
       )`;
       params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+
+      // Hide tasks that belong to a paused cycle
+      where += ` AND NOT EXISTS (
+        SELECT 1 FROM cycle_tasks ct_pause
+        JOIN service_cycles sc_pause ON sc_pause.id = ct_pause.cycle_id
+        WHERE ct_pause.task_id = t.id AND sc_pause.status = 'paused'
+      )`;
     }
 
     if (status)    { where += ' AND t.status = ?';    params.push(status); }
@@ -265,6 +272,20 @@ exports.getOne = async (req, res) => {
       );
       if (collab.length === 0) {
         return res.status(403).json({ message: 'Access denied' });
+      }
+    }
+
+    // If task belongs to a paused cycle, non-admin users cannot view it
+    if (!req.user.is_admin) {
+      const [pausedCycle] = await db.query(
+        `SELECT sc.id FROM cycle_tasks ct
+         JOIN service_cycles sc ON sc.id = ct.cycle_id
+         WHERE ct.task_id = ? AND sc.status = 'paused'
+         LIMIT 1`,
+        [task.id]
+      );
+      if (pausedCycle.length > 0) {
+        return res.status(403).json({ message: 'This task belongs to a paused cycle and is not accessible.' });
       }
     }
 

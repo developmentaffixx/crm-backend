@@ -14,7 +14,7 @@ const CYCLE_SECTIONS = [
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: Generate ONE next cycle for a project service (or legacy project)
 // ─────────────────────────────────────────────────────────────────────────────
-async function generateNextCycleForProject(projectId, startDate, endDate, userId, projectServiceId = null) {
+async function generateNextCycleForProject(projectId, startDate, endDate, userId, projectServiceId = null, cycleStatus = 'active') {
   // cycle_number must be unique per project (uq_project_cycle constraint on project_id+cycle_number)
   // So always get the max across the ENTIRE project to avoid duplicate key errors
   const [existing] = await db.query(
@@ -41,8 +41,8 @@ async function generateNextCycleForProject(projectId, startDate, endDate, userId
 
   const [result] = await db.query(
     `INSERT INTO service_cycles (project_id, project_service_id, cycle_number, title, start_date, end_date, status, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
-    [projectId, projectServiceId, nextCycleNum, title, formatDate(cycleStart), formatDate(cycleEnd), userId]
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [projectId, projectServiceId, nextCycleNum, title, formatDate(cycleStart), formatDate(cycleEnd), cycleStatus, userId]
   );
 
   const cycleId = result.insertId;
@@ -54,7 +54,7 @@ async function generateNextCycleForProject(projectId, startDate, endDate, userId
     [sectionValues]
   );
 
-  return { id: cycleId, cycle_number: nextCycleNum, title, start_date: formatDate(cycleStart), end_date: formatDate(cycleEnd), status: 'active' };
+  return { id: cycleId, cycle_number: nextCycleNum, title, start_date: formatDate(cycleStart), end_date: formatDate(cycleEnd), status: cycleStatus };
 }
 
 function formatDate(date) {
@@ -140,21 +140,26 @@ exports.generateCycles = async (req, res) => {
       }
     }
 
-    // Check if any active cycle already exists for this scope
-    let existingQuery, existingParams;
+    // Check for date overlap with existing cycles in this scope
+    let overlapQuery, overlapParams;
     if (psId) {
-      existingQuery = `SELECT id FROM service_cycles WHERE project_service_id = ? AND status = 'active' LIMIT 1`;
-      existingParams = [psId];
+      overlapQuery = `SELECT id, title, start_date, end_date FROM service_cycles WHERE project_service_id = ? AND status != 'skipped' AND (start_date <= ? AND end_date >= ?) LIMIT 1`;
+      overlapParams = [psId, end_date, start_date];
     } else {
-      existingQuery = `SELECT id FROM service_cycles WHERE project_id = ? AND project_service_id IS NULL AND status = 'active' LIMIT 1`;
-      existingParams = [projectId];
+      overlapQuery = `SELECT id, title, start_date, end_date FROM service_cycles WHERE project_id = ? AND project_service_id IS NULL AND status != 'skipped' AND (start_date <= ? AND end_date >= ?) LIMIT 1`;
+      overlapParams = [projectId, end_date, start_date];
     }
-    const [existing] = await db.query(existingQuery, existingParams);
-    if (existing.length > 0) {
-      return res.status(409).json({ message: 'An active cycle already exists. Complete it before creating a new one.' });
+    const [overlapping] = await db.query(overlapQuery, overlapParams);
+    if (overlapping.length > 0) {
+      const ov = overlapping[0];
+      return res.status(409).json({ message: `Date range overlaps with "${ov.title}" (${ov.start_date.toISOString().split('T')[0]} to ${ov.end_date.toISOString().split('T')[0]}). Choose non-overlapping dates.` });
     }
 
-    const cycle = await generateNextCycleForProject(projectId, start_date, end_date, req.user.id, psId);
+    // Determine status based on dates
+    const today = new Date().toISOString().split('T')[0];
+    const cycleStatus = start_date > today ? 'upcoming' : 'active';
+
+    const cycle = await generateNextCycleForProject(projectId, start_date, end_date, req.user.id, psId, cycleStatus);
 
     // Log activity
     await db.query(
@@ -557,25 +562,27 @@ exports.generateNextCycle = async (req, res) => {
       }
     }
 
-    // Check if there's an active or paused cycle (can't generate next if current isn't completed)
+    // Check for date overlap with existing cycles in this scope
     let activeQuery, activeParams;
     if (psId) {
-      activeQuery = `SELECT id, status FROM service_cycles WHERE project_service_id = ? AND status IN ('active', 'paused') LIMIT 1`;
-      activeParams = [psId];
+      activeQuery = `SELECT id, title, start_date, end_date FROM service_cycles WHERE project_service_id = ? AND status != 'skipped' AND (start_date <= ? AND end_date >= ?) LIMIT 1`;
+      activeParams = [psId, end_date, start_date];
     } else {
-      activeQuery = `SELECT id, status FROM service_cycles WHERE project_id = ? AND project_service_id IS NULL AND status IN ('active', 'paused') LIMIT 1`;
-      activeParams = [projectId];
+      activeQuery = `SELECT id, title, start_date, end_date FROM service_cycles WHERE project_id = ? AND project_service_id IS NULL AND status != 'skipped' AND (start_date <= ? AND end_date >= ?) LIMIT 1`;
+      activeParams = [projectId, end_date, start_date];
     }
 
     const [activeCycles] = await db.query(activeQuery, activeParams);
     if (activeCycles.length > 0) {
-      const msg = activeCycles[0].status === 'paused'
-        ? 'Current cycle is paused. Resume and complete it before creating the next one.'
-        : 'Complete the current active cycle before creating the next one.';
-      return res.status(400).json({ message: msg });
+      const ov = activeCycles[0];
+      return res.status(400).json({ message: `Date range overlaps with "${ov.title}" (${ov.start_date.toISOString().split('T')[0]} to ${ov.end_date.toISOString().split('T')[0]}). Choose non-overlapping dates.` });
     }
 
-    const cycle = await generateNextCycleForProject(projectId, start_date, end_date, req.user.id, psId);
+    // Determine status based on dates
+    const today = new Date().toISOString().split('T')[0];
+    const cycleStatus = start_date > today ? 'upcoming' : 'active';
+
+    const cycle = await generateNextCycleForProject(projectId, start_date, end_date, req.user.id, psId, cycleStatus);
 
     // Log activity
     await db.query(

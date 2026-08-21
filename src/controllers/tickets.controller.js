@@ -25,6 +25,16 @@ exports.list = async (req, res) => {
     if (!req.user.is_admin) {
       where += ' AND (t.assigned_to = ? OR t.reported_by = ?)';
       params.push(req.user.id, req.user.id);
+
+      // Hide tickets that fall within a paused cycle's date range
+      where += ` AND NOT (
+        t.project_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM service_cycles sc_pause
+          WHERE sc_pause.project_id = t.project_id AND sc_pause.status = 'paused'
+            AND sc_pause.start_date <= COALESCE(t.due_date, t.created_at)
+            AND sc_pause.end_date >= COALESCE(t.due_date, t.created_at)
+        )
+      )`;
     }
 
     const [rows] = await db.query(
@@ -173,6 +183,21 @@ exports.getOne = async (req, res) => {
     // Non-admin access check
     if (!req.user.is_admin && ticket.assigned_to !== req.user.id && ticket.reported_by !== req.user.id) {
       return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // If ticket belongs to a paused cycle, non-admin users cannot view it
+    if (!req.user.is_admin && ticket.project_id) {
+      const ticketDate = ticket.due_date || ticket.created_at;
+      const [pausedCycle] = await db.query(
+        `SELECT id FROM service_cycles
+         WHERE project_id = ? AND status = 'paused'
+           AND start_date <= ? AND end_date >= ?
+         LIMIT 1`,
+        [ticket.project_id, ticketDate, ticketDate]
+      );
+      if (pausedCycle.length > 0) {
+        return res.status(403).json({ message: 'This ticket belongs to a paused cycle and is not accessible.' });
+      }
     }
 
     // Fetch attachments
