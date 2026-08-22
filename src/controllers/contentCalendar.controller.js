@@ -415,35 +415,89 @@ exports.update = async (req, res) => {
       await conn.query(`UPDATE content_calendar_plans SET ${setClauses} WHERE id = ?`, [...Object.values(planUpdates), req.params.id]);
     }
 
-    // Replace posts (delete all + re-insert)
+    // Helper: resolve assignment/linked fields for a slot on update.
+    // Preference order: value explicitly sent by the client → value from the
+    // existing slot at the same position → sensible default. This keeps
+    // assignees, linked work items, and approval state intact when a plan is
+    // edited via the "Content Plans" modal (which only sends a subset of fields).
+    const pick = (incoming, existing, key, fallback = null) => {
+      if (incoming[key] !== undefined && incoming[key] !== null && incoming[key] !== '') return incoming[key];
+      if (existing && existing[key] !== undefined && existing[key] !== null) return existing[key];
+      return fallback;
+    };
+    const resolveSlotStatus = (incoming, existing, assignedTo) => {
+      // Never silently downgrade an in-flight/approved slot back to open.
+      const existingStatus = existing?.slot_status;
+      if (incoming.slot_status) {
+        // Only honour a client-sent "open"/"assigned" if it doesn't clobber later-stage work.
+        if (existingStatus && !['open', 'assigned'].includes(existingStatus)) return existingStatus;
+        return incoming.slot_status;
+      }
+      if (existingStatus) return existingStatus;
+      return assignedTo ? 'assigned' : 'open';
+    };
+
+    // Replace posts — preserve assignment & linked data by position
     if (posts !== undefined) {
+      const [existingPosts] = await conn.query(
+        'SELECT * FROM content_calendar_posts WHERE plan_id = ? ORDER BY id ASC',
+        [req.params.id]
+      );
       await conn.query('DELETE FROM content_calendar_posts WHERE plan_id = ?', [req.params.id]);
       if (posts.length > 0) {
-        for (const post of posts) {
+        for (let i = 0; i < posts.length; i++) {
+          const post = posts[i];
+          const prev = existingPosts[i] || null;
+          const assignedTo = pick(post, prev, 'assigned_to');
+          const assignedBy = post.assigned_to
+            ? (prev && String(prev.assigned_to) === String(post.assigned_to) ? prev.assigned_by || req.user.id : req.user.id)
+            : (prev ? prev.assigned_by : null);
+          const slotStatus = resolveSlotStatus(post, prev, assignedTo);
           await conn.query(
             `INSERT INTO content_calendar_posts 
-              (plan_id, linked_brief_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.params.id, toInt(post.linked_brief_id), toNull(post.post_no), toNull(post.platform),
-             toNull(post.format), toNull(post.topic), post.ad_target || 'organic',
-             toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta), post.status || 'planned']
+              (plan_id, assigned_to, assigned_by, linked_brief_id, linked_write_id, post_no, platform, format, topic, ad_target, shoot_date, posting_date, cta, status, slot_status, rejection_reason, submitted_at, approved_at, approved_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [req.params.id, assignedTo || null, assignedBy || null,
+             toInt(pick(post, prev, 'linked_brief_id')), toInt(prev ? prev.linked_write_id : null),
+             toNull(pick(post, prev, 'post_no')), toNull(post.platform),
+             toNull(post.format), toNull(post.topic), post.ad_target || (prev ? prev.ad_target : 'organic') || 'organic',
+             toNull(post.shoot_date), toNull(post.posting_date), toNull(post.cta),
+             post.status || (prev ? prev.status : 'planned') || 'planned', slotStatus,
+             prev ? prev.rejection_reason : null, prev ? prev.submitted_at : null,
+             prev ? prev.approved_at : null, prev ? prev.approved_by : null]
           );
         }
       }
     }
 
-    // Replace shoots
+    // Replace shoots — preserve assignment & linked data by position
     if (shoots !== undefined) {
+      const [existingShoots] = await conn.query(
+        'SELECT * FROM content_calendar_shoots WHERE plan_id = ? ORDER BY id ASC',
+        [req.params.id]
+      );
       await conn.query('DELETE FROM content_calendar_shoots WHERE plan_id = ?', [req.params.id]);
       if (shoots.length > 0) {
-        for (const shoot of shoots) {
+        for (let i = 0; i < shoots.length; i++) {
+          const shoot = shoots[i];
+          const prev = existingShoots[i] || null;
+          const assignedTo = pick(shoot, prev, 'assigned_to');
+          const assignedBy = shoot.assigned_to
+            ? (prev && String(prev.assigned_to) === String(shoot.assigned_to) ? prev.assigned_by || req.user.id : req.user.id)
+            : (prev ? prev.assigned_by : null);
+          const slotStatus = resolveSlotStatus(shoot, prev, assignedTo);
           await conn.query(
             `INSERT INTO content_calendar_shoots 
-              (plan_id, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.params.id, toInt(shoot.linked_shoot_id), toNull(shoot.shoot_date), toNull(shoot.location),
+              (plan_id, assigned_to, assigned_by, linked_shoot_id, linked_shoot_ref_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status, slot_status, rejection_reason, submitted_at, approved_at, approved_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [req.params.id, assignedTo || null, assignedBy || null,
+             toInt(pick(shoot, prev, 'linked_shoot_id')), toInt(prev ? prev.linked_shoot_ref_id : null),
+             toNull(shoot.shoot_date), toNull(shoot.location),
              toNull(shoot.description), shoot.num_videos || 0, shoot.num_photos || 0,
-             toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned']
+             toNull(shoot.talent), toNull(shoot.production_notes),
+             shoot.status || (prev ? prev.status : 'planned') || 'planned', slotStatus,
+             prev ? prev.rejection_reason : null, prev ? prev.submitted_at : null,
+             prev ? prev.approved_at : null, prev ? prev.approved_by : null]
           );
         }
       }
@@ -451,27 +505,35 @@ exports.update = async (req, res) => {
 
     // Replace ads — link to existing campaigns
     if (ads !== undefined) {
-      // Fetch existing ads to preserve their ad_no values
+      // Fetch existing ads to preserve ad_no + assignment/linked data
       const [existingAds] = await conn.query(
-        'SELECT id, ad_no FROM content_calendar_ads WHERE plan_id = ? ORDER BY id ASC',
+        'SELECT * FROM content_calendar_ads WHERE plan_id = ? ORDER BY id ASC',
         [req.params.id]
       );
       await conn.query('DELETE FROM content_calendar_ads WHERE plan_id = ?', [req.params.id]);
       if (ads.length > 0) {
         for (let i = 0; i < ads.length; i++) {
           const ad = ads[i];
+          const prev = existingAds[i] || null;
           // Reuse existing ad_no if available, otherwise generate a new global one
-          let adNo = (existingAds[i] && existingAds[i].ad_no) ? existingAds[i].ad_no : await generateNextAdNo(conn);
-          let linkedCampaignId = toInt(ad.linked_campaign_id) || null;
-          let creativeName = ad.creative_name || null;
-          let campaignObjective = ad.campaign_objective || 'lead_generation';
-          let platform = ad.platform || null;
-          let adStatus = ad.ad_status || 'planned';
-          let targetAudience = ad.target_audience || null;
-          let budget = ad.budget || null;
-          let startDate = ad.start_date;
-          let endDate = ad.end_date || null;
-          let expectedOutcomes = ad.expected_outcomes || null;
+          let adNo = (prev && prev.ad_no) ? prev.ad_no : await generateNextAdNo(conn);
+          let linkedCampaignId = toInt(ad.linked_campaign_id) || (prev ? prev.linked_campaign_id : null) || null;
+          let creativeName = ad.creative_name || (prev ? prev.creative_name : null) || null;
+          let campaignObjective = ad.campaign_objective || (prev ? prev.campaign_objective : null) || 'lead_generation';
+          let platform = ad.platform || (prev ? prev.platform : null) || null;
+          let adStatus = ad.ad_status || (prev ? prev.ad_status : null) || 'planned';
+          let targetAudience = ad.target_audience || (prev ? prev.target_audience : null) || null;
+          let budget = ad.budget || (prev ? prev.budget : null) || null;
+          let startDate = ad.start_date || (prev && prev.start_date ? (prev.start_date instanceof Date ? prev.start_date.toISOString().split('T')[0] : prev.start_date) : null);
+          let endDate = ad.end_date || (prev && prev.end_date ? (prev.end_date instanceof Date ? prev.end_date.toISOString().split('T')[0] : prev.end_date) : null) || null;
+          let expectedOutcomes = ad.expected_outcomes || (prev ? prev.expected_outcomes : null) || null;
+
+          // Preserve assignment & approval state from the matching existing slot
+          const assignedTo = pick(ad, prev, 'assigned_to');
+          const assignedBy = ad.assigned_to
+            ? (prev && String(prev.assigned_to) === String(ad.assigned_to) ? prev.assigned_by || req.user.id : req.user.id)
+            : (prev ? prev.assigned_by : null);
+          const slotStatus = resolveSlotStatus(ad, prev, assignedTo);
 
           // If linked to an existing campaign, pull data from it
           if (linkedCampaignId) {
@@ -491,10 +553,13 @@ exports.update = async (req, res) => {
 
           await conn.query(
             `INSERT INTO content_calendar_ads 
-              (plan_id, linked_campaign_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.params.id, linkedCampaignId, adNo, creativeName, campaignObjective, platform,
-             adStatus, targetAudience, budget, startDate, endDate, expectedOutcomes]
+              (plan_id, assigned_to, assigned_by, linked_campaign_id, linked_campaign_ref_id, ad_no, creative_name, campaign_objective, platform, ad_status, target_audience, budget, start_date, end_date, expected_outcomes, slot_status, rejection_reason, submitted_at, approved_at, approved_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [req.params.id, assignedTo || null, assignedBy || null, linkedCampaignId, toInt(prev ? prev.linked_campaign_ref_id : null),
+             adNo, creativeName, campaignObjective, platform,
+             adStatus, targetAudience, budget, startDate, endDate, expectedOutcomes, slotStatus,
+             prev ? prev.rejection_reason : null, prev ? prev.submitted_at : null,
+             prev ? prev.approved_at : null, prev ? prev.approved_by : null]
           );
 
           // Update the ad_campaign with the linked calendar ad reference
