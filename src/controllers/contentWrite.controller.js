@@ -46,7 +46,7 @@ exports.list = async (req, res) => {
        LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
        LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
        WHERE ${where}
-       ORDER BY cwr.created_at DESC`,
+       ORDER BY (ccp.posting_date IS NULL) ASC, ccp.posting_date ASC, cwr.created_at ASC`,
       params
     );
 
