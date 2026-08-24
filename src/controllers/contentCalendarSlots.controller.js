@@ -116,41 +116,78 @@ exports.listSlots = async (req, res) => {
       posts = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'post' }));
     }
 
-    // Fetch shoots
+    // Fetch shoots — pull filled details from the linked shoots record.
     let shoots = [];
     if (!item_type || item_type === 'shoot') {
-      const [rows] = await db.query(
-        `SELECT cs.*,
+      const shootSelect = (withLink) => `SELECT cs.*,
                 CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
                 CONCAT(ab.first_name, ' ', ab.last_name) AS assigned_by_name,
-                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name
+                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name${withLink ? `,
+                sh.project_campaign_name AS shoot_name,
+                sh.location_type AS shoot_location_type,
+                sh.city AS shoot_city,
+                sh.exact_address AS shoot_address,
+                sh.reporting_time AS shoot_reporting_time,
+                sh.video_clips AS num_videos,
+                sh.photos_clicked AS num_photos,
+                sh.shoot_id_code AS linked_shoot_code,
+                sh.shoot_date AS linked_shoot_date` : ''}
          FROM content_calendar_shoots cs
          LEFT JOIN users u ON u.id = cs.assigned_to
          LEFT JOIN users ab ON ab.id = cs.assigned_by
-         LEFT JOIN users au ON au.id = cs.approved_by
+         LEFT JOIN users au ON au.id = cs.approved_by${withLink ? `
+         LEFT JOIN shoots sh ON sh.calendar_slot_id = cs.id AND sh.deleted = 0` : ''}
          WHERE cs.plan_id IN (?) ${statusFilter} ${assignedFilter}
-         ORDER BY cs.shoot_date ASC, cs.id ASC`,
-        [planIds, ...statusParams, ...assignedParams]
-      );
+         ORDER BY cs.shoot_date ASC, cs.id ASC`;
+
+      let rows;
+      try {
+        [rows] = await db.query(shootSelect(true), [planIds, ...statusParams, ...assignedParams]);
+      } catch (joinErr) {
+        const errMsg = String(joinErr.message || joinErr.sqlMessage || '');
+        if (joinErr.code === 'ER_BAD_FIELD_ERROR' || joinErr.errno === 1054 ||
+            errMsg.includes('calendar_slot_id') || errMsg.includes('shoots')) {
+          [rows] = await db.query(shootSelect(false), [planIds, ...statusParams, ...assignedParams]);
+        } else {
+          throw joinErr;
+        }
+      }
       shoots = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'shoot' }));
     }
 
-    // Fetch ads
+    // Fetch ads — pull the linked campaign name/details from ad_campaigns.
     let ads = [];
     if (!item_type || item_type === 'ad') {
-      const [rows] = await db.query(
-        `SELECT ca.*,
+      const adSelect = (withLink) => `SELECT ca.*,
                 CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
                 CONCAT(ab.first_name, ' ', ab.last_name) AS assigned_by_name,
-                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name
+                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name${withLink ? `,
+                acmp.campaign_name AS linked_campaign_name,
+                acmp.campaign_id_code AS linked_campaign_code,
+                COALESCE(acmp.objective, ca.campaign_objective) AS campaign_objective_resolved,
+                COALESCE(acmp.budget, ca.budget) AS budget_resolved,
+                acmp.notes AS campaign_notes` : ''}
          FROM content_calendar_ads ca
          LEFT JOIN users u ON u.id = ca.assigned_to
          LEFT JOIN users ab ON ab.id = ca.assigned_by
-         LEFT JOIN users au ON au.id = ca.approved_by
+         LEFT JOIN users au ON au.id = ca.approved_by${withLink ? `
+         LEFT JOIN ad_campaigns acmp ON acmp.linked_calendar_ad_id = ca.id AND acmp.deleted = 0` : ''}
          WHERE ca.plan_id IN (?) ${statusFilter} ${assignedFilter}
-         ORDER BY ca.start_date ASC, ca.id ASC`,
-        [planIds, ...statusParams, ...assignedParams]
-      );
+         ORDER BY ca.start_date ASC, ca.id ASC`;
+
+      let rows;
+      try {
+        [rows] = await db.query(adSelect(true), [planIds, ...statusParams, ...assignedParams]);
+      } catch (joinErr) {
+        const errMsg = String(joinErr.message || joinErr.sqlMessage || '');
+        if (joinErr.code === 'ER_BAD_FIELD_ERROR' || joinErr.errno === 1054 ||
+            errMsg.includes('linked_calendar_ad_id') || errMsg.includes('campaign_id_code') ||
+            errMsg.includes('ad_campaigns')) {
+          [rows] = await db.query(adSelect(false), [planIds, ...statusParams, ...assignedParams]);
+        } else {
+          throw joinErr;
+        }
+      }
       ads = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'ad' }));
     }
 
