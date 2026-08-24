@@ -29,14 +29,20 @@ exports.list = async (req, res) => {
       }
     }
 
-    const [rows] = await db.query(
-      `SELECT cwr.*,
+    // Build the query. `cwr.posting_date` may not exist yet if the migration
+    // hasn't run — fall back to slot-only posting date in that case.
+    const buildListQuery = (hasPostingDate) => {
+      const postingExpr = hasPostingDate
+        ? 'COALESCE(cwr.posting_date, ccp.posting_date)'
+        : 'ccp.posting_date';
+      return `SELECT cwr.*,
               l.business_name AS client_brand_name,
               p.title AS project_title,
               s.name AS service_name,
               CONCAT(u_creator.first_name, ' ', u_creator.last_name) AS created_by_name,
               CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name,
               ccp.posting_date AS slot_posting_date,
+              ${postingExpr} AS effective_posting_date,
               COALESCE(cwr.content_type, ccp.format) AS content_type
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
@@ -46,9 +52,20 @@ exports.list = async (req, res) => {
        LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
        LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
        WHERE ${where}
-       ORDER BY (ccp.posting_date IS NULL) ASC, ccp.posting_date ASC, cwr.created_at ASC`,
-      params
-    );
+       ORDER BY (${postingExpr} IS NULL) ASC, ${postingExpr} ASC, cwr.created_at ASC`;
+    };
+
+    let rows;
+    try {
+      [rows] = await db.query(buildListQuery(true), params);
+    } catch (qErr) {
+      const errMsg = String(qErr.message || qErr.sqlMessage || '');
+      if (qErr.code === 'ER_BAD_FIELD_ERROR' || qErr.errno === 1054 || errMsg.includes('posting_date')) {
+        [rows] = await db.query(buildListQuery(false), params);
+      } else {
+        throw qErr;
+      }
+    }
 
     // Summary counts
     const summary = {
@@ -73,14 +90,18 @@ exports.list = async (req, res) => {
  */
 exports.getOne = async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `SELECT cwr.*,
+    const buildOneQuery = (hasPostingDate) => {
+      const postingExpr = hasPostingDate
+        ? 'COALESCE(cwr.posting_date, ccp.posting_date)'
+        : 'ccp.posting_date';
+      return `SELECT cwr.*,
               l.business_name AS client_brand_name,
               p.title AS project_title,
               s.name AS service_name,
               CONCAT(u_creator.first_name, ' ', u_creator.last_name) AS created_by_name,
               CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name,
-              ccp.posting_date AS slot_posting_date
+              ccp.posting_date AS slot_posting_date,
+              ${postingExpr} AS effective_posting_date
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
        LEFT JOIN projects p ON p.id = cwr.project_id
@@ -88,9 +109,20 @@ exports.getOne = async (req, res) => {
        LEFT JOIN users u_creator ON u_creator.id = cwr.created_by
        LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
        LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
-       WHERE cwr.id = ? AND cwr.deleted = 0`,
-      [req.params.id]
-    );
+       WHERE cwr.id = ? AND cwr.deleted = 0`;
+    };
+
+    let rows;
+    try {
+      [rows] = await db.query(buildOneQuery(true), [req.params.id]);
+    } catch (qErr) {
+      const errMsg = String(qErr.message || qErr.sqlMessage || '');
+      if (qErr.code === 'ER_BAD_FIELD_ERROR' || qErr.errno === 1054 || errMsg.includes('posting_date')) {
+        [rows] = await db.query(buildOneQuery(false), [req.params.id]);
+      } else {
+        throw qErr;
+      }
+    }
 
     if (rows.length === 0) return res.status(404).json({ message: 'Content request not found' });
 
@@ -119,7 +151,7 @@ exports.create = async (req, res) => {
     client_brand_id, project_id, service_id, platform, content_type,
     hook_opening_line, core_message, call_to_action,
     caption_content, creative_suggestion, reference_links,
-    calendar_slot_id,
+    calendar_slot_id, posting_date,
   } = req.body;
 
   const toNull = (val) => (val === '' || val === undefined || val === null) ? null : val;
@@ -248,6 +280,17 @@ exports.create = async (req, res) => {
       }
     }
 
+    // Persist posting_date separately so it works regardless of which insert
+    // branch ran, and degrades gracefully if the column doesn't exist yet.
+    const postingDateVal = toNull(posting_date);
+    if (postingDateVal) {
+      try {
+        await db.query('UPDATE content_write_requests SET posting_date = ? WHERE id = ?', [postingDateVal, insertId]);
+      } catch (pdErr) {
+        console.warn('posting_date not set (column may be missing):', pdErr.message);
+      }
+    }
+
     // Sync slot to submitted if linked
     if (slotIdVal) {
       try {
@@ -331,7 +374,12 @@ exports.update = async (req, res) => {
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f] === '' ? null : req.body[f]; });
 
-    if (Object.keys(updates).length === 0) {
+    // posting_date handled separately (guarded) so it degrades gracefully if
+    // the column doesn't exist yet.
+    const hasPostingDate = req.body.posting_date !== undefined;
+    const postingDateVal = req.body.posting_date === '' ? null : req.body.posting_date;
+
+    if (Object.keys(updates).length === 0 && !hasPostingDate) {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
@@ -347,9 +395,19 @@ exports.update = async (req, res) => {
       } catch (e) { /* table may not exist */ }
     }
 
-    const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-    const values = [...Object.values(updates), req.params.id];
-    await db.query(`UPDATE content_write_requests SET ${setClauses} WHERE id = ?`, values);
+    if (Object.keys(updates).length > 0) {
+      const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+      const values = [...Object.values(updates), req.params.id];
+      await db.query(`UPDATE content_write_requests SET ${setClauses} WHERE id = ?`, values);
+    }
+
+    if (hasPostingDate) {
+      try {
+        await db.query('UPDATE content_write_requests SET posting_date = ? WHERE id = ?', [postingDateVal, req.params.id]);
+      } catch (pdErr) {
+        console.warn('posting_date not updated (column may be missing):', pdErr.message);
+      }
+    }
 
     // ─── Sync to calendar slot: auto-submit when content is filled ────────────
     if (request.calendar_slot_id) {
