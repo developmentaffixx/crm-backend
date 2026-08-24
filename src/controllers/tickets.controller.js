@@ -25,17 +25,19 @@ exports.list = async (req, res) => {
     if (!req.user.is_admin) {
       where += ' AND (t.assigned_to = ? OR t.reported_by = ?)';
       params.push(req.user.id, req.user.id);
-
-      // Hide tickets that fall within a paused cycle's date range
-      where += ` AND NOT (
-        t.project_id IS NOT NULL AND EXISTS (
-          SELECT 1 FROM service_cycles sc_pause
-          WHERE sc_pause.project_id = t.project_id AND sc_pause.status = 'paused'
-            AND sc_pause.start_date <= COALESCE(t.due_date, t.created_at)
-            AND sc_pause.end_date >= COALESCE(t.due_date, t.created_at)
-        )
-      )`;
     }
+
+    // Hide tickets that fall within a paused cycle's date range — applies to ALL
+    // users (incl. admin) on the Tickets list page. Admins can still open them
+    // via the cycle detail view.
+    where += ` AND NOT (
+      t.project_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM service_cycles sc_pause
+        WHERE sc_pause.project_id = t.project_id AND sc_pause.status = 'paused'
+          AND sc_pause.start_date <= COALESCE(t.due_date, t.created_at)
+          AND sc_pause.end_date >= COALESCE(t.due_date, t.created_at)
+      )
+    )`;
 
     const [rows] = await db.query(
       `SELECT t.*,

@@ -84,14 +84,15 @@ exports.list = async (req, res) => {
         (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
       )`;
       params.push(req.user.id, req.user.id, req.user.id, req.user.id);
-
-      // Hide tasks that belong to a paused cycle
-      where += ` AND NOT EXISTS (
-        SELECT 1 FROM cycle_tasks ct_pause
-        JOIN service_cycles sc_pause ON sc_pause.id = ct_pause.cycle_id
-        WHERE ct_pause.task_id = t.id AND sc_pause.status = 'paused'
-      )`;
     }
+
+    // Hide tasks that belong to a paused cycle — applies to ALL users (incl. admin)
+    // on the Tasks list page. Admins can still open them via the cycle detail view.
+    where += ` AND NOT EXISTS (
+      SELECT 1 FROM cycle_tasks ct_pause
+      JOIN service_cycles sc_pause ON sc_pause.id = ct_pause.cycle_id
+      WHERE ct_pause.task_id = t.id AND sc_pause.status = 'paused'
+    )`;
 
     if (status)    { where += ' AND t.status = ?';    params.push(status); }
     if (is_active !== undefined && is_active !== '') {
