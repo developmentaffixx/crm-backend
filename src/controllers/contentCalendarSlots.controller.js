@@ -103,15 +103,10 @@ exports.listSlots = async (req, res) => {
       try {
         [rows] = await db.query(postSelect(true), [planIds, ...statusParams, ...assignedParams]);
       } catch (joinErr) {
-        // Some deployments may not have every brief_* column / calendar_slot_id.
-        // Fall back to the plain slot query so the list still works.
-        const errMsg = String(joinErr.message || joinErr.sqlMessage || '');
-        if (joinErr.code === 'ER_BAD_FIELD_ERROR' || joinErr.errno === 1054 ||
-            errMsg.includes('brief_') || errMsg.includes('calendar_slot_id')) {
-          [rows] = await db.query(postSelect(false), [planIds, ...statusParams, ...assignedParams]);
-        } else {
-          throw joinErr;
-        }
+        // Enrichment join failed (missing column on this DB, etc.) — fall back
+        // to the plain slot query so the list always works.
+        console.warn('Post slot enrichment join failed, using plain query:', joinErr.message);
+        [rows] = await db.query(postSelect(false), [planIds, ...statusParams, ...assignedParams]);
       }
       posts = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'post' }));
     }
@@ -144,13 +139,8 @@ exports.listSlots = async (req, res) => {
       try {
         [rows] = await db.query(shootSelect(true), [planIds, ...statusParams, ...assignedParams]);
       } catch (joinErr) {
-        const errMsg = String(joinErr.message || joinErr.sqlMessage || '');
-        if (joinErr.code === 'ER_BAD_FIELD_ERROR' || joinErr.errno === 1054 ||
-            errMsg.includes('calendar_slot_id') || errMsg.includes('shoots')) {
-          [rows] = await db.query(shootSelect(false), [planIds, ...statusParams, ...assignedParams]);
-        } else {
-          throw joinErr;
-        }
+        console.warn('Shoot slot enrichment join failed, using plain query:', joinErr.message);
+        [rows] = await db.query(shootSelect(false), [planIds, ...statusParams, ...assignedParams]);
       }
       shoots = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'shoot' }));
     }
@@ -179,21 +169,15 @@ exports.listSlots = async (req, res) => {
       try {
         [rows] = await db.query(adSelect(true), [planIds, ...statusParams, ...assignedParams]);
       } catch (joinErr) {
-        const errMsg = String(joinErr.message || joinErr.sqlMessage || '');
-        if (joinErr.code === 'ER_BAD_FIELD_ERROR' || joinErr.errno === 1054 ||
-            errMsg.includes('linked_calendar_ad_id') || errMsg.includes('campaign_id_code') ||
-            errMsg.includes('ad_campaigns')) {
-          [rows] = await db.query(adSelect(false), [planIds, ...statusParams, ...assignedParams]);
-        } else {
-          throw joinErr;
-        }
+        console.warn('Ad slot enrichment join failed, using plain query:', joinErr.message);
+        [rows] = await db.query(adSelect(false), [planIds, ...statusParams, ...assignedParams]);
       }
       ads = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'ad' }));
     }
 
     return res.json({ posts, shoots, ads, plans });
   } catch (err) {
-    console.error('List slots error:', err);
+    console.error('List slots error:', err.code, err.sqlMessage || err.message);
     return res.status(500).json({ message: 'Server error' });
   }
 };
