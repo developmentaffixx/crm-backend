@@ -77,19 +77,42 @@ exports.listSlots = async (req, res) => {
     // Fetch posts
     let posts = [];
     if (!item_type || item_type === 'post') {
-      const [rows] = await db.query(
-        `SELECT cp.*,
+      // Pull the filled content from the linked content write request so the
+      // slot detail view can show hook / core message / caption / creative.
+      const postSelect = (withWrite) => `SELECT cp.*,
                 CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
                 CONCAT(ab.first_name, ' ', ab.last_name) AS assigned_by_name,
-                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name
+                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name${withWrite ? `,
+                COALESCE(cp.brief_hook, cwr.hook_opening_line) AS brief_hook,
+                COALESCE(cp.brief_core_message, cwr.core_message) AS brief_core_message,
+                COALESCE(cp.brief_cta, cwr.call_to_action) AS brief_cta,
+                COALESCE(cp.brief_caption, cwr.caption_content) AS brief_caption,
+                COALESCE(cp.brief_creative, cwr.creative_suggestion) AS brief_creative,
+                cwr.caption_content AS write_caption_content,
+                cwr.reference_links AS write_reference_links,
+                cwr.content_id_code AS write_content_id_code` : ''}
          FROM content_calendar_posts cp
          LEFT JOIN users u ON u.id = cp.assigned_to
          LEFT JOIN users ab ON ab.id = cp.assigned_by
-         LEFT JOIN users au ON au.id = cp.approved_by
+         LEFT JOIN users au ON au.id = cp.approved_by${withWrite ? `
+         LEFT JOIN content_write_requests cwr ON cwr.calendar_slot_id = cp.id AND cwr.deleted = 0` : ''}
          WHERE cp.plan_id IN (?) ${statusFilter} ${assignedFilter}
-         ORDER BY cp.posting_date ASC, cp.id ASC`,
-        [planIds, ...statusParams, ...assignedParams]
-      );
+         ORDER BY cp.posting_date ASC, cp.id ASC`;
+
+      let rows;
+      try {
+        [rows] = await db.query(postSelect(true), [planIds, ...statusParams, ...assignedParams]);
+      } catch (joinErr) {
+        // Some deployments may not have every brief_* column / calendar_slot_id.
+        // Fall back to the plain slot query so the list still works.
+        const errMsg = String(joinErr.message || joinErr.sqlMessage || '');
+        if (joinErr.code === 'ER_BAD_FIELD_ERROR' || joinErr.errno === 1054 ||
+            errMsg.includes('brief_') || errMsg.includes('calendar_slot_id')) {
+          [rows] = await db.query(postSelect(false), [planIds, ...statusParams, ...assignedParams]);
+        } else {
+          throw joinErr;
+        }
+      }
       posts = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'post' }));
     }
 
