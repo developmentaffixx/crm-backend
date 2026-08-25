@@ -2,13 +2,19 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// Model can be overridden via env; defaults to a current, supported model.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+
 /**
  * Generate content using Google Gemini AI
  * @param {string} prompt - The prompt to send to Gemini
  * @returns {Promise<string>} - The generated text response
  */
 async function generateWithGemini(prompt) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is not set. Add it to the backend .env file.');
+  }
+  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
   const result = await model.generateContent(prompt);
   const response = await result.response;
   return response.text();
