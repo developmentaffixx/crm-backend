@@ -15,6 +15,10 @@ router.get('/visible', controller.listVisible);
 // GET /api/intro-documents/:id — get single document
 router.get('/:id', param('id').isInt(), controller.getOne);
 
+// PUT /api/intro-documents/reorder — persist new display order (admin only)
+// NOTE: must be registered before '/:id' routes so it isn't captured as an id
+router.put('/reorder', requireAdmin, controller.reorder);
+
 // POST /api/intro-documents — create (admin only)
 router.post('/', requireAdmin, controller.create);
 

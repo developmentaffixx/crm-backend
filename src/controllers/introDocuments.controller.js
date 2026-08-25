@@ -267,6 +267,42 @@ exports.update = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// REORDER documents (admin only) — persist new display order
+// Body: { order: [id1, id2, id3, ...] } in the desired display order
+// ─────────────────────────────────────────────────────────────────────────────
+exports.reorder = async (req, res) => {
+  const { order } = req.body;
+
+  if (!Array.isArray(order) || order.length === 0) {
+    return res.status(400).json({ message: 'order must be a non-empty array of document ids' });
+  }
+
+  const ids = order.map(Number);
+  if (ids.some(id => !Number.isInteger(id) || id <= 0)) {
+    return res.status(400).json({ message: 'order must contain valid document ids' });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    for (let i = 0; i < ids.length; i++) {
+      await conn.query(
+        'UPDATE intro_documents SET sort_order = ? WHERE id = ? AND is_active = 1',
+        [i, ids[i]]
+      );
+    }
+    await conn.commit();
+    return res.json({ message: 'Order updated successfully' });
+  } catch (err) {
+    await conn.rollback();
+    console.error('IntroDocuments reorder error:', err.message, err.sqlMessage);
+    return res.status(500).json({ message: err.sqlMessage || err.message || 'Server error' });
+  } finally {
+    conn.release();
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DELETE (soft) document (admin only)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.remove = async (req, res) => {
