@@ -78,10 +78,16 @@ exports.listCycles = async (req, res) => {
       params[0] = project_service_id;
     }
 
-    // Optional status filter (e.g. status=active to get only active cycles)
+    // Optional status filter (e.g. status=active or status=active,upcoming for multiple)
     if (status) {
-      whereClause += ' AND sc.status = ?';
-      params.push(status);
+      const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statuses.length === 1) {
+        whereClause += ' AND sc.status = ?';
+        params.push(statuses[0]);
+      } else if (statuses.length > 1) {
+        whereClause += ` AND sc.status IN (${statuses.map(() => '?').join(',')})`;
+        params.push(...statuses);
+      }
     }
 
     const [cycles] = await db.query(
