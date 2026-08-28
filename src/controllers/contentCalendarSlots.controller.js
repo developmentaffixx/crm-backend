@@ -95,7 +95,8 @@ exports.listSlots = async (req, res) => {
          LEFT JOIN users u ON u.id = cp.assigned_to
          LEFT JOIN users ab ON ab.id = cp.assigned_by
          LEFT JOIN users au ON au.id = cp.approved_by${withWrite ? `
-         LEFT JOIN content_write_requests cwr ON cwr.calendar_slot_id = cp.id AND cwr.deleted = 0` : ''}
+         LEFT JOIN content_write_requests cwr ON cwr.calendar_slot_id = cp.id AND cwr.deleted = 0
+           AND cwr.id = (SELECT MAX(cwr2.id) FROM content_write_requests cwr2 WHERE cwr2.calendar_slot_id = cp.id AND cwr2.deleted = 0)` : ''}
          WHERE cp.plan_id IN (?) ${statusFilter} ${assignedFilter}
          ORDER BY cp.posting_date ASC, cp.id ASC`;
 

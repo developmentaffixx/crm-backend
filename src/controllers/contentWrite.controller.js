@@ -186,6 +186,69 @@ exports.create = async (req, res) => {
     let insertId;
     const slotIdVal = toInt(calendar_slot_id);
 
+    // If a record already exists for this calendar slot (created during assignment),
+    // update it with the filled content instead of creating a duplicate.
+    if (slotIdVal) {
+      try {
+        const [existing] = await db.query(
+          `SELECT id FROM content_write_requests WHERE calendar_slot_id = ? AND deleted = 0 ORDER BY id ASC LIMIT 1`,
+          [slotIdVal]
+        );
+        if (existing.length > 0) {
+          insertId = existing[0].id;
+          await db.query(
+            `UPDATE content_write_requests SET
+              platform = COALESCE(?, platform),
+              content_type = COALESCE(?, content_type),
+              hook_opening_line = ?, core_message = ?, call_to_action = ?,
+              caption_content = ?, creative_suggestion = ?, reference_links = ?,
+              status = 'pending'
+            WHERE id = ?`,
+            [
+              toNull(platform), content_type,
+              toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
+              toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
+              insertId,
+            ]
+          );
+
+          // Persist posting_date
+          const postingDateVal = toNull(posting_date);
+          if (postingDateVal) {
+            try {
+              await db.query('UPDATE content_write_requests SET posting_date = ? WHERE id = ?', [postingDateVal, insertId]);
+            } catch (pdErr) { /* column may not exist */ }
+          }
+
+          // Sync slot to submitted
+          try {
+            await db.query(
+              `UPDATE content_calendar_posts SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+              [slotIdVal]
+            );
+            res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: slotIdVal });
+
+            const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [slotIdVal]);
+            if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+              await db.query(
+                `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+                 VALUES (?, ?, 'slot_submitted', 'post', ?, 'Post slot submitted for approval', 'Content has been filled and submitted.', '/social/content-calendar')`,
+                [slotInfo[0].assigned_by, req.user.id, slotIdVal]
+              );
+              res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+            }
+          } catch (syncErr) {
+            console.warn('Slot sync after update failed:', syncErr.message);
+          }
+
+          return res.status(201).json({ message: 'Content request updated', id: insertId, content_id_code: null });
+        }
+      } catch (lookupErr) {
+        // If lookup fails (e.g., column missing), fall through to normal create
+        console.warn('Existing slot lookup failed, creating new:', lookupErr.message);
+      }
+    }
+
     try {
       const [result] = await db.query(
         `INSERT INTO content_write_requests 

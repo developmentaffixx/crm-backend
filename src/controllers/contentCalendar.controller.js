@@ -719,6 +719,7 @@ exports.calendarView = async (req, res) => {
          LEFT JOIN leads l ON l.id = p.client_id
          LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
          LEFT JOIN content_write_requests cwr2 ON cwr2.calendar_slot_id = cp.id AND cwr2.deleted = 0
+           AND cwr2.id = (SELECT MAX(cwr3.id) FROM content_write_requests cwr3 WHERE cwr3.calendar_slot_id = cp.id AND cwr3.deleted = 0)
          LEFT JOIN users au ON au.id = cp.assigned_to
          WHERE cp.plan_id IN (?)
          ORDER BY cp.id ASC`,
