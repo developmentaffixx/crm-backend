@@ -717,32 +717,88 @@ exports.calendarView = async (req, res) => {
          FROM content_calendar_posts cp
          JOIN content_calendar_plans p ON p.id = cp.plan_id
          LEFT JOIN leads l ON l.id = p.client_id
-         LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
-         LEFT JOIN content_write_requests cwr2 ON cwr2.calendar_slot_id = cp.id AND cwr2.deleted = 0
-           AND cwr2.id = (SELECT MAX(cwr3.id) FROM content_write_requests cwr3 WHERE cwr3.calendar_slot_id = cp.id AND cwr3.deleted = 0)
+         LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id AND cwr.deleted = 0
+         LEFT JOIN (
+           SELECT cwr_inner.*,
+             ROW_NUMBER() OVER (PARTITION BY cwr_inner.calendar_slot_id ORDER BY
+               (cwr_inner.hook_opening_line IS NOT NULL OR cwr_inner.caption_content IS NOT NULL) DESC,
+               cwr_inner.id DESC
+             ) AS rn
+           FROM content_write_requests cwr_inner
+           WHERE cwr_inner.deleted = 0 AND cwr_inner.calendar_slot_id IS NOT NULL
+         ) cwr2 ON cwr2.calendar_slot_id = cp.id AND cwr2.rn = 1
          LEFT JOIN users au ON au.id = cp.assigned_to
          WHERE cp.plan_id IN (?)
          ORDER BY cp.id ASC`,
         [planIds]
       );
       posts = rows;
+
+      // Debug: log slots with submitted status but no brief content
+      const submittedNoBrief = posts.filter(p => p.slot_status === 'submitted' && !p.brief_hook && !p.brief_caption);
+      if (submittedNoBrief.length > 0) {
+        console.warn('[calendarView] Submitted posts with no brief data:', submittedNoBrief.map(p => ({ id: p.id, linked_brief_id: p.linked_brief_id, slot_status: p.slot_status })));
+        // Check if content_write_requests exist for these slots
+        for (const sp of submittedNoBrief.slice(0, 3)) {
+          const [cwrRows] = await db.query('SELECT id, calendar_slot_id, hook_opening_line, caption_content, deleted FROM content_write_requests WHERE calendar_slot_id = ?', [sp.id]);
+          console.warn(`  Slot ${sp.id}: found ${cwrRows.length} content_write_requests:`, cwrRows.map(r => ({ id: r.id, hasContent: !!(r.hook_opening_line || r.caption_content), deleted: r.deleted })));
+        }
+      }
     } catch (colErr) {
-      // Fallback if assigned_to column doesn't exist yet
-      if (colErr.code === 'ER_BAD_FIELD_ERROR') {
+      console.error('[calendarView] Post query error:', colErr.code, colErr.message);
+      // Fallback: try simpler join without ROW_NUMBER (for MySQL < 8.0)
+      try {
         const [rows] = await db.query(
           `SELECT cp.*, p.client_id, l.business_name AS client_name,
-                  cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
-                  cwr.content_type AS brief_content_type, cwr.platform AS brief_platform
+                  COALESCE(cwr.hook_opening_line, cwr2.hook_opening_line) AS brief_hook,
+                  COALESCE(cwr.content_id_code, cwr2.content_id_code) AS brief_code,
+                  COALESCE(cwr.content_type, cwr2.content_type) AS brief_content_type,
+                  COALESCE(cwr.platform, cwr2.platform) AS brief_platform,
+                  COALESCE(cwr.core_message, cwr2.core_message) AS brief_core_message,
+                  COALESCE(cwr.call_to_action, cwr2.call_to_action) AS brief_cta,
+                  COALESCE(cwr.caption_content, cwr2.caption_content) AS brief_caption,
+                  COALESCE(cwr.creative_suggestion, cwr2.creative_suggestion) AS brief_creative,
+                  COALESCE(cwr.status, cwr2.status) AS brief_status,
+                  CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
            FROM content_calendar_posts cp
            JOIN content_calendar_plans p ON p.id = cp.plan_id
            LEFT JOIN leads l ON l.id = p.client_id
-           LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
+           LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id AND cwr.deleted = 0
+           LEFT JOIN content_write_requests cwr2 ON cwr2.calendar_slot_id = cp.id AND cwr2.deleted = 0
+           LEFT JOIN users au ON au.id = cp.assigned_to
            WHERE cp.plan_id IN (?)
            ORDER BY cp.id ASC`,
           [planIds]
         );
-        posts = rows;
-      } else throw colErr;
+        // Deduplicate by cp.id (keep last row which may have content)
+        const seen = new Map();
+        rows.forEach(r => {
+          const existing = seen.get(r.id);
+          if (!existing || r.brief_hook || r.brief_caption || r.brief_creative) {
+            seen.set(r.id, r);
+          }
+        });
+        posts = Array.from(seen.values());
+        console.warn('[calendarView] Used simple fallback join, got', posts.length, 'posts');
+      } catch (fallbackErr) {
+        console.error('[calendarView] Fallback also failed:', fallbackErr.code, fallbackErr.message);
+        // Final fallback - no enrichment at all
+        if (fallbackErr.code === 'ER_BAD_FIELD_ERROR' || colErr.code === 'ER_BAD_FIELD_ERROR') {
+          const [rows] = await db.query(
+            `SELECT cp.*, p.client_id, l.business_name AS client_name,
+                    cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
+                    cwr.content_type AS brief_content_type, cwr.platform AS brief_platform
+             FROM content_calendar_posts cp
+             JOIN content_calendar_plans p ON p.id = cp.plan_id
+             LEFT JOIN leads l ON l.id = p.client_id
+             LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
+             WHERE cp.plan_id IN (?)
+             ORDER BY cp.id ASC`,
+            [planIds]
+          );
+          posts = rows;
+        } else throw fallbackErr;
+      }
     }
 
     // Fetch shoots for these plans within the month

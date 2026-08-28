@@ -83,11 +83,11 @@ exports.listSlots = async (req, res) => {
                 CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
                 CONCAT(ab.first_name, ' ', ab.last_name) AS assigned_by_name,
                 CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name${withWrite ? `,
-                COALESCE(cp.brief_hook, cwr.hook_opening_line) AS brief_hook,
-                COALESCE(cp.brief_core_message, cwr.core_message) AS brief_core_message,
-                COALESCE(cp.brief_cta, cwr.call_to_action) AS brief_cta,
-                COALESCE(cp.brief_caption, cwr.caption_content) AS brief_caption,
-                COALESCE(cp.brief_creative, cwr.creative_suggestion) AS brief_creative,
+                cwr.hook_opening_line AS brief_hook,
+                cwr.core_message AS brief_core_message,
+                cwr.call_to_action AS brief_cta,
+                cwr.caption_content AS brief_caption,
+                cwr.creative_suggestion AS brief_creative,
                 cwr.caption_content AS write_caption_content,
                 cwr.reference_links AS write_reference_links,
                 cwr.content_id_code AS write_content_id_code` : ''}
@@ -104,10 +104,42 @@ exports.listSlots = async (req, res) => {
       try {
         [rows] = await db.query(postSelect(true), [planIds, ...statusParams, ...assignedParams]);
       } catch (joinErr) {
-        // Enrichment join failed (missing column on this DB, etc.) — fall back
-        // to the plain slot query so the list always works.
-        console.warn('Post slot enrichment join failed, using plain query:', joinErr.message);
-        [rows] = await db.query(postSelect(false), [planIds, ...statusParams, ...assignedParams]);
+        // Enrichment join failed — try simpler join without MAX subquery
+        console.warn('Post slot enrichment join failed:', joinErr.message, '— trying simple join');
+        try {
+          const simplePostSelect = `SELECT cp.*,
+                CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
+                CONCAT(ab.first_name, ' ', ab.last_name) AS assigned_by_name,
+                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name,
+                cwr.hook_opening_line AS brief_hook,
+                cwr.core_message AS brief_core_message,
+                cwr.call_to_action AS brief_cta,
+                cwr.caption_content AS brief_caption,
+                cwr.creative_suggestion AS brief_creative,
+                cwr.caption_content AS write_caption_content,
+                cwr.reference_links AS write_reference_links,
+                cwr.content_id_code AS write_content_id_code
+           FROM content_calendar_posts cp
+           LEFT JOIN users u ON u.id = cp.assigned_to
+           LEFT JOIN users ab ON ab.id = cp.assigned_by
+           LEFT JOIN users au ON au.id = cp.approved_by
+           LEFT JOIN content_write_requests cwr ON cwr.calendar_slot_id = cp.id AND cwr.deleted = 0
+           WHERE cp.plan_id IN (?) ${statusFilter} ${assignedFilter}
+           ORDER BY cp.posting_date ASC, cp.id ASC`;
+          const [simpleRows] = await db.query(simplePostSelect, [planIds, ...statusParams, ...assignedParams]);
+          // Deduplicate: keep row with content if duplicates exist
+          const seen = new Map();
+          simpleRows.forEach(r => {
+            const existing = seen.get(r.id);
+            if (!existing || r.brief_hook || r.brief_caption || r.brief_creative) {
+              seen.set(r.id, r);
+            }
+          });
+          rows = Array.from(seen.values());
+        } catch (simpleFail) {
+          console.warn('Simple post enrichment also failed, using plain query:', simpleFail.message);
+          [rows] = await db.query(postSelect(false), [planIds, ...statusParams, ...assignedParams]);
+        }
       }
       posts = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'post' }));
     }
