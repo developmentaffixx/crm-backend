@@ -756,6 +756,8 @@ exports.calendarView = async (req, res) => {
                 COALESCE(s.location_type, s2.location_type) AS shoot_location_type,
                 COALESCE(s.exact_address, s2.exact_address) AS shoot_address,
                 COALESCE(s.reporting_time, s2.reporting_time) AS shoot_reporting_time,
+                COALESCE(s.video_clips, s2.video_clips) AS num_videos,
+                COALESCE(s.photos_clicked, s2.photos_clicked) AS num_photos,
                 COALESCE(s.status, s2.status) AS shoot_status,
                 CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
          FROM content_calendar_shoots cs
@@ -794,8 +796,10 @@ exports.calendarView = async (req, res) => {
         `SELECT ca.*, p.client_id, l.business_name AS client_name,
                 ac.campaign_name AS linked_campaign_name,
                 ac.campaign_id_code AS linked_campaign_code,
+                COALESCE(ac.objective, ca.campaign_objective) AS campaign_objective_resolved,
+                COALESCE(ac.budget, ca.budget) AS budget_resolved,
                 ac.status AS linked_campaign_status,
-                ac.notes AS linked_campaign_notes,
+                ac.notes AS campaign_notes,
                 CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
          FROM content_calendar_ads ca
          JOIN content_calendar_plans p ON p.id = ca.plan_id
