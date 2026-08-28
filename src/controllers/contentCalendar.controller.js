@@ -810,7 +810,15 @@ exports.calendarView = async (req, res) => {
          JOIN content_calendar_plans p ON p.id = cs.plan_id
          LEFT JOIN leads l ON l.id = p.client_id
          LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
-         LEFT JOIN shoots s2 ON s2.calendar_slot_id = cs.id AND s2.deleted = 0
+         LEFT JOIN (
+           SELECT sh_inner.*,
+             ROW_NUMBER() OVER (PARTITION BY sh_inner.calendar_slot_id ORDER BY
+               (sh_inner.exact_address IS NOT NULL OR sh_inner.city IS NOT NULL OR sh_inner.video_clips > 0) DESC,
+               sh_inner.id DESC
+             ) AS rn
+           FROM shoots sh_inner
+           WHERE sh_inner.deleted = 0 AND sh_inner.calendar_slot_id IS NOT NULL
+         ) s2 ON s2.calendar_slot_id = cs.id AND s2.rn = 1
          LEFT JOIN users au ON au.id = cs.assigned_to
          WHERE cs.plan_id IN (?)
          ORDER BY cs.id ASC`,
@@ -818,7 +826,43 @@ exports.calendarView = async (req, res) => {
       );
       shoots = rows;
     } catch (colErr) {
-      if (colErr.code === 'ER_BAD_FIELD_ERROR') {
+      console.error('[calendarView] Shoot query error:', colErr.code, colErr.message);
+      // Fallback: simpler join without ROW_NUMBER
+      try {
+        const [rows] = await db.query(
+          `SELECT cs.*, p.client_id, l.business_name AS client_name,
+                  COALESCE(s.shoot_id_code, s2.shoot_id_code) AS linked_shoot_code,
+                  COALESCE(s.project_campaign_name, s2.project_campaign_name) AS shoot_name,
+                  COALESCE(s.shoot_date, s2.shoot_date) AS linked_shoot_date,
+                  COALESCE(s.city, s2.city) AS shoot_city,
+                  COALESCE(s.location_type, s2.location_type) AS shoot_location_type,
+                  COALESCE(s.exact_address, s2.exact_address) AS shoot_address,
+                  COALESCE(s.reporting_time, s2.reporting_time) AS shoot_reporting_time,
+                  COALESCE(s.video_clips, s2.video_clips) AS num_videos,
+                  COALESCE(s.photos_clicked, s2.photos_clicked) AS num_photos,
+                  COALESCE(s.status, s2.status) AS shoot_status,
+                  CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
+           FROM content_calendar_shoots cs
+           JOIN content_calendar_plans p ON p.id = cs.plan_id
+           LEFT JOIN leads l ON l.id = p.client_id
+           LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
+           LEFT JOIN shoots s2 ON s2.calendar_slot_id = cs.id AND s2.deleted = 0
+           LEFT JOIN users au ON au.id = cs.assigned_to
+           WHERE cs.plan_id IN (?)
+           ORDER BY cs.id ASC`,
+          [planIds]
+        );
+        // Deduplicate
+        const seen = new Map();
+        rows.forEach(r => {
+          const existing = seen.get(r.id);
+          if (!existing || r.shoot_city || r.shoot_address || r.num_videos) {
+            seen.set(r.id, r);
+          }
+        });
+        shoots = Array.from(seen.values());
+      } catch (fallbackErr) {
+        // Final fallback - basic query
         const [rows] = await db.query(
           `SELECT cs.*, p.client_id, l.business_name AS client_name,
                   s.shoot_id_code AS linked_shoot_code, s.project_campaign_name AS shoot_name,
@@ -832,7 +876,7 @@ exports.calendarView = async (req, res) => {
           [planIds]
         );
         shoots = rows;
-      } else throw colErr;
+      }
     }
 
     // Fetch ads for these plans that overlap with the month

@@ -164,8 +164,70 @@ exports.create = async (req, res) => {
 
     const slotIdVal = toInt(calendar_slot_id);
 
-    // Try inserting with calendar_slot_id — fall back without it if column doesn't exist
+    // If a shoot record already exists for this calendar slot (created during assignment),
+    // update it with the filled details instead of creating a duplicate.
     let insertId;
+    if (slotIdVal) {
+      try {
+        const [existing] = await db.query(
+          'SELECT id FROM shoots WHERE calendar_slot_id = ? AND deleted = 0 ORDER BY id ASC LIMIT 1',
+          [slotIdVal]
+        );
+        if (existing.length > 0) {
+          insertId = existing[0].id;
+          await db.query(
+            `UPDATE shoots SET
+              client_brand_id = COALESCE(?, client_brand_id),
+              project_campaign_name = COALESCE(?, project_campaign_name),
+              shoot_date = COALESCE(?, shoot_date),
+              reporting_time = COALESCE(?, reporting_time),
+              location_type = COALESCE(?, location_type),
+              exact_address = ?, city = ?, maps_link = ?,
+              photographers = COALESCE(?, photographers),
+              videographers = COALESCE(?, videographers),
+              shoot_manager_id = COALESCE(?, shoot_manager_id),
+              status = 'pending_approval'
+            WHERE id = ?`,
+            [
+              toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
+              location_type, toNull(exact_address), toNull(city), toNull(maps_link),
+              photographers ? JSON.stringify(photographers) : null,
+              videographers ? JSON.stringify(videographers) : null,
+              toInt(shoot_manager_id),
+              insertId,
+            ]
+          );
+
+          // Sync slot to submitted
+          try {
+            await db.query(
+              `UPDATE content_calendar_shoots SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+              [slotIdVal]
+            );
+            res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: slotIdVal });
+
+            const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_shoots WHERE id = ?', [slotIdVal]);
+            if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+              await db.query(
+                `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+                 VALUES (?, ?, 'slot_submitted', 'shoot', ?, 'Shoot slot submitted for approval', 'Shoot details filled. Please review.', '/social/content-calendar')`,
+                [slotInfo[0].assigned_by, req.user.id, slotIdVal]
+              );
+              res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+            }
+          } catch (syncErr) {
+            console.warn('Shoot slot sync after update:', syncErr.message);
+          }
+
+          const [updated] = await db.query('SELECT * FROM shoots WHERE id = ?', [insertId]);
+          return res.status(201).json(updated[0] || { id: insertId });
+        }
+      } catch (lookupErr) {
+        console.warn('Existing shoot lookup failed, creating new:', lookupErr.message);
+      }
+    }
+
+    // Try inserting with calendar_slot_id — fall back without it if column doesn't exist
     try {
       const [result] = await db.query(
         `INSERT INTO shoots 

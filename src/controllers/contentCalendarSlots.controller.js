@@ -164,7 +164,8 @@ exports.listSlots = async (req, res) => {
          LEFT JOIN users u ON u.id = cs.assigned_to
          LEFT JOIN users ab ON ab.id = cs.assigned_by
          LEFT JOIN users au ON au.id = cs.approved_by${withLink ? `
-         LEFT JOIN shoots sh ON sh.calendar_slot_id = cs.id AND sh.deleted = 0` : ''}
+         LEFT JOIN shoots sh ON sh.calendar_slot_id = cs.id AND sh.deleted = 0
+           AND sh.id = (SELECT MAX(sh2.id) FROM shoots sh2 WHERE sh2.calendar_slot_id = cs.id AND sh2.deleted = 0)` : ''}
          WHERE cs.plan_id IN (?) ${statusFilter} ${assignedFilter}
          ORDER BY cs.shoot_date ASC, cs.id ASC`;
 
@@ -172,8 +173,41 @@ exports.listSlots = async (req, res) => {
       try {
         [rows] = await db.query(shootSelect(true), [planIds, ...statusParams, ...assignedParams]);
       } catch (joinErr) {
-        console.warn('Shoot slot enrichment join failed, using plain query:', joinErr.message);
-        [rows] = await db.query(shootSelect(false), [planIds, ...statusParams, ...assignedParams]);
+        console.warn('Shoot slot enrichment join failed:', joinErr.message, '— trying simple join');
+        try {
+          const simpleShootSelect = `SELECT cs.*,
+                CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
+                CONCAT(ab.first_name, ' ', ab.last_name) AS assigned_by_name,
+                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name,
+                sh.project_campaign_name AS shoot_name,
+                sh.location_type AS shoot_location_type,
+                sh.city AS shoot_city,
+                sh.exact_address AS shoot_address,
+                sh.reporting_time AS shoot_reporting_time,
+                sh.video_clips AS num_videos,
+                sh.photos_clicked AS num_photos,
+                sh.shoot_id_code AS linked_shoot_code,
+                sh.shoot_date AS linked_shoot_date
+           FROM content_calendar_shoots cs
+           LEFT JOIN users u ON u.id = cs.assigned_to
+           LEFT JOIN users ab ON ab.id = cs.assigned_by
+           LEFT JOIN users au ON au.id = cs.approved_by
+           LEFT JOIN shoots sh ON sh.calendar_slot_id = cs.id AND sh.deleted = 0
+           WHERE cs.plan_id IN (?) ${statusFilter} ${assignedFilter}
+           ORDER BY cs.shoot_date ASC, cs.id ASC`;
+          const [simpleRows] = await db.query(simpleShootSelect, [planIds, ...statusParams, ...assignedParams]);
+          const seen = new Map();
+          simpleRows.forEach(r => {
+            const existing = seen.get(r.id);
+            if (!existing || r.shoot_city || r.shoot_address || r.num_videos) {
+              seen.set(r.id, r);
+            }
+          });
+          rows = Array.from(seen.values());
+        } catch (simpleFail) {
+          console.warn('Simple shoot enrichment also failed, using plain query:', simpleFail.message);
+          [rows] = await db.query(shootSelect(false), [planIds, ...statusParams, ...assignedParams]);
+        }
       }
       shoots = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'shoot' }));
     }
