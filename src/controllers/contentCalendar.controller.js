@@ -733,17 +733,6 @@ exports.calendarView = async (req, res) => {
         [planIds]
       );
       posts = rows;
-
-      // Debug: log slots with submitted status but no brief content
-      const submittedNoBrief = posts.filter(p => p.slot_status === 'submitted' && !p.brief_hook && !p.brief_caption);
-      if (submittedNoBrief.length > 0) {
-        console.warn('[calendarView] Submitted posts with no brief data:', submittedNoBrief.map(p => ({ id: p.id, linked_brief_id: p.linked_brief_id, slot_status: p.slot_status })));
-        // Check if content_write_requests exist for these slots
-        for (const sp of submittedNoBrief.slice(0, 3)) {
-          const [cwrRows] = await db.query('SELECT id, calendar_slot_id, hook_opening_line, caption_content, deleted FROM content_write_requests WHERE calendar_slot_id = ?', [sp.id]);
-          console.warn(`  Slot ${sp.id}: found ${cwrRows.length} content_write_requests:`, cwrRows.map(r => ({ id: r.id, hasContent: !!(r.hook_opening_line || r.caption_content), deleted: r.deleted })));
-        }
-      }
     } catch (colErr) {
       console.error('[calendarView] Post query error:', colErr.code, colErr.message);
       // Fallback: try simpler join without ROW_NUMBER (for MySQL < 8.0)
