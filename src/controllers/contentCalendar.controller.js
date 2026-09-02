@@ -704,12 +704,12 @@ exports.calendarView = async (req, res) => {
     try {
       const [rows] = await db.query(
         `SELECT cp.*, p.client_id, l.business_name AS client_name,
-                COALESCE(cwr.hook_opening_line, cwr2.hook_opening_line) AS brief_hook,
+                COALESCE(cwr.hook_opening_line, cwr2.hook_opening_line, cp.topic) AS brief_hook,
                 COALESCE(cwr.content_id_code, cwr2.content_id_code) AS brief_code,
-                COALESCE(cwr.content_type, cwr2.content_type) AS brief_content_type,
-                COALESCE(cwr.platform, cwr2.platform) AS brief_platform,
+                COALESCE(cwr.content_type, cwr2.content_type, cp.format) AS brief_content_type,
+                COALESCE(cwr.platform, cwr2.platform, cp.platform) AS brief_platform,
                 COALESCE(cwr.core_message, cwr2.core_message) AS brief_core_message,
-                COALESCE(cwr.call_to_action, cwr2.call_to_action) AS brief_cta,
+                COALESCE(cwr.call_to_action, cwr2.call_to_action, cp.cta) AS brief_cta,
                 COALESCE(cwr.caption_content, cwr2.caption_content) AS brief_caption,
                 COALESCE(cwr.creative_suggestion, cwr2.creative_suggestion) AS brief_creative,
                 COALESCE(cwr.status, cwr2.status) AS brief_status,
@@ -739,12 +739,12 @@ exports.calendarView = async (req, res) => {
       try {
         const [rows] = await db.query(
           `SELECT cp.*, p.client_id, l.business_name AS client_name,
-                  COALESCE(cwr.hook_opening_line, cwr2.hook_opening_line) AS brief_hook,
+                  COALESCE(cwr.hook_opening_line, cwr2.hook_opening_line, cp.topic) AS brief_hook,
                   COALESCE(cwr.content_id_code, cwr2.content_id_code) AS brief_code,
-                  COALESCE(cwr.content_type, cwr2.content_type) AS brief_content_type,
-                  COALESCE(cwr.platform, cwr2.platform) AS brief_platform,
+                  COALESCE(cwr.content_type, cwr2.content_type, cp.format) AS brief_content_type,
+                  COALESCE(cwr.platform, cwr2.platform, cp.platform) AS brief_platform,
                   COALESCE(cwr.core_message, cwr2.core_message) AS brief_core_message,
-                  COALESCE(cwr.call_to_action, cwr2.call_to_action) AS brief_cta,
+                  COALESCE(cwr.call_to_action, cwr2.call_to_action, cp.cta) AS brief_cta,
                   COALESCE(cwr.caption_content, cwr2.caption_content) AS brief_caption,
                   COALESCE(cwr.creative_suggestion, cwr2.creative_suggestion) AS brief_creative,
                   COALESCE(cwr.status, cwr2.status) AS brief_status,
@@ -775,8 +775,15 @@ exports.calendarView = async (req, res) => {
         if (fallbackErr.code === 'ER_BAD_FIELD_ERROR' || colErr.code === 'ER_BAD_FIELD_ERROR') {
           const [rows] = await db.query(
             `SELECT cp.*, p.client_id, l.business_name AS client_name,
-                    cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
-                    cwr.content_type AS brief_content_type, cwr.platform AS brief_platform
+                    COALESCE(cwr.hook_opening_line, cp.topic) AS brief_hook,
+                    cwr.content_id_code AS brief_code,
+                    COALESCE(cwr.content_type, cp.format) AS brief_content_type,
+                    COALESCE(cwr.platform, cp.platform) AS brief_platform,
+                    cwr.core_message AS brief_core_message,
+                    COALESCE(cwr.call_to_action, cp.cta) AS brief_cta,
+                    cwr.caption_content AS brief_caption,
+                    cwr.creative_suggestion AS brief_creative,
+                    cwr.status AS brief_status
              FROM content_calendar_posts cp
              JOIN content_calendar_plans p ON p.id = cp.plan_id
              LEFT JOIN leads l ON l.id = p.client_id

@@ -220,11 +220,14 @@ exports.create = async (req, res) => {
             } catch (pdErr) { /* column may not exist */ }
           }
 
-          // Sync slot to submitted
+          // Sync slot to submitted + set linked_brief_id so calendar can read content
           try {
             await db.query(
-              `UPDATE content_calendar_posts SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-              [slotIdVal]
+              `UPDATE content_calendar_posts
+               SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL,
+                   linked_brief_id = ?
+               WHERE id = ?`,
+              [insertId, slotIdVal]
             );
             res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: slotIdVal });
 
@@ -354,12 +357,15 @@ exports.create = async (req, res) => {
       }
     }
 
-    // Sync slot to submitted if linked
+    // Sync slot to submitted + set linked_brief_id so calendar can read content
     if (slotIdVal) {
       try {
         await db.query(
-          `UPDATE content_calendar_posts SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-          [slotIdVal]
+          `UPDATE content_calendar_posts
+           SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL,
+               linked_brief_id = ?
+           WHERE id = ?`,
+          [insertId, slotIdVal]
         );
         res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: slotIdVal });
 
@@ -476,10 +482,13 @@ exports.update = async (req, res) => {
     if (request.calendar_slot_id) {
       const newStatus = updates.status || request.status;
       if (newStatus === 'pending') {
-        // Content was filled/re-submitted → mark slot as submitted
+        // Content was filled/re-submitted → mark slot as submitted and ensure linked_brief_id is set
         await db.query(
-          `UPDATE content_calendar_posts SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-          [request.calendar_slot_id]
+          `UPDATE content_calendar_posts
+           SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL,
+               linked_brief_id = ?
+           WHERE id = ?`,
+          [req.params.id, request.calendar_slot_id]
         );
         res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: request.calendar_slot_id });
 
