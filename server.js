@@ -229,4 +229,8 @@ server.listen(PORT, () => {
   // Timers are now stopped automatically when the user manually clocks out.
   // const { startAutoClockOutCron } = require('./src/jobs/autoClockOutCron');
   // startAutoClockOutCron();
+
+  // ── Start Cycle Activation Cron (06:00 IST daily) ───────────────────────────
+  const { startCycleActivationCron } = require('./src/jobs/cycleActivationCron');
+  startCycleActivationCron();
 });

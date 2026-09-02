@@ -600,6 +600,20 @@ exports.approveSlot = async (req, res) => {
       [req.user.id, item_id]
     );
 
+    // ─── Reverse sync: update any linked content write request to 'approved' ──
+    if (item_type === 'post') {
+      try {
+        await db.query(
+          `UPDATE content_write_requests
+           SET status = 'approved', approved_by = ?, approved_at = NOW()
+           WHERE calendar_slot_id = ? AND deleted = 0 AND status != 'approved'`,
+          [req.user.id, item_id]
+        );
+      } catch (syncErr) {
+        console.warn('[approveSlot] Write request sync warning:', syncErr.message);
+      }
+    }
+
     // Notify assignee
     if (rows[0].assigned_to) {
       await createSmmNotification(null, {
@@ -655,6 +669,21 @@ exports.rejectSlot = async (req, res) => {
       `UPDATE ${table} SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
       [reason.trim(), item_id]
     );
+
+    // ─── Reverse sync: reset any linked content write request back to 'pending' ─
+    if (item_type === 'post') {
+      try {
+        await db.query(
+          `UPDATE content_write_requests
+           SET status = 'pending', approved_by = NULL, approved_at = NULL,
+               admin_remarks = ?
+           WHERE calendar_slot_id = ? AND deleted = 0 AND status != 'pending'`,
+          [reason.trim(), item_id]
+        );
+      } catch (syncErr) {
+        console.warn('[rejectSlot] Write request sync warning:', syncErr.message);
+      }
+    }
 
     // Notify assignee
     if (rows[0].assigned_to) {
@@ -804,6 +833,20 @@ exports.bulkApprove = async (req, res) => {
         `UPDATE ${table} SET slot_status = 'approved', approved_at = NOW(), approved_by = ?, rejection_reason = NULL WHERE id = ?`,
         [req.user.id, item_id]
       );
+
+      // ─── Reverse sync: update any linked content write request to 'approved' ─
+      if (item_type === 'post') {
+        try {
+          await db.query(
+            `UPDATE content_write_requests
+             SET status = 'approved', approved_by = ?, approved_at = NOW()
+             WHERE calendar_slot_id = ? AND deleted = 0 AND status != 'approved'`,
+            [req.user.id, item_id]
+          );
+        } catch (syncErr) {
+          console.warn('[bulkApprove] Write request sync warning:', syncErr.message);
+        }
+      }
 
       // Notify assignee
       if (rows[0].assigned_to) {
