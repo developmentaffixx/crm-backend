@@ -380,27 +380,56 @@ exports.updateCycle = async (req, res) => {
       [...values, cycleId]
     );
 
-    // If cycle status changed to 'completed', check if all cycles for this service are completed
-    // If so, mark the service as completed and recalculate project status
-    if (status === 'completed' && currentCycle.project_service_id) {
-      // Log activity
+    // ── When a cycle is closed (completed or skipped), check for upcoming cycles ──
+    // If this service has an upcoming cycle, immediately promote the earliest one
+    // to active (by start_date ASC). This handles the case where a paused cycle
+    // is manually closed and the next cycle should kick in right away.
+    if ((status === 'completed' || status === 'skipped') && currentCycle.project_service_id) {
+
+      // Log the closure activity
+      const closureLabel = status === 'completed' ? 'completed' : 'skipped';
       await db.query(
         `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'milestone', ?, ?)`,
-        [projectId, `Cycle completed: ${currentCycle.title}`, req.user.id]
+        [projectId, `Cycle ${closureLabel}: ${currentCycle.title}`, req.user.id]
       );
 
-      const [remainingActive] = await db.query(
-        `SELECT id FROM service_cycles WHERE project_service_id = ? AND status IN ('active', 'paused') AND id != ?`,
-        [currentCycle.project_service_id, cycleId]
+      // Find the earliest upcoming cycle for this service (if any)
+      const [nextUpcoming] = await db.query(
+        `SELECT id, title, start_date
+         FROM service_cycles
+         WHERE project_service_id = ? AND status = 'upcoming'
+         ORDER BY start_date ASC, cycle_number ASC
+         LIMIT 1`,
+        [currentCycle.project_service_id]
       );
-      if (remainingActive.length === 0) {
-        // No more active/paused cycles → mark service as completed
+
+      if (nextUpcoming.length > 0) {
+        // Promote the next upcoming cycle to active immediately
+        const next = nextUpcoming[0];
         await db.query(
-          'UPDATE project_services SET status = ? WHERE id = ?',
-          ['completed', currentCycle.project_service_id]
+          `UPDATE service_cycles SET status = 'active' WHERE id = ?`,
+          [next.id]
         );
+        await db.query(
+          `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
+          [projectId, `${next.title} activated after ${currentCycle.title} was ${closureLabel}`, req.user.id]
+        );
+      } else {
+        // No upcoming cycle — check if all cycles for this service are now done
+        // If so, mark the service itself as completed
+        const [remainingActive] = await db.query(
+          `SELECT id FROM service_cycles WHERE project_service_id = ? AND status IN ('active', 'paused') AND id != ?`,
+          [currentCycle.project_service_id, cycleId]
+        );
+        if (remainingActive.length === 0) {
+          await db.query(
+            'UPDATE project_services SET status = ? WHERE id = ?',
+            ['completed', currentCycle.project_service_id]
+          );
+        }
       }
-      // Recalculate project status
+
+      // Recalculate project status based on current service statuses
       const [allServices] = await db.query(
         'SELECT status FROM project_services WHERE project_id = ?',
         [projectId]
@@ -408,12 +437,7 @@ exports.updateCycle = async (req, res) => {
       if (allServices.length > 0) {
         const svcStatuses = allServices.map(s => s.status);
         const hasActive = svcStatuses.includes('active');
-        const allDone = svcStatuses.every(s => s === 'completed' || s === 'cancelled');
-
-        let newProjectStatus;
-        if (hasActive) newProjectStatus = 'active';
-        else newProjectStatus = 'inactive';
-
+        const newProjectStatus = hasActive ? 'active' : 'inactive';
         await db.query('UPDATE projects SET status = ? WHERE id = ?', [newProjectStatus, projectId]);
       }
     }
