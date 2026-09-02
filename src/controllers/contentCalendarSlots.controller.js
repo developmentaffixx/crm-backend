@@ -79,6 +79,8 @@ exports.listSlots = async (req, res) => {
     if (!item_type || item_type === 'post') {
       // Pull the filled content from the linked content write request so the
       // slot detail view can show hook / core message / caption / creative.
+      // Join via EITHER calendar_slot_id (cwr→cp) OR linked_brief_id (cp→cwr)
+      // so that Chandra Sarees-style orphaned records are covered too.
       const postSelect = (withWrite) => `SELECT cp.*,
                 CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
                 CONCAT(ab.first_name, ' ', ab.last_name) AS assigned_by_name,
@@ -95,8 +97,14 @@ exports.listSlots = async (req, res) => {
          LEFT JOIN users u ON u.id = cp.assigned_to
          LEFT JOIN users ab ON ab.id = cp.assigned_by
          LEFT JOIN users au ON au.id = cp.approved_by${withWrite ? `
-         LEFT JOIN content_write_requests cwr ON cwr.calendar_slot_id = cp.id AND cwr.deleted = 0
-           AND cwr.id = (SELECT MAX(cwr2.id) FROM content_write_requests cwr2 WHERE cwr2.calendar_slot_id = cp.id AND cwr2.deleted = 0)` : ''}
+         LEFT JOIN content_write_requests cwr
+           ON (cwr.calendar_slot_id = cp.id OR cwr.id = cp.linked_brief_id)
+           AND cwr.deleted = 0
+           AND cwr.id = (
+             SELECT MAX(cwr2.id) FROM content_write_requests cwr2
+             WHERE (cwr2.calendar_slot_id = cp.id OR cwr2.id = cp.linked_brief_id)
+               AND cwr2.deleted = 0
+           )` : ''}
          WHERE cp.plan_id IN (?) ${statusFilter} ${assignedFilter}
          ORDER BY cp.posting_date ASC, cp.id ASC`;
 
@@ -123,7 +131,9 @@ exports.listSlots = async (req, res) => {
            LEFT JOIN users u ON u.id = cp.assigned_to
            LEFT JOIN users ab ON ab.id = cp.assigned_by
            LEFT JOIN users au ON au.id = cp.approved_by
-           LEFT JOIN content_write_requests cwr ON cwr.calendar_slot_id = cp.id AND cwr.deleted = 0
+           LEFT JOIN content_write_requests cwr
+             ON (cwr.calendar_slot_id = cp.id OR cwr.id = cp.linked_brief_id)
+             AND cwr.deleted = 0
            WHERE cp.plan_id IN (?) ${statusFilter} ${assignedFilter}
            ORDER BY cp.posting_date ASC, cp.id ASC`;
           const [simpleRows] = await db.query(simplePostSelect, [planIds, ...statusParams, ...assignedParams]);
