@@ -20,7 +20,7 @@ exports.memberStats = async (req, res) => {
       if (tasks.hasOwnProperty(row.status)) tasks[row.status] = row.count;
     }
 
-    // Projects count by status
+    // Projects count by status (projects user has access to via project_members)
     const [projectRows] = await db.query(
       `SELECT p.status, COUNT(*) AS count FROM projects p
        JOIN project_members pm ON pm.project_id = p.id
@@ -30,7 +30,16 @@ exports.memberStats = async (req, res) => {
     );
     const projects = { open: 0, in_progress: 0, completed: 0 };
     for (const row of projectRows) {
-      if (projects.hasOwnProperty(row.status)) projects[row.status] = row.count;
+      const status = row.status?.toLowerCase().replace(/\s+/g, '_');
+      if (status === 'open' || status === 'active') {
+        projects.open += row.count;
+      } else if (status === 'in_progress' || status === 'ongoing') {
+        projects.in_progress += row.count;
+      } else if (status === 'completed' || status === 'done' || status === 'closed') {
+        projects.completed += row.count;
+      } else if (projects.hasOwnProperty(status)) {
+        projects[status] += row.count;
+      }
     }
 
     // Tickets count by status
