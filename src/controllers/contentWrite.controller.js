@@ -479,7 +479,21 @@ exports.update = async (req, res) => {
     }
 
     // ─── Sync to calendar slot: auto-submit when content is filled ────────────
-    if (request.calendar_slot_id) {
+    // Resolve slot ID — prefer calendar_slot_id, fall back to linked_brief_id lookup
+    let syncSlotId = request.calendar_slot_id || null;
+    if (!syncSlotId) {
+      try {
+        const [slotRows] = await db.query(
+          `SELECT id FROM content_calendar_posts WHERE linked_brief_id = ? LIMIT 1`,
+          [req.params.id]
+        );
+        if (slotRows.length > 0) syncSlotId = slotRows[0].id;
+      } catch (lookupErr) {
+        console.warn('[update] Slot lookup by linked_brief_id failed:', lookupErr.message);
+      }
+    }
+
+    if (syncSlotId) {
       const newStatus = updates.status || request.status;
       if (newStatus === 'pending') {
         // Content was filled/re-submitted → mark slot as submitted and ensure linked_brief_id is set
@@ -488,17 +502,17 @@ exports.update = async (req, res) => {
            SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL,
                linked_brief_id = ?
            WHERE id = ?`,
-          [req.params.id, request.calendar_slot_id]
+          [req.params.id, syncSlotId]
         );
-        res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: request.calendar_slot_id });
+        res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: syncSlotId });
 
         // Notify the assigner
-        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [request.calendar_slot_id]);
+        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [syncSlotId]);
         if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
           await db.query(
             `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
              VALUES (?, ?, 'slot_submitted', 'post', ?, 'Post slot submitted for approval', 'Content has been filled and submitted.', '/social/content-calendar')`,
-            [slotInfo[0].assigned_by, req.user.id, request.calendar_slot_id]
+            [slotInfo[0].assigned_by, req.user.id, syncSlotId]
           );
           res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
         }
@@ -559,37 +573,53 @@ exports.approve = async (req, res) => {
 
     // ─── Sync to calendar slot ────────────────────────────────────────────────
     const request = rows[0];
-    if (request.calendar_slot_id) {
+
+    // Resolve the slot ID — prefer calendar_slot_id on the write request,
+    // fall back to any calendar post that has linked_brief_id pointing to this request.
+    let slotId = request.calendar_slot_id || null;
+    if (!slotId) {
+      try {
+        const [slotRows] = await db.query(
+          `SELECT id FROM content_calendar_posts WHERE linked_brief_id = ? LIMIT 1`,
+          [req.params.id]
+        );
+        if (slotRows.length > 0) slotId = slotRows[0].id;
+      } catch (lookupErr) {
+        console.warn('[approve] Slot lookup by linked_brief_id failed:', lookupErr.message);
+      }
+    }
+
+    if (slotId) {
       if (action === 'approve') {
         await db.query(
           `UPDATE content_calendar_posts SET slot_status = 'approved', approved_at = NOW(), approved_by = ?, rejection_reason = NULL WHERE id = ?`,
-          [req.user.id, request.calendar_slot_id]
+          [req.user.id, slotId]
         );
         // Notify assignee
         if (request.created_by) {
           await db.query(
             `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
              VALUES (?, ?, 'slot_approved', 'post', ?, 'Your post slot was approved! 🎉', 'Your content is now live on the calendar.', '/social/write-content')`,
-            [request.created_by, req.user.id, request.calendar_slot_id]
+            [request.created_by, req.user.id, slotId]
           );
           res.emitSocket('smm:notification', { user_id: request.created_by, type: 'slot_approved' });
         }
       } else {
         await db.query(
           `UPDATE content_calendar_posts SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
-          [admin_remarks || 'Rejected', request.calendar_slot_id]
+          [admin_remarks || 'Rejected', slotId]
         );
         // Notify assignee
         if (request.created_by) {
           await db.query(
             `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
              VALUES (?, ?, 'slot_rejected', 'post', ?, 'Your post slot was rejected', ?, '/social/write-content')`,
-            [request.created_by, req.user.id, request.calendar_slot_id, `Reason: ${admin_remarks || 'Please re-edit'}`]
+            [request.created_by, req.user.id, slotId, `Reason: ${admin_remarks || 'Please re-edit'}`]
           );
           res.emitSocket('smm:notification', { user_id: request.created_by, type: 'slot_rejected' });
         }
       }
-      res.emitSocket('content-calendar:updated', { slot_id: request.calendar_slot_id });
+      res.emitSocket('content-calendar:updated', { slot_id: slotId });
     }
 
     const [updated] = await db.query(
