@@ -27,13 +27,13 @@ exports.list = async (req, res) => {
       params.push(req.user.id, req.user.id);
     }
 
-    // Hide tickets that fall within a paused cycle's date range — applies to ALL
+    // Hide tickets that fall within a paused or skipped cycle's date range — applies to ALL
     // users (incl. admin) on the Tickets list page. Admins can still open them
     // via the cycle detail view.
     where += ` AND NOT (
       t.project_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM service_cycles sc_pause
-        WHERE sc_pause.project_id = t.project_id AND sc_pause.status = 'paused'
+        WHERE sc_pause.project_id = t.project_id AND sc_pause.status IN ('paused', 'skipped')
           AND sc_pause.start_date <= COALESCE(t.due_date, t.created_at)
           AND sc_pause.end_date >= COALESCE(t.due_date, t.created_at)
       )
@@ -187,18 +187,18 @@ exports.getOne = async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    // If ticket belongs to a paused cycle, non-admin users cannot view it
+    // If ticket belongs to a paused or skipped cycle, non-admin users cannot view it
     if (!req.user.is_admin && ticket.project_id) {
       const ticketDate = ticket.due_date || ticket.created_at;
       const [pausedCycle] = await db.query(
         `SELECT id FROM service_cycles
-         WHERE project_id = ? AND status = 'paused'
+         WHERE project_id = ? AND status IN ('paused', 'skipped')
            AND start_date <= ? AND end_date >= ?
          LIMIT 1`,
         [ticket.project_id, ticketDate, ticketDate]
       );
       if (pausedCycle.length > 0) {
-        return res.status(403).json({ message: 'This ticket belongs to a paused cycle and is not accessible.' });
+        return res.status(403).json({ message: 'This ticket belongs to a paused or skipped cycle and is not accessible.' });
       }
     }
 
@@ -359,18 +359,18 @@ exports.update = async (req, res) => {
       return res.status(403).json({ message: 'Closed tickets cannot be edited' });
     }
 
-    // If ticket belongs to a paused cycle (by project + date range), only admin can edit
+    // If ticket belongs to a paused or skipped cycle (by project + date range), only admin can edit
     if (!req.user.is_admin && ticket.project_id) {
       const ticketDate = ticket.due_date || ticket.created_at;
       const [pausedCycle] = await db.query(
         `SELECT id FROM service_cycles
-         WHERE project_id = ? AND status = 'paused'
+         WHERE project_id = ? AND status IN ('paused', 'skipped')
            AND start_date <= ? AND end_date >= ?
          LIMIT 1`,
         [ticket.project_id, ticketDate, ticketDate]
       );
       if (pausedCycle.length > 0) {
-        return res.status(403).json({ message: 'This ticket belongs to a paused cycle. Only admins can edit it.' });
+        return res.status(403).json({ message: 'This ticket belongs to a paused or skipped cycle. Only admins can edit it.' });
       }
     }
 

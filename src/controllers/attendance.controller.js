@@ -1362,8 +1362,10 @@ exports.checkOverdueTasks = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Fetch tasks assigned to this user that are overdue (deadline < TODAY) and not completed/rejected
-    // Then exclude any that already have a pending extension request
+    // Fetch tasks assigned to this user that are overdue (deadline < TODAY) and not completed/rejected.
+    // Exclude tasks that already have a pending extension request.
+    // Also exclude tasks that are ONLY linked to completed/skipped cycles — those cycles are closed
+    // and shouldn't block clock-out. A task with no cycle link (standalone) is still included.
     const [overdueTasks] = await db.query(
       `SELECT
          t.id,
@@ -1380,6 +1382,18 @@ exports.checkOverdueTasks = async (req, res) => {
            WHERE er.task_id = t.id
              AND er.status = 'pending'
              AND er.deleted = 0
+         )
+         AND NOT (
+           -- Task is linked to at least one cycle, AND every cycle it belongs to is completed/skipped
+           EXISTS (
+             SELECT 1 FROM cycle_tasks ct WHERE ct.task_id = t.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM cycle_tasks ct2
+             JOIN service_cycles sc ON sc.id = ct2.cycle_id
+             WHERE ct2.task_id = t.id
+               AND sc.status NOT IN ('completed', 'skipped')
+           )
          )`,
       [userId]
     );
