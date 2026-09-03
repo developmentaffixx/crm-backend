@@ -324,8 +324,8 @@ exports.getCycleDetail = async (req, res) => {
     );
     cycle.approvals = approvals;
 
-    // Feedback is stored in service_cycles.notes
-    cycle.feedback = cycle.notes || '';
+    // feedback is stored in its own column (separate from notes which holds the pause/complete reason)
+    cycle.feedback = cycle.feedback || '';
 
     // If cycle is paused or skipped, hide tasks and tickets from non-admin users
     if ((cycle.status === 'paused' || cycle.status === 'skipped') && !req.user.is_admin) {
@@ -750,7 +750,7 @@ exports.saveFeedback = async (req, res) => {
     const { feedback } = req.body;
 
     await db.query(
-      'UPDATE service_cycles SET notes = ? WHERE id = ? AND project_id = ?',
+      'UPDATE service_cycles SET feedback = ? WHERE id = ? AND project_id = ?',
       [feedback || '', cycleId, projectId]
     );
 

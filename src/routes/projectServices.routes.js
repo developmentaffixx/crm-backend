@@ -52,6 +52,13 @@ router.post(
   controller.pauseService
 );
 
+// POST /api/projects/:projectId/services/:serviceId/resume — resume a paused service
+router.post(
+  '/:projectId/services/:serviceId/resume',
+  [param('projectId').isInt(), param('serviceId').isInt()],
+  controller.resumeService
+);
+
 // POST /api/projects/:projectId/services/:serviceId/complete — complete service
 router.post(
   '/:projectId/services/:serviceId/complete',

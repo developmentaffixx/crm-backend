@@ -310,6 +310,66 @@ exports.pauseService = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/projects/:projectId/services/:serviceId/resume — resume a paused service
+// ─────────────────────────────────────────────────────────────────────────────
+exports.resumeService = async (req, res) => {
+  try {
+    const { projectId, serviceId } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ message: 'Reason is required to resume a service' });
+    }
+
+    const [existing] = await db.query(
+      'SELECT * FROM project_services WHERE id = ? AND project_id = ?',
+      [serviceId, projectId]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Project service not found' });
+    }
+    if (existing[0].status !== 'paused') {
+      return res.status(400).json({ message: 'Only paused services can be resumed' });
+    }
+
+    // Check if there's already an active cycle — if so, just reactivate the service
+    const [activeCycle] = await db.query(
+      `SELECT id FROM service_cycles WHERE project_service_id = ? AND status = 'active' LIMIT 1`,
+      [serviceId]
+    );
+
+    if (activeCycle.length === 0) {
+      // No active cycle — resume the paused cycle if one exists
+      await db.query(
+        `UPDATE service_cycles SET status = 'active' WHERE project_service_id = ? AND status = 'paused' LIMIT 1`,
+        [serviceId]
+      );
+    }
+    // If an active cycle already exists, no cycle change needed
+
+    // Reactivate the service
+    await db.query(
+      'UPDATE project_services SET status = ?, notes = ? WHERE id = ?',
+      ['active', reason.trim(), serviceId]
+    );
+
+    // Log the action
+    await db.query(
+      `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
+      [projectId, `Service resumed: ${reason.trim()}`, req.user.id]
+    );
+
+    // Auto-recalculate project status
+    await recalculateProjectStatus(projectId);
+
+    return res.json({ message: 'Service resumed successfully' });
+  } catch (err) {
+    console.error('Resume service error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/projects/:projectId/services/:serviceId/complete — complete a service
 // ─────────────────────────────────────────────────────────────────────────────
 exports.completeService = async (req, res) => {
