@@ -737,9 +737,9 @@ exports.completeSlot = async (req, res) => {
 
     const slot = rows[0];
 
-    // Only assignee or admin can mark complete
-    if (!req.user.is_admin && slot.assigned_to !== userId) {
-      return res.status(403).json({ message: 'Only the assignee can mark as completed' });
+    // Only admin or SMM lead can mark complete
+    if (!req.user.is_admin && req.socialAccessLevel < 2) {
+      return res.status(403).json({ message: 'Only admin or SMM leads can mark as completed' });
     }
 
     // Must be approved first
