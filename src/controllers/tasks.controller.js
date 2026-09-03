@@ -86,12 +86,12 @@ exports.list = async (req, res) => {
       params.push(req.user.id, req.user.id, req.user.id, req.user.id);
     }
 
-    // Hide tasks that belong to a paused or skipped cycle — applies to ALL users (incl. admin)
+    // Hide tasks that belong to a paused, skipped, or completed cycle — applies to ALL users (incl. admin)
     // on the Tasks list page. Admins can still open them via the cycle detail view.
     where += ` AND NOT EXISTS (
       SELECT 1 FROM cycle_tasks ct_pause
       JOIN service_cycles sc_pause ON sc_pause.id = ct_pause.cycle_id
-      WHERE ct_pause.task_id = t.id AND sc_pause.status IN ('paused', 'skipped')
+      WHERE ct_pause.task_id = t.id AND sc_pause.status IN ('paused', 'skipped', 'completed')
     )`;
 
     if (status)    { where += ' AND t.status = ?';    params.push(status); }
@@ -187,7 +187,13 @@ exports.list = async (req, res) => {
         OR
         (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
       )`
-      : '');
+      : '')
+      // Mirror the same cycle filter used in the main query so tab counts match the table
+      + ` AND NOT EXISTS (
+        SELECT 1 FROM cycle_tasks ct_pause
+        JOIN service_cycles sc_pause ON sc_pause.id = ct_pause.cycle_id
+        WHERE ct_pause.task_id = t.id AND sc_pause.status IN ('paused', 'skipped', 'completed')
+      )`;
     const summaryParams = !req.user.is_admin ? [req.user.id, req.user.id, req.user.id, req.user.id] : [];
 
     const [allRows] = await db.query(

@@ -414,18 +414,37 @@ exports.updateCycle = async (req, res) => {
           `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
           [projectId, `${next.title} activated after ${currentCycle.title} was ${closureLabel}`, req.user.id]
         );
+        // If the service was paused, reactivate it now that an active cycle exists
+        await db.query(
+          `UPDATE project_services SET status = 'active' WHERE id = ? AND status = 'paused'`,
+          [currentCycle.project_service_id]
+        );
       } else {
-        // No upcoming cycle — check if all cycles for this service are now done
-        // If so, mark the service itself as completed
+        // No upcoming cycle — check if any active cycle still exists for this service
         const [remainingActive] = await db.query(
-          `SELECT id FROM service_cycles WHERE project_service_id = ? AND status IN ('active', 'paused') AND id != ?`,
+          `SELECT id FROM service_cycles WHERE project_service_id = ? AND status = 'active' AND id != ?`,
           [currentCycle.project_service_id, cycleId]
         );
-        if (remainingActive.length === 0) {
+
+        if (remainingActive.length > 0) {
+          // An active cycle already exists (e.g. Cycle 03 was created as active while
+          // this service was paused). Reactivate the service so its badge reflects reality.
           await db.query(
-            'UPDATE project_services SET status = ? WHERE id = ?',
-            ['completed', currentCycle.project_service_id]
+            `UPDATE project_services SET status = 'active' WHERE id = ? AND status = 'paused'`,
+            [currentCycle.project_service_id]
           );
+        } else {
+          // No active cycles remain — check if ALL cycles are now done (no active or paused left)
+          const [remainingOpenCycles] = await db.query(
+            `SELECT id FROM service_cycles WHERE project_service_id = ? AND status IN ('active', 'paused') AND id != ?`,
+            [currentCycle.project_service_id, cycleId]
+          );
+          if (remainingOpenCycles.length === 0) {
+            await db.query(
+              'UPDATE project_services SET status = ? WHERE id = ?',
+              ['completed', currentCycle.project_service_id]
+            );
+          }
         }
       }
 
