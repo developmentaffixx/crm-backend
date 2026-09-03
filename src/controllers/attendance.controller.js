@@ -1354,6 +1354,47 @@ exports.checkRunningTimers = async (req, res) => {
 };
 
 /**
+ * GET /api/attendance/check-overdue-tasks
+ * Returns tasks that are overdue and have no pending extension request.
+ * Used to block clock-out until the user submits extension requests.
+ */
+exports.checkOverdueTasks = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Fetch tasks assigned to this user that are overdue (deadline < TODAY) and not completed/rejected
+    // Then exclude any that already have a pending extension request
+    const [overdueTasks] = await db.query(
+      `SELECT
+         t.id,
+         t.title,
+         t.deadline,
+         t.task_id_code
+       FROM tasks t
+       WHERE t.assigned_to = ?
+         AND t.deadline IS NOT NULL
+         AND t.deadline < CURDATE()
+         AND t.is_active NOT IN (3, 4)
+         AND NOT EXISTS (
+           SELECT 1 FROM task_deadline_extension_requests er
+           WHERE er.task_id = t.id
+             AND er.status = 'pending'
+             AND er.deleted = 0
+         )`,
+      [userId]
+    );
+
+    return res.json({
+      has_overdue: overdueTasks.length > 0,
+      overdue_tasks: overdueTasks,
+    });
+  } catch (err) {
+    console.error('Check overdue tasks error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * POST /api/attendance/force-clock-out
  * Stop all timers and clock out
  */

@@ -13,6 +13,7 @@ router.post('/force-clock-out', ctrl.forceClockOut);
 router.get('/today', ctrl.getToday);
 router.get('/history', ctrl.getHistory);
 router.get('/check-running-timers', ctrl.checkRunningTimers);
+router.get('/check-overdue-tasks', ctrl.checkOverdueTasks);
 router.get('/check-auto-clockout', ctrl.checkAutoClockOut);
 router.post('/correct-clockout', ctrl.correctClockOut);
 router.get('/pending-resolution', ctrl.getPendingResolution);
