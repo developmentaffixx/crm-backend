@@ -408,3 +408,28 @@ exports.markTaskCommentsRead = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
+
+/**
+ * GET /api/notifications/task-comments/unread-count
+ * Get unread task comment notifications count for the current user.
+ */
+exports.getTaskCommentsUnreadCount = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const [rows] = await db.query(
+      'SELECT COUNT(*) as count FROM task_comment_notifications WHERE user_id = ? AND is_read = 0',
+      [userId]
+    );
+
+    res.json({ count: rows[0]?.count || 0 });
+  } catch (err) {
+    console.error('Get task comments unread count error:', err);
+    // If table doesn't exist, return 0
+    if (err.code === 'ER_NO_SUCH_TABLE') {
+      res.json({ count: 0 });
+    } else {
+      res.status(500).json({ message: 'Server error' });
+    }
+  }
+};
