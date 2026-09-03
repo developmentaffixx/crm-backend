@@ -225,6 +225,12 @@ exports.deleteComment = async (req, res) => {
 
     await db.query('DELETE FROM task_comments WHERE id = ?', [commentId]);
 
+    // Clean up related notifications
+    await db.query(
+      'DELETE FROM task_comment_notifications WHERE task_id = ?',
+      [taskId]
+    );
+
     res.json({ message: 'Comment deleted' });
   } catch (err) {
     console.error('Delete comment error:', err);

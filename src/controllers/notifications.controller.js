@@ -412,11 +412,23 @@ exports.markTaskCommentsRead = async (req, res) => {
 /**
  * GET /api/notifications/task-comments/unread-count
  * Get unread task comment notifications count for the current user.
+ * Only counts notifications for tasks that actually have comments.
  */
 exports.getTaskCommentsUnreadCount = async (req, res) => {
   try {
     const userId = req.user.id;
 
+    // First, clean up stale notifications (tasks with no comments)
+    await db.query(
+      `DELETE tcn FROM task_comment_notifications tcn
+       LEFT JOIN task_comments tc ON tcn.task_id = tc.task_id
+       WHERE tcn.user_id = ? 
+         AND tcn.is_read = 0
+         AND tc.id IS NULL`,
+      [userId]
+    );
+
+    // Then count the remaining unread notifications
     const [rows] = await db.query(
       'SELECT COUNT(*) as count FROM task_comment_notifications WHERE user_id = ? AND is_read = 0',
       [userId]
