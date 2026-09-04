@@ -27,13 +27,14 @@ exports.list = async (req, res) => {
       params.push(req.user.id, req.user.id);
     }
 
-    // Hide tickets that fall within a paused or skipped cycle's date range — applies to ALL
-    // users (incl. admin) on the Tickets list page. Admins can still open them
-    // via the cycle detail view.
+    // Tickets list cycle filter:
+    // - Non-admins: hide tickets from paused, skipped, or completed cycles
+    // - Admins: hide tickets from paused/skipped cycles on this list page (visible via cycle detail)
+    //           completed cycle tickets also hidden to keep the list focused on active work
     where += ` AND NOT (
       t.project_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM service_cycles sc_pause
-        WHERE sc_pause.project_id = t.project_id AND sc_pause.status IN ('paused', 'skipped')
+        WHERE sc_pause.project_id = t.project_id AND sc_pause.status IN ('paused', 'skipped', 'completed')
           AND sc_pause.start_date <= COALESCE(t.due_date, t.created_at)
           AND sc_pause.end_date >= COALESCE(t.due_date, t.created_at)
       )
@@ -300,6 +301,28 @@ exports.create = async (req, res) => {
     }
     const ticket_id_code = `${ticketPrefix}-${String(ticketSeq).padStart(3, '0')}`;
 
+    // Rule 3: if due_date and project_id are provided, ensure due_date does not exceed the active cycle end_date
+    if (due_date && project_id) {
+      const [activeCycle] = await db.query(
+        `SELECT end_date FROM service_cycles
+         WHERE project_id = ? AND status IN ('active', 'upcoming')
+         ORDER BY start_date ASC LIMIT 1`,
+        [parseInt(project_id)]
+      );
+      if (activeCycle.length > 0 && activeCycle[0].end_date) {
+        const dueDateVal = new Date(due_date);
+        const cycleEndDate = new Date(activeCycle[0].end_date);
+        if (dueDateVal > cycleEndDate) {
+          const endStr = activeCycle[0].end_date instanceof Date
+            ? activeCycle[0].end_date.toISOString().split('T')[0]
+            : String(activeCycle[0].end_date).split('T')[0];
+          return res.status(400).json({
+            message: `Ticket due date cannot exceed the cycle end date (${endStr}). Please extend the cycle end date first.`
+          });
+        }
+      }
+    }
+
     const [result] = await db.query(
       `INSERT INTO tickets (ticket_id_code, mode, title, description, ticket_type, priority, status,
         related_to_type, related_to_id, vendor_name, brand_id, project_id,
@@ -399,6 +422,28 @@ exports.update = async (req, res) => {
 
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ message: 'No valid fields to update' });
+    }
+
+    // Rule 3: if due_date is being updated, ensure it does not exceed the active cycle end_date
+    if (updates.due_date && ticket.project_id) {
+      const [activeCycle] = await db.query(
+        `SELECT end_date FROM service_cycles
+         WHERE project_id = ? AND status IN ('active', 'upcoming')
+         ORDER BY start_date ASC LIMIT 1`,
+        [ticket.project_id]
+      );
+      if (activeCycle.length > 0 && activeCycle[0].end_date) {
+        const dueDateVal = new Date(updates.due_date);
+        const cycleEndDate = new Date(activeCycle[0].end_date);
+        if (dueDateVal > cycleEndDate) {
+          const endStr = activeCycle[0].end_date instanceof Date
+            ? activeCycle[0].end_date.toISOString().split('T')[0]
+            : String(activeCycle[0].end_date).split('T')[0];
+          return res.status(400).json({
+            message: `Ticket due date cannot exceed the cycle end date (${endStr}). Please extend the cycle end date first.`
+          });
+        }
+      }
     }
 
     // Track status change

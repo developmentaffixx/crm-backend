@@ -86,8 +86,10 @@ exports.list = async (req, res) => {
       params.push(req.user.id, req.user.id, req.user.id, req.user.id);
     }
 
-    // Hide tasks that belong to a paused, skipped, or completed cycle — applies to ALL users (incl. admin)
-    // on the Tasks list page. Admins can still open them via the cycle detail view.
+    // Cycle visibility rules on the Tasks list page:
+    // - Non-admins: hide tasks from paused, skipped, or completed cycles entirely
+    // - Admins: hide tasks from paused/skipped cycles on this page (they can view via cycle detail);
+    //           completed cycle tasks are also hidden here to keep the list focused on active work
     where += ` AND NOT EXISTS (
       SELECT 1 FROM cycle_tasks ct_pause
       JOIN service_cycles sc_pause ON sc_pause.id = ct_pause.cycle_id
@@ -101,7 +103,12 @@ exports.list = async (req, res) => {
     }
     if (exclude_done === '1') { where += ' AND t.is_active != 3'; }
     if (priority)  { where += ' AND t.priority = ?';  params.push(priority); }
-    if (assigned_to) { where += ' AND t.assigned_to = ?'; params.push(assigned_to); }
+    if (assigned_to) {
+      where += ` AND (t.assigned_to = ? OR EXISTS (
+        SELECT 1 FROM task_assignees ta_f WHERE ta_f.task_id = t.id AND ta_f.user_id = ?
+      ))`;
+      params.push(assigned_to, assigned_to);
+    }
     if (project_id) {
       where += ' AND EXISTS (SELECT 1 FROM project_tasks pt_f WHERE pt_f.task_id = t.id AND pt_f.project_id = ?)';
       params.push(project_id);
@@ -179,7 +186,7 @@ exports.list = async (req, res) => {
 
     // Summary counts (over ALL matching tasks, not just current page)
     // We need a separate query for accurate counts
-    const summaryWhere = 't.deleted = 0' + (!req.user.is_admin
+    let summaryWhere = 't.deleted = 0' + (!req.user.is_admin
       ? ` AND (
         (t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
           SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
@@ -193,8 +200,15 @@ exports.list = async (req, res) => {
         SELECT 1 FROM cycle_tasks ct_pause
         JOIN service_cycles sc_pause ON sc_pause.id = ct_pause.cycle_id
         WHERE ct_pause.task_id = t.id AND sc_pause.status IN ('paused', 'skipped', 'completed')
-      )`;
-    const summaryParams = !req.user.is_admin ? [req.user.id, req.user.id, req.user.id, req.user.id] : [];
+      )`;    const summaryParams = !req.user.is_admin ? [req.user.id, req.user.id, req.user.id, req.user.id] : [];
+
+    // Apply assigned_to filter to summary counts as well, so tab counts reflect the filtered user
+    if (assigned_to) {
+      summaryWhere += ` AND (t.assigned_to = ? OR EXISTS (
+        SELECT 1 FROM task_assignees ta_s WHERE ta_s.task_id = t.id AND ta_s.user_id = ?
+      ))`;
+      summaryParams.push(assigned_to, assigned_to);
+    }
 
     const [allRows] = await db.query(
       `SELECT t.status, t.is_active FROM tasks t WHERE ${summaryWhere}`,
@@ -381,6 +395,31 @@ exports.create = async (req, res) => {
 
     // Link task to cycle if cycle_id provided
     if (cycle_id) {
+      // Validate cycle exists and is not paused/skipped/completed
+      const [cycleRows] = await db.query(
+        'SELECT id, status, end_date FROM service_cycles WHERE id = ?',
+        [cycle_id]
+      );
+      if (cycleRows.length === 0) {
+        return res.status(400).json({ message: 'Cycle not found' });
+      }
+      const linkedCycle = cycleRows[0];
+      if (['paused', 'skipped', 'completed'].includes(linkedCycle.status)) {
+        return res.status(400).json({ message: `Cannot add a task to a ${linkedCycle.status} cycle` });
+      }
+      // Rule 3: deadline cannot exceed cycle end_date
+      if (deadline && linkedCycle.end_date) {
+        const deadlineDate = new Date(deadline);
+        const cycleEndDate = new Date(linkedCycle.end_date);
+        if (deadlineDate > cycleEndDate) {
+          const endStr = linkedCycle.end_date instanceof Date
+            ? linkedCycle.end_date.toISOString().split('T')[0]
+            : String(linkedCycle.end_date).split('T')[0];
+          return res.status(400).json({
+            message: `Task deadline cannot exceed the cycle end date (${endStr}). Please extend the cycle end date first.`
+          });
+        }
+      }
       await db.query(
         'INSERT IGNORE INTO cycle_tasks (cycle_id, task_id) VALUES (?, ?)',
         [cycle_id, taskId]
@@ -445,6 +484,29 @@ exports.update = async (req, res) => {
 
     if (Object.keys(updates).length === 0 && req.body.project_id === undefined && req.body.service_id === undefined && req.body.collaborators === undefined && req.body.cycle_id === undefined) {
       return res.status(400).json({ message: 'No valid fields to update' });
+    }
+
+    // Rule 3: if deadline is being updated, ensure it does not exceed the cycle end_date
+    if (updates.deadline) {
+      const [cycleLink] = await db.query(
+        `SELECT sc.end_date FROM cycle_tasks ct
+         JOIN service_cycles sc ON sc.id = ct.cycle_id
+         WHERE ct.task_id = ?
+         LIMIT 1`,
+        [req.params.id]
+      );
+      if (cycleLink.length > 0 && cycleLink[0].end_date) {
+        const deadlineDate = new Date(updates.deadline);
+        const cycleEndDate = new Date(cycleLink[0].end_date);
+        if (deadlineDate > cycleEndDate) {
+          const endStr = cycleLink[0].end_date instanceof Date
+            ? cycleLink[0].end_date.toISOString().split('T')[0]
+            : String(cycleLink[0].end_date).split('T')[0];
+          return res.status(400).json({
+            message: `Task deadline cannot exceed the cycle end date (${endStr}). Please extend the cycle end date first.`
+          });
+        }
+      }
     }
 
     // Log field changes

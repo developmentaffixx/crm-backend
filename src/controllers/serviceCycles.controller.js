@@ -367,8 +367,30 @@ exports.updateCycle = async (req, res) => {
     }
 
     if (status !== undefined) {
+      // Rule 4: a cycle can only be marked 'completed' when ALL its tasks are Done (is_active = 3)
+      if (status === 'completed') {
+        const [pendingTasks] = await db.query(
+          `SELECT t.id, t.title, t.status, t.is_active
+           FROM cycle_tasks ct
+           JOIN tasks t ON t.id = ct.task_id AND t.deleted = 0
+           WHERE ct.cycle_id = ? AND t.is_active != 3`,
+          [cycleId]
+        );
+        if (pendingTasks.length > 0) {
+          return res.status(400).json({
+            message: `Cannot complete this cycle — ${pendingTasks.length} task(s) are not yet done. All tasks must be marked Done before completing the cycle.`,
+            pending_tasks: pendingTasks.map(t => ({ id: t.id, title: t.title, status: t.status }))
+          });
+        }
+      }
       updates.push('status = ?');
       values.push(status);
+      // Track paused_at / resumed_at timestamps automatically
+      if (status === 'paused') {
+        updates.push('paused_at = NOW()');
+      } else if (status === 'active' && currentCycle.status === 'paused') {
+        updates.push('resumed_at = NOW()');
+      }
     }
 
     if (updates.length === 0) {

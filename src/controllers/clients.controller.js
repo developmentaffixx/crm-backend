@@ -142,6 +142,15 @@ exports.getOne = async (req, res) => {
     client.expenses = expenses;
 
     // Fetch related tasks (via project_tasks junction)
+    // Rule 1: hide tasks from paused/skipped cycles for non-admin users on the Accounts page;
+    //         admins can still see (and edit) them here.
+    const tasksWhere = req.user && !req.user.is_admin
+      ? `AND NOT EXISTS (
+           SELECT 1 FROM cycle_tasks ct_ac
+           JOIN service_cycles sc_ac ON sc_ac.id = ct_ac.cycle_id
+           WHERE ct_ac.task_id = t.id AND sc_ac.status IN ('paused', 'skipped')
+         )`
+      : '';
     const [tasks] = await db.query(
       `SELECT t.id, t.title, t.status, t.priority, t.deadline, t.is_active,
               CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name
@@ -149,7 +158,7 @@ exports.getOne = async (req, res) => {
        INNER JOIN project_tasks pt ON pt.task_id = t.id
        INNER JOIN projects p ON p.id = pt.project_id
        LEFT JOIN users u ON u.id = t.assigned_to
-       WHERE p.client_id = ? AND t.deleted = 0
+       WHERE p.client_id = ? AND t.deleted = 0 ${tasksWhere}
        ORDER BY t.created_at DESC`,
       [client.id]
     );
