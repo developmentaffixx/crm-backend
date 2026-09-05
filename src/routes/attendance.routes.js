@@ -39,6 +39,5 @@ router.get('/admin/plans/:userId/:date', requireAdmin, ctrl.adminGetPlans);
 router.get('/admin/pending-resolution/:userId', requireAdmin, ctrl.adminGetPendingResolution);
 router.post('/admin/resolve-pending/:userId', requireAdmin, ctrl.adminResolvePending);
 router.get('/admin/all-pending', requireAdmin, ctrl.adminGetAllPending);
-router.post('/admin/force-clock-out/:userId', requireAdmin, ctrl.adminForceClockOut);
 
 module.exports = router;
