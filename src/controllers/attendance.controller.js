@@ -184,75 +184,74 @@ exports.clockOut = async (req, res) => {
     const attendanceId = attendance.id;
     const now = new Date();
 
-    // ── Stop all running task timers ──────────────────────────────────────────
+    // ── Enforce no active timers running (tasks, tickets, meetings, AFS) ────────
     const [activeTaskTimers] = await db.query(
-      'SELECT id, task_id, started_at FROM task_active_timers WHERE user_id = ?',
+      'SELECT id FROM task_active_timers WHERE user_id = ?',
       [userId]
     );
-    for (const timer of activeTaskTimers) {
-      const startedAt = new Date(timer.started_at);
-      const duration = Math.max(1, Math.floor((now - startedAt) / 1000));
-      await db.query(
-        `INSERT INTO task_time_logs (task_id, user_id, started_at, ended_at, duration, note)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [timer.task_id, userId, timer.started_at, now, duration, 'Auto-stopped on clock out']
-      );
-      await db.query(
-        'UPDATE tasks SET time_spent = time_spent + ?, timer_started_at = NULL WHERE id = ?',
-        [duration, timer.task_id]
-      );
-      await db.query('DELETE FROM task_active_timers WHERE id = ?', [timer.id]);
-    }
-
-    // ── Stop all running ticket timers ────────────────────────────────────────
     const [activeTicketTimers] = await db.query(
-      'SELECT id, ticket_id, started_at FROM ticket_active_timers WHERE user_id = ?',
+      'SELECT id FROM ticket_active_timers WHERE user_id = ?',
       [userId]
     );
-    for (const timer of activeTicketTimers) {
-      const startedAt = new Date(timer.started_at);
-      const duration = Math.max(1, Math.floor((now - startedAt) / 1000));
-      const minutes = Math.ceil(duration / 60);
-      await db.query(
-        `INSERT INTO ticket_time_logs (ticket_id, user_id, minutes, description, started_at, ended_at, duration, log_date, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, CURDATE(), ?)`,
-        [timer.ticket_id, userId, minutes, 'Auto-stopped on clock out', timer.started_at, now, duration, now]
-      );
-      await db.query('DELETE FROM ticket_active_timers WHERE id = ?', [timer.id]);
-    }
-
-    // ── Stop all running meeting timers ───────────────────────────────────────
     const [activeMeetingTimers] = await db.query(
-      'SELECT id, meeting_id, started_at FROM meeting_active_timers WHERE user_id = ?',
+      'SELECT id FROM meeting_active_timers WHERE user_id = ?',
       [userId]
     );
-    for (const timer of activeMeetingTimers) {
-      const startedAt = new Date(timer.started_at);
-      const duration = Math.max(1, Math.floor((now - startedAt) / 1000));
-      await db.query(
-        `INSERT INTO meeting_time_logs (meeting_id, user_id, started_at, ended_at, duration, note)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [timer.meeting_id, userId, timer.started_at, now, duration, 'Auto-stopped on clock out']
-      );
-      await db.query('DELETE FROM meeting_active_timers WHERE id = ?', [timer.id]);
+    const [activeAfs] = await db.query(
+      'SELECT id FROM afs_logs WHERE user_id = ? AND end_time IS NULL',
+      [userId]
+    );
+
+    if (activeTaskTimers.length > 0 || activeTicketTimers.length > 0 || activeMeetingTimers.length > 0 || activeAfs.length > 0) {
+      return res.status(400).json({
+        message: 'Cannot clock out while tasks, tickets, meetings, or AFS sessions are running. Please stop them first.'
+      });
     }
 
-    // ── End any active AFS session ────────────────────────────────────────────
-    const [activeAfs] = await db.query(
-      'SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL',
+    // ── Enforce no un-extended overdue tasks or tickets for primary assignee ───
+    const [overdueTasks] = await db.query(
+      `SELECT t.id FROM tasks t
+       WHERE t.assigned_to = ?
+         AND t.deadline IS NOT NULL
+         AND t.deadline <= CURDATE()
+         AND t.is_active NOT IN (3, 4)
+         AND NOT EXISTS (
+           SELECT 1 FROM task_deadline_extension_requests er
+           WHERE er.task_id = t.id AND er.status = 'pending' AND er.deleted = 0
+         )
+         AND NOT (
+           EXISTS (SELECT 1 FROM cycle_tasks ct WHERE ct.task_id = t.id)
+           AND NOT EXISTS (
+             SELECT 1 FROM cycle_tasks ct2
+             JOIN service_cycles sc ON sc.id = ct2.cycle_id
+             WHERE ct2.task_id = t.id AND sc.status NOT IN ('completed', 'skipped')
+           )
+         )
+       LIMIT 1`,
       [userId]
     );
-    for (const afs of activeAfs) {
-      const afsDuration = Math.floor((now - new Date(afs.start_time)) / 1000);
-      await db.query(
-        'UPDATE afs_logs SET end_time = ?, duration_seconds = ? WHERE id = ?',
-        [now, afsDuration, afs.id]
-      );
-      await db.query(
-        'UPDATE attendance SET total_afs_seconds = total_afs_seconds + ? WHERE id = ?',
-        [afsDuration, attendanceId]
-      );
+
+    const [overdueTickets] = await db.query(
+      `SELECT tk.id FROM tickets tk
+       WHERE tk.assigned_to = ?
+         AND tk.due_date IS NOT NULL
+         AND tk.due_date <= CURDATE()
+         AND tk.status NOT IN ('resolved', 'closed')
+         AND tk.deleted = 0
+         AND NOT EXISTS (
+           SELECT 1 FROM ticket_deadline_extension_requests ter
+           WHERE ter.ticket_id = tk.id AND ter.status = 'pending' AND ter.deleted = 0
+         )
+       LIMIT 1`,
+      [userId]
+    );
+
+    if (overdueTasks.length > 0 || overdueTickets.length > 0) {
+      return res.status(400).json({
+        message: 'Cannot clock out with overdue tasks or tickets. Please request an extension first.'
+      });
     }
+
 
     // ── Calculate served time and clock out ────────────────────────────────────
     // Use effective_clock_in if set (First Day Joining case) so deficit is correct
@@ -1307,7 +1306,7 @@ exports.updateSettings = async (req, res) => {
 
 /**
  * GET /api/attendance/check-running-timers
- * Check if user has any running timers before clock-out
+ * Check if user has any running timers (tasks, tickets, meetings, AFS) before clock-out
  */
 exports.checkRunningTimers = async (req, res) => {
   try {
@@ -1315,7 +1314,7 @@ exports.checkRunningTimers = async (req, res) => {
 
     // Check active task timers
     const [taskTimers] = await db.query(
-      `SELECT tat.id, tat.task_id, tat.started_at, t.title AS task_title
+      `SELECT tat.id, tat.task_id, tat.started_at, t.title AS task_title, t.task_id_code
        FROM task_active_timers tat
        JOIN tasks t ON t.id = tat.task_id
        WHERE tat.user_id = ?`,
@@ -1324,20 +1323,29 @@ exports.checkRunningTimers = async (req, res) => {
 
     // Check active ticket timers
     const [ticketTimers] = await db.query(
-      `SELECT tt.id, tt.ticket_id, tt.started_at, tk.title AS ticket_title
+      `SELECT tt.id, tt.ticket_id, tt.started_at, tk.title AS ticket_title, tk.ticket_id_code
        FROM ticket_active_timers tt
        JOIN tickets tk ON tk.id = tt.ticket_id
        WHERE tt.user_id = ?`,
       [userId]
     );
 
-    // Check active AFS
-    const [activeAfs] = await db.query(
-      `SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL AND DATE(start_time) = CURDATE()`,
+    // Check active meeting timers
+    const [meetingTimers] = await db.query(
+      `SELECT mat.id, mat.meeting_id, mat.started_at, m.title AS meeting_title
+       FROM meeting_active_timers mat
+       JOIN meetings m ON m.id = mat.meeting_id
+       WHERE mat.user_id = ?`,
       [userId]
     );
 
-    const hasRunningTimers = taskTimers.length > 0 || ticketTimers.length > 0;
+    // Check active AFS
+    const [activeAfs] = await db.query(
+      `SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL`,
+      [userId]
+    );
+
+    const hasRunningTimers = taskTimers.length > 0 || ticketTimers.length > 0 || meetingTimers.length > 0 || activeAfs.length > 0;
     const hasActiveAfs = activeAfs.length > 0;
 
     return res.json({
@@ -1345,6 +1353,7 @@ exports.checkRunningTimers = async (req, res) => {
       has_active_afs: hasActiveAfs,
       task_timers: taskTimers,
       ticket_timers: ticketTimers,
+      meeting_timers: meetingTimers,
       active_afs: activeAfs[0] || null
     });
   } catch (err) {
@@ -1355,17 +1364,17 @@ exports.checkRunningTimers = async (req, res) => {
 
 /**
  * GET /api/attendance/check-overdue-tasks
- * Returns tasks that are overdue and have no pending extension request.
+ * Returns tasks and tickets that are overdue and have no pending extension request.
+ * Applies only to the primary assignee.
  * Used to block clock-out until the user submits extension requests.
  */
 exports.checkOverdueTasks = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Fetch tasks assigned to this user that are overdue (deadline < TODAY) and not completed/rejected.
+    // Fetch tasks assigned to this user that are overdue (deadline <= TODAY) and not completed/rejected.
     // Exclude tasks that already have a pending extension request.
-    // Also exclude tasks that are ONLY linked to completed/skipped cycles — those cycles are closed
-    // and shouldn't block clock-out. A task with no cycle link (standalone) is still included.
+    // Also exclude tasks that are ONLY linked to completed/skipped cycles.
     const [overdueTasks] = await db.query(
       `SELECT
          t.id,
@@ -1375,7 +1384,7 @@ exports.checkOverdueTasks = async (req, res) => {
        FROM tasks t
        WHERE t.assigned_to = ?
          AND t.deadline IS NOT NULL
-         AND t.deadline < CURDATE()
+         AND t.deadline <= CURDATE()
          AND t.is_active NOT IN (3, 4)
          AND NOT EXISTS (
            SELECT 1 FROM task_deadline_extension_requests er
@@ -1384,7 +1393,6 @@ exports.checkOverdueTasks = async (req, res) => {
              AND er.deleted = 0
          )
          AND NOT (
-           -- Task is linked to at least one cycle, AND every cycle it belongs to is completed/skipped
            EXISTS (
              SELECT 1 FROM cycle_tasks ct WHERE ct.task_id = t.id
            )
@@ -1398,9 +1406,33 @@ exports.checkOverdueTasks = async (req, res) => {
       [userId]
     );
 
+    // Fetch tickets assigned to this user that are overdue (due_date <= TODAY) and not resolved/closed.
+    // Exclude tickets that already have a pending extension request.
+    const [overdueTickets] = await db.query(
+      `SELECT
+         tk.id,
+         tk.title,
+         tk.due_date,
+         tk.ticket_id_code
+       FROM tickets tk
+       WHERE tk.assigned_to = ?
+         AND tk.due_date IS NOT NULL
+         AND tk.due_date <= CURDATE()
+         AND tk.status NOT IN ('resolved', 'closed')
+         AND tk.deleted = 0
+         AND NOT EXISTS (
+           SELECT 1 FROM ticket_deadline_extension_requests ter
+           WHERE ter.ticket_id = tk.id
+             AND ter.status = 'pending'
+             AND ter.deleted = 0
+         )`,
+      [userId]
+    );
+
     return res.json({
-      has_overdue: overdueTasks.length > 0,
+      has_overdue: overdueTasks.length > 0 || overdueTickets.length > 0,
       overdue_tasks: overdueTasks,
+      overdue_tickets: overdueTickets,
     });
   } catch (err) {
     console.error('Check overdue tasks error:', err);
@@ -1410,108 +1442,12 @@ exports.checkOverdueTasks = async (req, res) => {
 
 /**
  * POST /api/attendance/force-clock-out
- * Stop all timers and clock out
+ * Disabled: Users must manually stop running activities and submit extensions.
  */
 exports.forceClockOut = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { plans, additional } = req.body;
-    const now = new Date();
-
-    // 1. Stop all active task timers
-    const [taskTimers] = await db.query(
-      'SELECT id, task_id, started_at FROM task_active_timers WHERE user_id = ?',
-      [userId]
-    );
-
-    for (const timer of taskTimers) {
-      const duration = Math.max(1, Math.floor((now - new Date(timer.started_at)) / 1000));
-      await db.query(
-        `INSERT INTO task_time_logs (task_id, user_id, started_at, ended_at, duration, note)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [timer.task_id, userId, timer.started_at, now, duration, 'Auto-stopped on clock out']
-      );
-      await db.query('UPDATE tasks SET time_spent = time_spent + ?, timer_started_at = NULL WHERE id = ?', [duration, timer.task_id]);
-      await db.query('DELETE FROM task_active_timers WHERE id = ?', [timer.id]);
-    }
-
-    // 2. Stop active ticket timers
-    const [ticketTimers] = await db.query(
-      'SELECT id, ticket_id, started_at FROM ticket_active_timers WHERE user_id = ?',
-      [userId]
-    );
-
-    for (const timer of ticketTimers) {
-      const duration = Math.max(1, Math.floor((now - new Date(timer.started_at)) / 1000));
-      const minutes = Math.ceil(duration / 60);
-      await db.query(
-        `INSERT INTO ticket_time_logs (ticket_id, user_id, minutes, note, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-        [timer.ticket_id, userId, minutes, 'Auto-stopped on clock out', now]
-      );
-      await db.query('DELETE FROM ticket_active_timers WHERE id = ?', [timer.id]);
-    }
-
-    // 3. End active AFS
-    const [activeAfs] = await db.query(
-      'SELECT id, start_time FROM afs_logs WHERE user_id = ? AND end_time IS NULL AND DATE(start_time) = CURDATE()',
-      [userId]
-    );
-    for (const afs of activeAfs) {
-      const afsDuration = Math.floor((now - new Date(afs.start_time)) / 1000);
-      await db.query('UPDATE afs_logs SET end_time = ?, duration_seconds = ? WHERE id = ?', [now, afsDuration, afs.id]);
-    }
-
-    // 4. Now do the normal clock-out
-    const [records] = await db.query(
-      'SELECT * FROM attendance WHERE user_id = ? AND date = CURDATE() AND clock_out IS NULL',
-      [userId]
-    );
-    if (!records.length) {
-      return res.status(400).json({ message: 'No active clock-in found' });
-    }
-
-    const attendanceId = records[0].id;
-    const [servedResult] = await db.query(
-      'SELECT TIMESTAMPDIFF(SECOND, clock_in, NOW()) AS total_served FROM attendance WHERE id = ?',
-      [attendanceId]
-    );
-    const [afsResult] = await db.query(
-      'SELECT COALESCE(SUM(duration_seconds), 0) AS total_afs FROM afs_logs WHERE attendance_id = ?',
-      [attendanceId]
-    );
-
-    await db.query(
-      'UPDATE attendance SET clock_out = NOW(), total_served_seconds = ?, total_afs_seconds = ? WHERE id = ?',
-      [servedResult[0].total_served, afsResult[0].total_afs, attendanceId]
-    );
-
-    // Update plans if provided
-    if (plans && plans.length) {
-      for (const plan of plans) {
-        await db.query('UPDATE daily_plans SET status = ? WHERE id = ? AND user_id = ?', [plan.status, plan.id, userId]);
-      }
-    }
-    if (additional && additional.length) {
-      for (const item of additional) {
-        if (item.point_text && item.point_text.trim()) {
-          await db.query(
-            'INSERT INTO daily_plans (user_id, attendance_id, point_text, status, is_additional) VALUES (?, ?, ?, ?, 1)',
-            [userId, attendanceId, item.point_text.trim(), item.status || 'completed']
-          );
-        }
-      }
-    }
-
-    return res.json({
-      message: 'All timers stopped and clocked out successfully',
-      stopped_tasks: taskTimers.length,
-      stopped_tickets: ticketTimers.length
-    });
-  } catch (err) {
-    console.error('Force clock out error:', err);
-    return res.status(500).json({ message: 'Server error' });
-  }
+  return res.status(400).json({
+    message: 'Cannot force clock out. Please manually stop running activities and submit deadline extension requests.'
+  });
 };
 
 /**
