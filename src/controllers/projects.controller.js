@@ -64,7 +64,7 @@ exports.list = async (req, res) => {
               l.business_name AS client_name,
               s.name AS service_name,
               CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
-              (SELECT COUNT(*) FROM project_members pm2 WHERE pm2.project_id = p.id) AS member_count,
+              (SELECT COUNT(*) FROM project_members pm2 JOIN users u2 ON u2.id = pm2.user_id WHERE pm2.project_id = p.id AND u2.is_admin = 0) AS member_count,
               (SELECT COUNT(*) FROM project_services ps2 WHERE ps2.project_id = p.id AND ps2.status = 'active') AS service_count
        FROM projects p
        LEFT JOIN leads l ON l.id = p.client_id
@@ -128,12 +128,12 @@ exports.getOne = async (req, res) => {
 
     const project = rows[0];
 
-    // Fetch members
+    // Fetch members (excluding admins)
     const [members] = await db.query(
-      `SELECT pm.id AS membership_id, u.id, u.first_name, u.last_name, u.email, u.is_active, u.avatar_url
+      `SELECT pm.id AS membership_id, u.id, u.first_name, u.last_name, u.email, u.is_admin, u.is_active, u.avatar_url
        FROM project_members pm
        JOIN users u ON u.id = pm.user_id
-       WHERE pm.project_id = ?
+       WHERE pm.project_id = ? AND u.is_admin = 0
        ORDER BY u.is_active DESC, u.first_name`,
       [project.id]
     );
@@ -265,13 +265,20 @@ exports.create = async (req, res) => {
 
     const projectId = result.insertId;
 
-    // Insert team members
+    // Insert team members (excluding admins)
     if (members && members.length > 0) {
-      const memberValues = members.map(uid => [projectId, uid]);
-      await db.query(
-        `INSERT INTO project_members (project_id, user_id) VALUES ?`,
-        [memberValues]
+      const [nonAdminUsers] = await db.query(
+        `SELECT id FROM users WHERE id IN (?) AND is_admin = 0`,
+        [members]
       );
+      const validMemberIds = nonAdminUsers.map(u => u.id);
+      if (validMemberIds.length > 0) {
+        const memberValues = validMemberIds.map(uid => [projectId, uid]);
+        await db.query(
+          `INSERT INTO project_members (project_id, user_id) VALUES ?`,
+          [memberValues]
+        );
+      }
     }
 
     // Add creation activity
@@ -330,12 +337,19 @@ exports.update = async (req, res) => {
       await db.query(`UPDATE projects SET ${setClauses} WHERE id = ?`, values);
     }
 
-    // Update members if provided
+    // Update members if provided (excluding admins)
     if (req.body.members !== undefined) {
       await db.query('DELETE FROM project_members WHERE project_id = ?', [req.params.id]);
       if (req.body.members.length > 0) {
-        const memberValues = req.body.members.map(uid => [req.params.id, uid]);
-        await db.query('INSERT INTO project_members (project_id, user_id) VALUES ?', [memberValues]);
+        const [nonAdminUsers] = await db.query(
+          `SELECT id FROM users WHERE id IN (?) AND is_admin = 0`,
+          [req.body.members]
+        );
+        const validMemberIds = nonAdminUsers.map(u => u.id);
+        if (validMemberIds.length > 0) {
+          const memberValues = validMemberIds.map(uid => [req.params.id, uid]);
+          await db.query('INSERT INTO project_members (project_id, user_id) VALUES ?', [memberValues]);
+        }
       }
     }
 
