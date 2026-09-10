@@ -82,6 +82,13 @@ router.delete(
   cyclesController.deleteApproval
 );
 
+// PUT /api/projects/:projectId/cycles/:cycleId/extend — extend cycle end_date (admin only)
+router.put(
+  '/:projectId/cycles/:cycleId/extend',
+  [param('projectId').isInt(), param('cycleId').isInt()],
+  cyclesController.extendCycle
+);
+
 // ── Feedback ──
 router.put(
   '/:projectId/cycles/:cycleId/feedback',

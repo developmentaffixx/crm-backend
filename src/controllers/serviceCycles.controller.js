@@ -782,3 +782,87 @@ exports.saveFeedback = async (req, res) => {
     return res.status(500).json({ message: 'Server error', detail: err.message });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/projects/:projectId/cycles/:cycleId/extend — extend cycle end_date
+// Body: { new_end_date: 'YYYY-MM-DD', reason: string }
+// Admin only — extends an active or paused cycle's end_date and logs the reason
+// ─────────────────────────────────────────────────────────────────────────────
+exports.extendCycle = async (req, res) => {
+  try {
+    const { projectId, cycleId } = req.params;
+    const { new_end_date, reason } = req.body;
+
+    // Admin only
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: 'Only admins can extend a cycle' });
+    }
+
+    if (!new_end_date) {
+      return res.status(400).json({ message: 'new_end_date is required (YYYY-MM-DD)' });
+    }
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ message: 'reason is required' });
+    }
+
+    // Fetch cycle
+    const [rows] = await db.query(
+      'SELECT * FROM service_cycles WHERE id = ? AND project_id = ?',
+      [cycleId, projectId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Cycle not found' });
+    }
+    const cycle = rows[0];
+
+    // Only active or paused cycles can be extended
+    if (!['active', 'paused'].includes(cycle.status)) {
+      return res.status(400).json({
+        message: `Cannot extend a ${cycle.status} cycle. Only active or paused cycles can be extended.`
+      });
+    }
+
+    // New end_date must be after current end_date
+    const currentEnd = new Date(cycle.end_date);
+    const newEnd = new Date(new_end_date);
+    if (newEnd <= currentEnd) {
+      const currentEndStr = cycle.end_date instanceof Date
+        ? cycle.end_date.toISOString().split('T')[0]
+        : String(cycle.end_date).split('T')[0];
+      return res.status(400).json({
+        message: `New end date must be after the current end date (${currentEndStr})`
+      });
+    }
+
+    // Update end_date and append extension reason to notes
+    const oldEndStr = cycle.end_date instanceof Date
+      ? cycle.end_date.toISOString().split('T')[0]
+      : String(cycle.end_date).split('T')[0];
+
+    const extensionNote = `[Extended ${new Date().toISOString().split('T')[0]}] ${oldEndStr} → ${new_end_date}: ${reason.trim()}`;
+    const updatedNotes = cycle.notes
+      ? `${cycle.notes}\n${extensionNote}`
+      : extensionNote;
+
+    await db.query(
+      'UPDATE service_cycles SET end_date = ?, notes = ? WHERE id = ?',
+      [new_end_date, updatedNotes, cycleId]
+    );
+
+    // Log project activity
+    await db.query(
+      `INSERT INTO project_activities (project_id, type, note, created_by) VALUES (?, 'update', ?, ?)`,
+      [projectId, `${cycle.title} extended: ${oldEndStr} → ${new_end_date}. Reason: ${reason.trim()}`, req.user.id]
+    );
+
+    return res.json({
+      message: `Cycle extended to ${new_end_date}`,
+      old_end_date: oldEndStr,
+      new_end_date,
+      reason: reason.trim(),
+    });
+  } catch (err) {
+    console.error('Extend cycle error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};

@@ -344,6 +344,36 @@ exports.create = async (req, res) => {
     const assignee  = assigned_to || req.user.id;
     const isActive  = req.user.is_admin ? 1 : 0;
 
+    // ── Pre-flight: validate cycle BEFORE inserting the task ─────────────────
+    let linkedCycle = null;
+    if (cycle_id) {
+      const [cycleRows] = await db.query(
+        'SELECT id, status, end_date FROM service_cycles WHERE id = ?',
+        [cycle_id]
+      );
+      if (cycleRows.length === 0) {
+        return res.status(400).json({ message: 'Cycle not found' });
+      }
+      linkedCycle = cycleRows[0];
+      if (['paused', 'skipped', 'completed'].includes(linkedCycle.status)) {
+        return res.status(400).json({ message: `Cannot add a task to a ${linkedCycle.status} cycle` });
+      }
+      // Hard block: task deadline cannot exceed the cycle end_date
+      if (deadline && linkedCycle.end_date) {
+        const deadlineDate = new Date(deadline);
+        const cycleEndDate = new Date(linkedCycle.end_date);
+        if (deadlineDate > cycleEndDate) {
+          const endStr = linkedCycle.end_date instanceof Date
+            ? linkedCycle.end_date.toISOString().split('T')[0]
+            : String(linkedCycle.end_date).split('T')[0];
+          return res.status(400).json({
+            message: `Task deadline exceeds the cycle end date (${endStr}). Please extend the cycle end date first, then create the task.`,
+          });
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Generate task_id_code: TSK-YYMMDD-### (sequence resets per Financial Year: April–March)
     const now = new Date();
     const yy = String(now.getFullYear()).slice(-2);
@@ -393,33 +423,8 @@ exports.create = async (req, res) => {
       );
     }
 
-    // Link task to cycle if cycle_id provided
-    if (cycle_id) {
-      // Validate cycle exists and is not paused/skipped/completed
-      const [cycleRows] = await db.query(
-        'SELECT id, status, end_date FROM service_cycles WHERE id = ?',
-        [cycle_id]
-      );
-      if (cycleRows.length === 0) {
-        return res.status(400).json({ message: 'Cycle not found' });
-      }
-      const linkedCycle = cycleRows[0];
-      if (['paused', 'skipped', 'completed'].includes(linkedCycle.status)) {
-        return res.status(400).json({ message: `Cannot add a task to a ${linkedCycle.status} cycle` });
-      }
-      // Rule 3: deadline cannot exceed cycle end_date
-      if (deadline && linkedCycle.end_date) {
-        const deadlineDate = new Date(deadline);
-        const cycleEndDate = new Date(linkedCycle.end_date);
-        if (deadlineDate > cycleEndDate) {
-          const endStr = linkedCycle.end_date instanceof Date
-            ? linkedCycle.end_date.toISOString().split('T')[0]
-            : String(linkedCycle.end_date).split('T')[0];
-          return res.status(400).json({
-            message: `Task deadline cannot exceed the cycle end date (${endStr}). Please extend the cycle end date first.`
-          });
-        }
-      }
+    // Link task to cycle if cycle_id provided (cycle already validated above)
+    if (cycle_id && linkedCycle) {
       await db.query(
         'INSERT IGNORE INTO cycle_tasks (cycle_id, task_id) VALUES (?, ?)',
         [cycle_id, taskId]
@@ -486,7 +491,7 @@ exports.update = async (req, res) => {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
-    // Rule 3: if deadline is being updated, ensure it does not exceed the cycle end_date
+    // Hard block: if deadline is being updated and exceeds cycle end_date
     if (updates.deadline) {
       const [cycleLink] = await db.query(
         `SELECT sc.end_date FROM cycle_tasks ct
@@ -503,7 +508,7 @@ exports.update = async (req, res) => {
             ? cycleLink[0].end_date.toISOString().split('T')[0]
             : String(cycleLink[0].end_date).split('T')[0];
           return res.status(400).json({
-            message: `Task deadline cannot exceed the cycle end date (${endStr}). Please extend the cycle end date first.`
+            message: `Task deadline exceeds the cycle end date (${endStr}). Please extend the cycle end date first, then update the task.`,
           });
         }
       }
