@@ -49,6 +49,27 @@ router.post('/forwards/:id/reject', param('id').isInt(), approvalsController.rej
 // DELETE /api/approvals/forwards/:id/cancel (team member cancels own pending)
 router.delete('/forwards/:id/cancel', param('id').isInt(), approvalsController.cancelForward);
 
+// ── Close Requests ──────────────────────────────────────────────────────────
+
+// POST /api/approvals/closes
+router.post(
+  '/closes',
+  [
+    body('task_id').isInt().withMessage('task_id required'),
+    body('reason').notEmpty().withMessage('reason required'),
+  ],
+  approvalsController.createCloseRequest
+);
+
+// POST /api/approvals/closes/:id/approve  (admin)
+router.post('/closes/:id/approve', param('id').isInt(), requireAdmin, approvalsController.approveCloseRequest);
+
+// POST /api/approvals/closes/:id/reject   (admin)
+router.post('/closes/:id/reject', param('id').isInt(), requireAdmin, approvalsController.rejectCloseRequest);
+
+// DELETE /api/approvals/closes/:id/cancel (team member cancels own pending)
+router.delete('/closes/:id/cancel', param('id').isInt(), approvalsController.cancelCloseRequest);
+
 // ── Approvals Page Data ─────────────────────────────────────────────────────
 
 // GET /api/approvals  — returns all sections based on role

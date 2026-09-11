@@ -219,6 +219,14 @@ exports.clockOut = async (req, res) => {
            SELECT 1 FROM task_deadline_extension_requests er
            WHERE er.task_id = t.id AND er.status = 'pending' AND er.deleted = 0
          )
+         AND NOT EXISTS (
+           SELECT 1 FROM task_forward_requests fr
+           WHERE fr.task_id = t.id AND fr.status = 'pending' AND fr.deleted = 0
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM task_close_requests cr
+           WHERE cr.task_id = t.id AND cr.status = 'pending' AND cr.deleted = 0
+         )
          AND NOT (
            EXISTS (SELECT 1 FROM cycle_tasks ct WHERE ct.task_id = t.id)
            AND NOT EXISTS (
@@ -1373,14 +1381,29 @@ exports.checkOverdueTasks = async (req, res) => {
     const userId = req.user.id;
 
     // Fetch tasks assigned to this user that are overdue (deadline <= TODAY) and not completed/rejected.
-    // Exclude tasks that already have a pending extension request.
+    // Exclude tasks that already have a pending extension, forward, or close request.
     // Also exclude tasks that are ONLY linked to completed/skipped cycles.
     const [overdueTasks] = await db.query(
       `SELECT
          t.id,
          t.title,
          t.deadline,
-         t.task_id_code
+         t.task_id_code,
+         CASE
+           WHEN EXISTS (
+             SELECT 1 FROM task_deadline_extension_requests er
+             WHERE er.task_id = t.id AND er.status = 'pending' AND er.deleted = 0
+           ) THEN 'extension'
+           WHEN EXISTS (
+             SELECT 1 FROM task_forward_requests fr
+             WHERE fr.task_id = t.id AND fr.status = 'pending' AND fr.deleted = 0
+           ) THEN 'forward'
+           WHEN EXISTS (
+             SELECT 1 FROM task_close_requests cr
+             WHERE cr.task_id = t.id AND cr.status = 'pending' AND cr.deleted = 0
+           ) THEN 'close'
+           ELSE NULL
+         END AS pending_request_type
        FROM tasks t
        WHERE t.assigned_to = ?
          AND t.deadline IS NOT NULL
@@ -1388,9 +1411,15 @@ exports.checkOverdueTasks = async (req, res) => {
          AND t.is_active NOT IN (3, 4)
          AND NOT EXISTS (
            SELECT 1 FROM task_deadline_extension_requests er
-           WHERE er.task_id = t.id
-             AND er.status = 'pending'
-             AND er.deleted = 0
+           WHERE er.task_id = t.id AND er.status = 'pending' AND er.deleted = 0
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM task_forward_requests fr
+           WHERE fr.task_id = t.id AND fr.status = 'pending' AND fr.deleted = 0
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM task_close_requests cr
+           WHERE cr.task_id = t.id AND cr.status = 'pending' AND cr.deleted = 0
          )
          AND NOT (
            EXISTS (
@@ -1413,7 +1442,14 @@ exports.checkOverdueTasks = async (req, res) => {
          tk.id,
          tk.title,
          tk.due_date,
-         tk.ticket_id_code
+         tk.ticket_id_code,
+         CASE
+           WHEN EXISTS (
+             SELECT 1 FROM ticket_deadline_extension_requests ter
+             WHERE ter.ticket_id = tk.id AND ter.status = 'pending' AND ter.deleted = 0
+           ) THEN 'extension'
+           ELSE NULL
+         END AS pending_request_type
        FROM tickets tk
        WHERE tk.assigned_to = ?
          AND tk.due_date IS NOT NULL

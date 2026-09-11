@@ -184,6 +184,182 @@ exports.cancelExtension = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CLOSE REQUESTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/approvals/closes
+ * Team member requests that an overdue task be marked closed.
+ */
+exports.createCloseRequest = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const { task_id, reason } = req.body;
+
+  try {
+    const [tasks] = await db.query(
+      'SELECT * FROM tasks WHERE id = ? AND deleted = 0',
+      [task_id]
+    );
+    if (tasks.length === 0) return res.status(404).json({ message: 'Task not found' });
+
+    const task = tasks[0];
+
+    // Only the assignee can raise a close request
+    if (task.assigned_to !== req.user.id) {
+      return res.status(403).json({ message: 'Only the assigned user can request task closure' });
+    }
+
+    // Block if task is already completed or rejected
+    if ([3, 4].includes(task.is_active)) {
+      return res.status(400).json({ message: 'Task is already completed or rejected' });
+    }
+
+    // Block duplicate pending close request for the same task
+    const [existing] = await db.query(
+      "SELECT id FROM task_close_requests WHERE task_id = ? AND status = 'pending' AND deleted = 0",
+      [task_id]
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({ message: 'A pending close request already exists for this task' });
+    }
+
+    const [result] = await db.query(
+      'INSERT INTO task_close_requests (task_id, requested_by, reason) VALUES (?, ?, ?)',
+      [task_id, req.user.id, reason]
+    );
+
+    await logActivity(task_id, req.user.id, 'close_requested', {
+      note: `Requested task closure${reason ? ' — Reason: ' + reason : ''}`
+    });
+
+    const [rows] = await db.query(
+      `SELECT cr.*, t.title AS task_title,
+              CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
+       FROM task_close_requests cr
+       LEFT JOIN tasks t ON t.id = cr.task_id
+       LEFT JOIN users u ON u.id = cr.requested_by
+       WHERE cr.id = ?`,
+      [result.insertId]
+    );
+
+    return res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('Create close request error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/approvals/closes/:id/approve  (admin)
+ * Marks the task as completed (is_active = 3) and approves the request.
+ */
+exports.approveCloseRequest = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM task_close_requests WHERE id = ? AND deleted = 0',
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ message: 'Close request not found' });
+
+    const cr = rows[0];
+    if (cr.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending requests can be approved' });
+    }
+
+    await db.query(
+      "UPDATE task_close_requests SET status = 'approved', reviewed_by = ?, reviewed_at = NOW() WHERE id = ?",
+      [req.user.id, cr.id]
+    );
+
+    // Mark the task as completed
+    await db.query(
+      'UPDATE tasks SET is_active = 3 WHERE id = ?',
+      [cr.task_id]
+    );
+
+    await logActivity(cr.task_id, req.user.id, 'close_approved', {
+      note: 'Close request approved — task marked as completed'
+    });
+
+    res.emitSocket('approvals:updated', { id: req.params.id, type: 'close', status: 'approved' });
+    return res.json({ message: 'Close request approved, task marked as completed' });
+  } catch (err) {
+    console.error('Approve close request error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/approvals/closes/:id/reject  (admin)
+ */
+exports.rejectCloseRequest = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM task_close_requests WHERE id = ? AND deleted = 0',
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ message: 'Close request not found' });
+
+    const cr = rows[0];
+    if (cr.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending requests can be rejected' });
+    }
+
+    const { reject_reason } = req.body;
+
+    await db.query(
+      "UPDATE task_close_requests SET status = 'rejected', reviewed_by = ?, reviewed_at = NOW(), reject_reason = ? WHERE id = ?",
+      [req.user.id, reject_reason || null, cr.id]
+    );
+
+    await logActivity(cr.task_id, req.user.id, 'close_rejected', {
+      note: `Close request rejected${reject_reason ? ' — ' + reject_reason : ''}`
+    });
+
+    res.emitSocket('approvals:updated', { id: req.params.id, type: 'close', status: 'rejected' });
+    return res.json({ message: 'Close request rejected' });
+  } catch (err) {
+    console.error('Reject close request error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/approvals/closes/:id/cancel  (team member cancels own pending)
+ */
+exports.cancelCloseRequest = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT * FROM task_close_requests WHERE id = ? AND deleted = 0',
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ message: 'Close request not found' });
+
+    const cr = rows[0];
+
+    if (cr.requested_by !== req.user.id) {
+      return res.status(403).json({ message: 'You can only cancel your own requests' });
+    }
+
+    if (cr.status !== 'pending') {
+      return res.status(400).json({ message: 'Only pending requests can be cancelled' });
+    }
+
+    await db.query(
+      'UPDATE task_close_requests SET deleted = 1 WHERE id = ?',
+      [cr.id]
+    );
+
+    return res.json({ message: 'Close request cancelled' });
+  } catch (err) {
+    console.error('Cancel close request error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // FORWARD REQUESTS
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -370,6 +546,7 @@ exports.getApprovalsPage = async (req, res) => {
     let pendingTasksWhere = "t.deleted = 0 AND t.is_active IN (0, 2)";
     let extWhere          = "er.deleted = 0";
     let fwdWhere          = "fr.deleted = 0 AND fr.status = 'pending'";
+    let clsWhere          = "cr.deleted = 0 AND cr.status = 'pending'";
     const params = [];
 
     if (!isAdmin) {
@@ -377,6 +554,7 @@ exports.getApprovalsPage = async (req, res) => {
       params.push(userId, userId);
       extWhere += ' AND er.requested_by = ?';
       fwdWhere += ' AND (fr.forwarded_by = ? OR fr.forwarded_to = ?)';
+      clsWhere += ' AND cr.requested_by = ?';
     }
 
     const [pendingTasks] = await db.query(
@@ -413,6 +591,18 @@ exports.getApprovalsPage = async (req, res) => {
        WHERE ${fwdWhere}
        ORDER BY fr.created_at DESC`,
       fwdParams
+    );
+
+    const clsParams = isAdmin ? [] : [userId];
+    const [closeRequests] = await db.query(
+      `SELECT cr.*, t.title AS task_title, t.deadline,
+              CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
+       FROM task_close_requests cr
+       LEFT JOIN tasks t ON t.id = cr.task_id
+       LEFT JOIN users u ON u.id = cr.requested_by
+       WHERE ${clsWhere}
+       ORDER BY cr.created_at DESC`,
+      clsParams
     );
 
     // Pending ticket completions (pending_done status)
@@ -454,6 +644,7 @@ exports.getApprovalsPage = async (req, res) => {
       pending_tasks: pendingTasks,
       extension_requests: extensions,
       forward_requests: forwards,
+      close_requests: closeRequests,
       pending_tickets: pendingTickets,
       ticket_extension_requests: ticketExtensions,
     });
@@ -489,13 +680,16 @@ exports.getBadgeCount = async (req, res) => {
       const [[{ fwd_count }]] = await db.query(
         "SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending'"
       );
+      const [[{ cls_count }]] = await db.query(
+        "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending'"
+      );
       const [[{ ticket_pending_count }]] = await db.query(
         "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done'"
       );
       const [[{ ticket_ext_count }]] = await db.query(
         "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'"
       );
-      count = task_count + ext_count + fwd_count + ticket_pending_count + ticket_ext_count;
+      count = task_count + ext_count + fwd_count + cls_count + ticket_pending_count + ticket_ext_count;
     } else {
       const [[{ task_count }]] = await db.query(
         "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND (created_by = ? OR assigned_to = ?)",
@@ -509,6 +703,10 @@ exports.getBadgeCount = async (req, res) => {
         "SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending' AND (forwarded_by = ? OR forwarded_to = ?)",
         [userId, userId]
       );
+      const [[{ cls_count }]] = await db.query(
+        "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
+        [userId]
+      );
       const [[{ ticket_pending_count }]] = await db.query(
         "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)",
         [userId, userId]
@@ -517,7 +715,7 @@ exports.getBadgeCount = async (req, res) => {
         "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
         [userId]
       );
-      count = task_count + ext_count + fwd_count + ticket_pending_count + ticket_ext_count;
+      count = task_count + ext_count + fwd_count + cls_count + ticket_pending_count + ticket_ext_count;
     }
 
     return res.json({ count });
