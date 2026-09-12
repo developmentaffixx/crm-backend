@@ -214,7 +214,7 @@ exports.clockOut = async (req, res) => {
        WHERE t.assigned_to = ?
          AND t.deadline IS NOT NULL
          AND t.deadline <= CURDATE()
-         AND t.is_active NOT IN (3, 4)
+         AND t.is_active NOT IN (2, 3, 4)
          AND NOT EXISTS (
            SELECT 1 FROM task_deadline_extension_requests er
            WHERE er.task_id = t.id AND er.status = 'pending' AND er.deleted = 0
@@ -1408,7 +1408,7 @@ exports.checkOverdueTasks = async (req, res) => {
        WHERE t.assigned_to = ?
          AND t.deadline IS NOT NULL
          AND t.deadline <= CURDATE()
-         AND t.is_active NOT IN (3, 4)
+         AND t.is_active NOT IN (2, 3, 4)
          AND NOT EXISTS (
            SELECT 1 FROM task_deadline_extension_requests er
            WHERE er.task_id = t.id AND er.status = 'pending' AND er.deleted = 0
