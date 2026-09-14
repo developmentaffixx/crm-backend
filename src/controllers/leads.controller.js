@@ -7,7 +7,7 @@ const db = require('../config/db');
  */
 exports.dropdown = async (req, res) => {
   try {
-    let where = 'deleted = 0';
+    let where = "deleted = 0 AND status NOT IN ('Won', 'Converted')";
     const params = [];
 
     // Non-admin: only see leads assigned to or created by them
