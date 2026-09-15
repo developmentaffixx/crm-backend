@@ -43,6 +43,11 @@ router.put('/roles/:id/submenu-permissions', [param('id').isInt({ min: 1 })], ct
 // ─── Role Members ─────────────────────────────────────────────────────────────
 router.get('/roles/:id/members', [param('id').isInt({ min: 1 })], ctrl.getRoleMembers);
 
+// ─── Per-User Permission Overrides ───────────────────────────────────────────
+router.get('/users/:id/permission-overrides',    [param('id').isInt({ min: 1 })], ctrl.getUserPermissionOverrides);
+router.put('/users/:id/permission-overrides',    [param('id').isInt({ min: 1 })], ctrl.updateUserPermissionOverrides);
+router.delete('/users/:id/permission-overrides', [param('id').isInt({ min: 1 })], ctrl.clearUserPermissionOverrides);
+
 // ─── Users ────────────────────────────────────────────────────────────────────
 router.get('/users',              ctrl.getUsers);
 router.get('/users/next-emp-code', ctrl.getNextEmpCode);

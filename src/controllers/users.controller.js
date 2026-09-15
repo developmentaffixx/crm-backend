@@ -143,12 +143,14 @@ exports.changePassword = async (req, res) => {
 
 /**
  * GET /api/users/me/permissions
- * Returns the current user's role permissions.
+ * Returns the current user's effective permissions.
+ * For non-admins: role-level permissions merged with any per-user overrides.
+ * User overrides always win over role defaults.
  */
 exports.myPermissions = async (req, res) => {
   try {
     if (req.user.is_admin) {
-      const modules = ['dashboard','projects','tasks','tickets','meetings','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings'];
+      const modules = ['dashboard','projects','tasks','tickets','meetings','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings','ai_labs'];
       const perms = modules.reduce((acc, m) => {
         acc[m] = { can_view: 2, can_create: 1, can_edit: 2, can_delete: 1 };
         return acc;
@@ -183,14 +185,15 @@ exports.myPermissions = async (req, res) => {
       const submenuAccess = {
         creative_hub: { social_overview: 2, content_calendar: 2, content_writing: 2, shoot_planning: 2, ads_planning: 2, daily_journal: 2, report_centre: 2 },
         people_ops: { on_boarding: 2, recruitment: 2, leaves: 2, reimbursements: 2 },
-        revenue: { leads: 2, proposals: 2, quotations: 2, vendor_agreement: 2, introduction: 2 },
-        finance: { invoices: 2, expenses: 2, income: 2, assets: 2, payroll: 2, software_licenses: 2, inventories: 2 },
+        revenue: { leads: 2, daily_reporting: 2, introduction: 2 },
+        finance: { proposals: 2, quotations: 2, invoices: 2, expenses: 2, income: 2, assets: 2, payroll: 2, software_licenses: 2, inventories: 2, vendor_agreement: 2 },
         reports: { employees: 2, clients: 2, tickets: 2, leads: 2, projects: 2, finance: 2, performance: 2 },
       };
 
       return res.json({ is_admin: true, role_id: roleId || null, role_name: 'Admin', responsibilities, permissions: perms, socialAccess, submenuAccess });
     }
 
+    // ── Non-admin: load role permissions ─────────────────────────────────────
     const [userRows] = await db.query(
       'SELECT role_id FROM users WHERE id = ? AND deleted = 0',
       [req.user.id]
@@ -200,18 +203,18 @@ exports.myPermissions = async (req, res) => {
     const roleId = userRows[0].role_id;
 
     if (!roleId) {
-      return res.json({ is_admin: false, role_id: null, role_name: null, permissions: {} });
+      return res.json({ is_admin: false, role_id: null, role_name: null, permissions: {}, socialAccess: {}, submenuAccess: {}, hasUserOverrides: false });
     }
 
     const [roleRows] = await db.query('SELECT name, responsibilities FROM roles WHERE id = ?', [roleId]);
     const roleName = roleRows[0]?.name || null;
     const responsibilities = roleRows[0]?.responsibilities || null;
 
+    // Base module permissions from role
     const [permRows] = await db.query(
       'SELECT module, can_view, can_create, can_edit, can_delete FROM role_permissions WHERE role_id = ?',
       [roleId]
     );
-
     const permissions = permRows.reduce((acc, p) => {
       acc[p.module] = {
         can_view:   p.can_view,
@@ -222,7 +225,23 @@ exports.myPermissions = async (req, res) => {
       return acc;
     }, {});
 
-    // Fetch social submenu permissions for this role
+    // ── Merge user-level module overrides ─────────────────────────────────────
+    const [userPermRows] = await db.query(
+      'SELECT module, can_view, can_create, can_edit, can_delete FROM user_permissions WHERE user_id = ?',
+      [req.user.id]
+    );
+    const hasUserOverrides = userPermRows.length > 0;
+    userPermRows.forEach(p => {
+      // User override completely replaces the role entry for that module
+      permissions[p.module] = {
+        can_view:   p.can_view,
+        can_create: p.can_create,
+        can_edit:   p.can_edit,
+        can_delete: p.can_delete,
+      };
+    });
+
+    // ── Base social submenu permissions from role ─────────────────────────────
     let socialAccess = {
       social_overview: 0,
       content_calendar: 0,
@@ -237,10 +256,10 @@ exports.myPermissions = async (req, res) => {
       [roleId]
     );
     if (socialRows.length > 0) {
-      socialAccess = socialRows[0];
+      socialAccess = { ...socialRows[0] };
     }
 
-    // Fetch generic submenu permissions for all modules
+    // ── Base generic submenu permissions from role ────────────────────────────
     let submenuAccess = {};
     const [submenuRows] = await db.query(
       'SELECT module, submenu, can_access FROM role_submenu_permissions WHERE role_id = ?',
@@ -251,7 +270,30 @@ exports.myPermissions = async (req, res) => {
       submenuAccess[r.module][r.submenu] = r.can_access;
     });
 
-    return res.json({ is_admin: false, role_id: roleId, role_name: roleName, responsibilities, permissions, socialAccess, submenuAccess });
+    // ── Merge user-level submenu overrides ────────────────────────────────────
+    const [userSubmenuRows] = await db.query(
+      'SELECT module, submenu, can_access FROM user_submenu_permissions WHERE user_id = ?',
+      [req.user.id]
+    );
+    userSubmenuRows.forEach(r => {
+      if (!submenuAccess[r.module]) submenuAccess[r.module] = {};
+      submenuAccess[r.module][r.submenu] = r.can_access;
+      // Keep legacy socialAccess in sync for creative_hub submenus
+      if (r.module === 'creative_hub' && socialAccess.hasOwnProperty(r.submenu)) {
+        socialAccess[r.submenu] = r.can_access;
+      }
+    });
+
+    return res.json({
+      is_admin: false,
+      role_id: roleId,
+      role_name: roleName,
+      responsibilities,
+      permissions,
+      socialAccess,
+      submenuAccess,
+      hasUserOverrides,
+    });
   } catch (err) {
     console.error('myPermissions error:', err);
     return res.status(500).json({ message: 'Server error' });

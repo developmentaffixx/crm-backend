@@ -414,6 +414,176 @@ exports.updateRoleSubmenuPermissions = async (req, res) => {
   }
 };
 
+// ─── PER-USER PERMISSION OVERRIDES ───────────────────────────────────────────
+
+/**
+ * GET /api/settings/users/:id/permission-overrides
+ * Returns the user's module-level permission overrides AND their effective
+ * role-based permissions, so the frontend can show both in one call.
+ */
+exports.getUserPermissionOverrides = async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  try {
+    // Fetch user's role
+    const [userRows] = await db.query(
+      'SELECT role_id FROM users WHERE id = ? AND deleted = 0',
+      [userId]
+    );
+    if (!userRows.length) return res.status(404).json({ message: 'User not found' });
+    const roleId = userRows[0].role_id;
+
+    // Role-level module permissions (baseline)
+    let rolePermissions = {};
+    if (roleId) {
+      const [rp] = await db.query(
+        'SELECT module, can_view, can_create, can_edit, can_delete FROM role_permissions WHERE role_id = ?',
+        [roleId]
+      );
+      rp.forEach(p => {
+        rolePermissions[p.module] = {
+          can_view: p.can_view, can_create: p.can_create,
+          can_edit: p.can_edit, can_delete: p.can_delete,
+        };
+      });
+    }
+
+    // User module overrides
+    const [up] = await db.query(
+      'SELECT module, can_view, can_create, can_edit, can_delete FROM user_permissions WHERE user_id = ?',
+      [userId]
+    );
+    const userPermissions = {};
+    up.forEach(p => {
+      userPermissions[p.module] = {
+        can_view: p.can_view, can_create: p.can_create,
+        can_edit: p.can_edit, can_delete: p.can_delete,
+      };
+    });
+
+    // Role-level submenu permissions (baseline)
+    let roleSubmenuPermissions = {};
+    if (roleId) {
+      const [rs] = await db.query(
+        'SELECT module, submenu, can_access FROM role_submenu_permissions WHERE role_id = ?',
+        [roleId]
+      );
+      rs.forEach(r => {
+        if (!roleSubmenuPermissions[r.module]) roleSubmenuPermissions[r.module] = {};
+        roleSubmenuPermissions[r.module][r.submenu] = r.can_access;
+      });
+    }
+
+    // User submenu overrides
+    const [us] = await db.query(
+      'SELECT module, submenu, can_access FROM user_submenu_permissions WHERE user_id = ?',
+      [userId]
+    );
+    const userSubmenuPermissions = {};
+    us.forEach(r => {
+      if (!userSubmenuPermissions[r.module]) userSubmenuPermissions[r.module] = {};
+      userSubmenuPermissions[r.module][r.submenu] = r.can_access;
+    });
+
+    return res.json({
+      roleId,
+      rolePermissions,
+      userPermissions,
+      roleSubmenuPermissions,
+      userSubmenuPermissions,
+    });
+  } catch (err) {
+    console.error('getUserPermissionOverrides error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/settings/users/:id/permission-overrides
+ * Save/replace a user's module-level AND submenu-level overrides in one call.
+ * Body: {
+ *   permissions:       { module: { can_view, can_create, can_edit, can_delete } },
+ *   submenuPermissions:{ module: { submenu: can_access } }
+ * }
+ * Passing an empty object for a module means "clear override for that module".
+ * The endpoint first DELETEs all existing overrides for the user, then re-inserts.
+ */
+exports.updateUserPermissionOverrides = async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  const { permissions = {}, submenuPermissions = {} } = req.body;
+
+  try {
+    const [userRows] = await db.query('SELECT id FROM users WHERE id = ? AND deleted = 0', [userId]);
+    if (!userRows.length) return res.status(404).json({ message: 'User not found' });
+
+    // ── Module-level overrides ────────────────────────────────────────────────
+    // Delete existing overrides for this user
+    await db.query('DELETE FROM user_permissions WHERE user_id = ?', [userId]);
+
+    const permEntries = Object.entries(permissions).filter(([, v]) => v !== null);
+    if (permEntries.length > 0) {
+      const permValues = permEntries.map(([module, p]) => [
+        userId, module,
+        parseInt(p.can_view   ?? 0, 10),
+        parseInt(p.can_create ?? 0, 10),
+        parseInt(p.can_edit   ?? 0, 10),
+        parseInt(p.can_delete ?? 0, 10),
+      ]);
+      await db.query(
+        `INSERT INTO user_permissions (user_id, module, can_view, can_create, can_edit, can_delete)
+         VALUES ?`,
+        [permValues]
+      );
+    }
+
+    // ── Submenu-level overrides ───────────────────────────────────────────────
+    await db.query('DELETE FROM user_submenu_permissions WHERE user_id = ?', [userId]);
+
+    const subEntries = [];
+    for (const [module, submenus] of Object.entries(submenuPermissions)) {
+      if (typeof submenus !== 'object') continue;
+      for (const [submenu, canAccess] of Object.entries(submenus)) {
+        subEntries.push([userId, module, submenu, parseInt(canAccess, 10) || 0]);
+      }
+    }
+    if (subEntries.length > 0) {
+      await db.query(
+        `INSERT INTO user_submenu_permissions (user_id, module, submenu, can_access) VALUES ?`,
+        [subEntries]
+      );
+    }
+
+    await logAudit(db, req.user.id, 'user_permissions_overridden', 'user', userId,
+      { permissions, submenuPermissions }, req.ip);
+
+    return res.json({ message: 'User permission overrides saved' });
+  } catch (err) {
+    console.error('updateUserPermissionOverrides error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/settings/users/:id/permission-overrides
+ * Clears ALL per-user overrides — user falls back entirely to role defaults.
+ */
+exports.clearUserPermissionOverrides = async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  try {
+    const [userRows] = await db.query('SELECT id FROM users WHERE id = ? AND deleted = 0', [userId]);
+    if (!userRows.length) return res.status(404).json({ message: 'User not found' });
+
+    await db.query('DELETE FROM user_permissions WHERE user_id = ?', [userId]);
+    await db.query('DELETE FROM user_submenu_permissions WHERE user_id = ?', [userId]);
+
+    await logAudit(db, req.user.id, 'user_permissions_overrides_cleared', 'user', userId, {}, req.ip);
+
+    return res.json({ message: 'User permission overrides cleared' });
+  } catch (err) {
+    console.error('clearUserPermissionOverrides error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── USER MANAGEMENT ─────────────────────────────────────────────────────────
 
 /**
