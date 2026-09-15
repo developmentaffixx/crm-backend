@@ -73,17 +73,42 @@ exports.list = async (req, res) => {
     const params = [];
 
     if (!req.user.is_admin) {
-      // Team member sees:
-      // 1. Active tasks (is_active >= 1) where they are assigned_to, created_by, or collaborator
-      // 2. Rejected tasks (is_active = 4) that THEY created, within 8 hours of rejection
-      where += ` AND (
-        (t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
-          SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
-        )))
-        OR
-        (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
-      )`;
-      params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+      // Resolve effective can_view for tasks:
+      // User-level override wins over role default
+      let canView = 0;
+      const [userOverride] = await db.query(
+        'SELECT can_view FROM user_permissions WHERE user_id = ? AND module = ?',
+        [req.user.id, 'tasks']
+      );
+      if (userOverride.length > 0) {
+        canView = userOverride[0].can_view;
+      } else {
+        const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+        if (userRole.length > 0 && userRole[0].role_id) {
+          const [rolePerms] = await db.query(
+            'SELECT can_view FROM role_permissions WHERE role_id = ? AND module = ?',
+            [userRole[0].role_id, 'tasks']
+          );
+          if (rolePerms.length > 0) canView = rolePerms[0].can_view;
+        }
+      }
+
+      if (canView >= 2) {
+        // View = All: see every task (same as admin, no extra filter)
+      } else if (canView === 1) {
+        // View = Own: tasks assigned to, created by, or collaborated on
+        where += ` AND (
+          (t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
+            SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
+          )))
+          OR
+          (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
+        )`;
+        params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+      } else {
+        // View = None: see nothing
+        where += ' AND 1 = 0';
+      }
     }
 
     // Cycle visibility rules on the Tasks list page:
@@ -283,17 +308,40 @@ exports.getOne = async (req, res) => {
     const task = rows[0];
 
     // Team member can only see their own tasks or tasks they collaborate on
-    if (!req.user.is_admin &&
-        task.assigned_to !== req.user.id &&
-        task.created_by  !== req.user.id) {
-      // Check if collaborator
-      const [collab] = await db.query(
-        'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?',
-        [task.id, req.user.id]
+    // — unless their effective can_view for tasks is 2 (All)
+    if (!req.user.is_admin) {
+      // Resolve effective can_view
+      let canView = 0;
+      const [userOverride] = await db.query(
+        'SELECT can_view FROM user_permissions WHERE user_id = ? AND module = ?',
+        [req.user.id, 'tasks']
       );
-      if (collab.length === 0) {
-        return res.status(403).json({ message: 'Access denied' });
+      if (userOverride.length > 0) {
+        canView = userOverride[0].can_view;
+      } else {
+        const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+        if (userRole.length > 0 && userRole[0].role_id) {
+          const [rolePerms] = await db.query(
+            'SELECT can_view FROM role_permissions WHERE role_id = ? AND module = ?',
+            [userRole[0].role_id, 'tasks']
+          );
+          if (rolePerms.length > 0) canView = rolePerms[0].can_view;
+        }
       }
+
+      if (canView < 2) {
+        // Own or None — check assignment/collaboration
+        if (task.assigned_to !== req.user.id && task.created_by !== req.user.id) {
+          const [collab] = await db.query(
+            'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?',
+            [task.id, req.user.id]
+          );
+          if (collab.length === 0) {
+            return res.status(403).json({ message: 'Access denied' });
+          }
+        }
+      }
+      // canView >= 2: All — no restriction, fall through
     }
 
     // If task belongs to a paused or skipped cycle, non-admin users cannot view it
