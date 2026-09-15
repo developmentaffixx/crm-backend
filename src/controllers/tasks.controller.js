@@ -765,9 +765,9 @@ exports.remove = async (req, res) => {
       return res.status(400).json({ message: 'Closed tasks cannot be deleted' });
     }
 
-    // Admin has full access, otherwise only creator can delete
-    if (!req.user.is_admin && task.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Only the task creator can delete this task' });
+    // Only admins can delete tasks
+    if (!req.user.is_admin) {
+      return res.status(403).json({ message: 'Only admins can delete tasks' });
     }
 
     await db.query('UPDATE tasks SET deleted = 1 WHERE id = ?', [req.params.id]);
