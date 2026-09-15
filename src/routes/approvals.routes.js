@@ -19,11 +19,11 @@ router.post(
   approvalsController.createExtension
 );
 
-// POST /api/approvals/extensions/:id/approve  (admin or can_edit)
-router.post('/extensions/:id/approve', param('id').isInt(), approvalsController.approveExtension);
+// POST /api/approvals/extensions/:id/approve  (admin)
+router.post('/extensions/:id/approve', param('id').isInt(), requireAdmin, approvalsController.approveExtension);
 
-// POST /api/approvals/extensions/:id/reject   (admin or can_edit)
-router.post('/extensions/:id/reject', param('id').isInt(), approvalsController.rejectExtension);
+// POST /api/approvals/extensions/:id/reject   (admin)
+router.post('/extensions/:id/reject', param('id').isInt(), requireAdmin, approvalsController.rejectExtension);
 
 // DELETE /api/approvals/extensions/:id/cancel (team member cancels own pending)
 router.delete('/extensions/:id/cancel', param('id').isInt(), approvalsController.cancelExtension);
@@ -61,11 +61,11 @@ router.post(
   approvalsController.createCloseRequest
 );
 
-// POST /api/approvals/closes/:id/approve  (admin or can_edit)
-router.post('/closes/:id/approve', param('id').isInt(), approvalsController.approveCloseRequest);
+// POST /api/approvals/closes/:id/approve  (admin)
+router.post('/closes/:id/approve', param('id').isInt(), requireAdmin, approvalsController.approveCloseRequest);
 
-// POST /api/approvals/closes/:id/reject   (admin or can_edit)
-router.post('/closes/:id/reject', param('id').isInt(), approvalsController.rejectCloseRequest);
+// POST /api/approvals/closes/:id/reject   (admin)
+router.post('/closes/:id/reject', param('id').isInt(), requireAdmin, approvalsController.rejectCloseRequest);
 
 // DELETE /api/approvals/closes/:id/cancel (team member cancels own pending)
 router.delete('/closes/:id/cancel', param('id').isInt(), approvalsController.cancelCloseRequest);

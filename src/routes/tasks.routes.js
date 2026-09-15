@@ -65,11 +65,11 @@ router.put('/:id', param('id').isInt(), tasksController.update);
 // POST /api/tasks/:id/mark-done  — primary assignee marks task done (is_active 1→2)
 router.post('/:id/mark-done', param('id').isInt(), tasksController.markDone);
 
-// POST /api/tasks/:id/approve    — admin or approvals can_edit
-router.post('/:id/approve', param('id').isInt(), tasksController.approve);
+// POST /api/tasks/:id/approve    — admin approves (0→1 or 2→3)
+router.post('/:id/approve', param('id').isInt(), requireAdmin, tasksController.approve);
 
-// POST /api/tasks/:id/reject     — admin or approvals can_edit
-router.post('/:id/reject', param('id').isInt(), tasksController.reject);
+// POST /api/tasks/:id/reject     — admin rejects (0→4 or 2→1)
+router.post('/:id/reject', param('id').isInt(), requireAdmin, tasksController.reject);
 
 // POST /api/tasks/:id/resubmit   — creator resubmits rejected task (4→0)
 router.post('/:id/resubmit', param('id').isInt(), tasksController.resubmit);

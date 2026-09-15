@@ -69,7 +69,7 @@ exports.createRole = async (req, res) => {
     const roleId = result.insertId;
 
     // Seed empty permissions for all 12 modules
-    const modules = ['dashboard','projects','tasks','tickets','meetings','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings','approvals'];
+    const modules = ['dashboard','projects','tasks','tickets','meetings','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings'];
     const permValues = modules.map(m => [roleId, m, 0, 0, 0, 0]);
     await db.query(
       'INSERT IGNORE INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete) VALUES ?',
@@ -230,16 +230,17 @@ exports.updateRolePermissions = async (req, res) => {
     // System roles can now be fully customized
 
     for (const perm of permissions) {
-      const { module, can_view = 0, can_create = 0, can_edit = 0, can_delete = 0 } = perm;
+      const { module, can_view = 0, can_create = 0, can_edit = 0, can_delete = 0, can_approve = 0 } = perm;
       await db.query(
-        `INSERT INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete, can_approve)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
-           can_view   = VALUES(can_view),
-           can_create = VALUES(can_create),
-           can_edit   = VALUES(can_edit),
-           can_delete = VALUES(can_delete)`,
-        [roleId, module, can_view, can_create, can_edit, can_delete]
+           can_view    = VALUES(can_view),
+           can_create  = VALUES(can_create),
+           can_edit    = VALUES(can_edit),
+           can_delete  = VALUES(can_delete),
+           can_approve = VALUES(can_approve)`,
+        [roleId, module, can_view, can_create, can_edit, can_delete, can_approve]
       );
     }
 
@@ -436,20 +437,21 @@ exports.getUserPermissionOverrides = async (req, res) => {
     let rolePermissions = {};
     if (roleId) {
       const [rp] = await db.query(
-        'SELECT module, can_view, can_create, can_edit, can_delete FROM role_permissions WHERE role_id = ?',
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM role_permissions WHERE role_id = ?',
         [roleId]
       );
       rp.forEach(p => {
         rolePermissions[p.module] = {
           can_view: p.can_view, can_create: p.can_create,
           can_edit: p.can_edit, can_delete: p.can_delete,
+          can_approve: p.can_approve ?? 0,
         };
       });
     }
 
     // User module overrides
     const [up] = await db.query(
-      'SELECT module, can_view, can_create, can_edit, can_delete FROM user_permissions WHERE user_id = ?',
+      'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM user_permissions WHERE user_id = ?',
       [userId]
     );
     const userPermissions = {};
@@ -457,6 +459,7 @@ exports.getUserPermissionOverrides = async (req, res) => {
       userPermissions[p.module] = {
         can_view: p.can_view, can_create: p.can_create,
         can_edit: p.can_edit, can_delete: p.can_delete,
+        can_approve: p.can_approve ?? 0,
       };
     });
 
@@ -523,13 +526,14 @@ exports.updateUserPermissionOverrides = async (req, res) => {
     if (permEntries.length > 0) {
       const permValues = permEntries.map(([module, p]) => [
         userId, module,
-        parseInt(p.can_view   ?? 0, 10),
-        parseInt(p.can_create ?? 0, 10),
-        parseInt(p.can_edit   ?? 0, 10),
-        parseInt(p.can_delete ?? 0, 10),
+        parseInt(p.can_view    ?? 0, 10),
+        parseInt(p.can_create  ?? 0, 10),
+        parseInt(p.can_edit    ?? 0, 10),
+        parseInt(p.can_delete  ?? 0, 10),
+        parseInt(p.can_approve ?? 0, 10),
       ]);
       await db.query(
-        `INSERT INTO user_permissions (user_id, module, can_view, can_create, can_edit, can_delete)
+        `INSERT INTO user_permissions (user_id, module, can_view, can_create, can_edit, can_delete, can_approve)
          VALUES ?`,
         [permValues]
       );

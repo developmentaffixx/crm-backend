@@ -150,9 +150,9 @@ exports.changePassword = async (req, res) => {
 exports.myPermissions = async (req, res) => {
   try {
     if (req.user.is_admin) {
-      const modules = ['dashboard','projects','tasks','tickets','meetings','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings','ai_labs','approvals'];
+      const modules = ['dashboard','projects','tasks','tickets','meetings','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings','ai_labs'];
       const perms = modules.reduce((acc, m) => {
-        acc[m] = { can_view: 2, can_create: 1, can_edit: 2, can_delete: 1 };
+        acc[m] = { can_view: 2, can_create: 1, can_edit: 2, can_delete: 1, can_approve: m === 'tasks' ? 1 : 0 };
         return acc;
       }, {});
 
@@ -212,32 +212,33 @@ exports.myPermissions = async (req, res) => {
 
     // Base module permissions from role
     const [permRows] = await db.query(
-      'SELECT module, can_view, can_create, can_edit, can_delete FROM role_permissions WHERE role_id = ?',
+      'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM role_permissions WHERE role_id = ?',
       [roleId]
     );
     const permissions = permRows.reduce((acc, p) => {
       acc[p.module] = {
-        can_view:   p.can_view,
-        can_create: p.can_create,
-        can_edit:   p.can_edit,
-        can_delete: p.can_delete,
+        can_view:    p.can_view,
+        can_create:  p.can_create,
+        can_edit:    p.can_edit,
+        can_delete:  p.can_delete,
+        can_approve: p.can_approve ?? 0,
       };
       return acc;
     }, {});
 
     // ── Merge user-level module overrides ─────────────────────────────────────
     const [userPermRows] = await db.query(
-      'SELECT module, can_view, can_create, can_edit, can_delete FROM user_permissions WHERE user_id = ?',
+      'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM user_permissions WHERE user_id = ?',
       [req.user.id]
     );
     const hasUserOverrides = userPermRows.length > 0;
     userPermRows.forEach(p => {
-      // User override completely replaces the role entry for that module
       permissions[p.module] = {
-        can_view:   p.can_view,
-        can_create: p.can_create,
-        can_edit:   p.can_edit,
-        can_delete: p.can_delete,
+        can_view:    p.can_view,
+        can_create:  p.can_create,
+        can_edit:    p.can_edit,
+        can_delete:  p.can_delete,
+        can_approve: p.can_approve ?? 0,
       };
     });
 

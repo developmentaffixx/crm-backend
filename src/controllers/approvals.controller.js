@@ -1,29 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
 
-// Helper: resolve effective approvals can_view / can_edit for a non-admin user
-async function getApprovalsPerms(userId) {
-  // User-level override wins over role default
-  const [userOverride] = await db.query(
-    'SELECT can_view, can_edit FROM user_permissions WHERE user_id = ? AND module = ?',
-    [userId, 'approvals']
-  );
-  if (userOverride.length > 0) {
-    return { canView: userOverride[0].can_view, canEdit: !!userOverride[0].can_edit };
-  }
-  const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [userId]);
-  if (userRole.length > 0 && userRole[0].role_id) {
-    const [rolePerms] = await db.query(
-      'SELECT can_view, can_edit FROM role_permissions WHERE role_id = ? AND module = ?',
-      [userRole[0].role_id, 'approvals']
-    );
-    if (rolePerms.length > 0) {
-      return { canView: rolePerms[0].can_view, canEdit: !!rolePerms[0].can_edit };
-    }
-  }
-  return { canView: 0, canEdit: false };
-}
-
 // Helper: Log to task_activity_log
 async function logActivity(taskId, userId, action, { field_name, old_value, new_value, note } = {}) {
   try {
@@ -100,14 +77,10 @@ exports.createExtension = async (req, res) => {
 };
 
 /**
- * POST /api/approvals/extensions/:id/approve  (admin or approvals can_edit)
+ * POST /api/approvals/extensions/:id/approve  (admin)
  */
 exports.approveExtension = async (req, res) => {
   try {
-    if (!req.user.is_admin) {
-      const { canEdit } = await getApprovalsPerms(req.user.id);
-      if (!canEdit) return res.status(403).json({ message: 'You do not have permission to approve requests' });
-    }
     const [rows] = await db.query(
       'SELECT * FROM task_deadline_extension_requests WHERE id = ? AND deleted = 0',
       [req.params.id]
@@ -143,14 +116,10 @@ exports.approveExtension = async (req, res) => {
 };
 
 /**
- * POST /api/approvals/extensions/:id/reject  (admin or approvals can_edit)
+ * POST /api/approvals/extensions/:id/reject  (admin)
  */
 exports.rejectExtension = async (req, res) => {
   try {
-    if (!req.user.is_admin) {
-      const { canEdit } = await getApprovalsPerms(req.user.id);
-      if (!canEdit) return res.status(403).json({ message: 'You do not have permission to reject requests' });
-    }
     const [rows] = await db.query(
       'SELECT * FROM task_deadline_extension_requests WHERE id = ? AND deleted = 0',
       [req.params.id]
@@ -283,15 +252,11 @@ exports.createCloseRequest = async (req, res) => {
 };
 
 /**
- * POST /api/approvals/closes/:id/approve  (admin or approvals can_edit)
+ * POST /api/approvals/closes/:id/approve  (admin)
  * Marks the task as completed (is_active = 3) and approves the request.
  */
 exports.approveCloseRequest = async (req, res) => {
   try {
-    if (!req.user.is_admin) {
-      const { canEdit } = await getApprovalsPerms(req.user.id);
-      if (!canEdit) return res.status(403).json({ message: 'You do not have permission to approve requests' });
-    }
     const [rows] = await db.query(
       'SELECT * FROM task_close_requests WHERE id = ? AND deleted = 0',
       [req.params.id]
@@ -327,14 +292,10 @@ exports.approveCloseRequest = async (req, res) => {
 };
 
 /**
- * POST /api/approvals/closes/:id/reject  (admin or approvals can_edit)
+ * POST /api/approvals/closes/:id/reject  (admin)
  */
 exports.rejectCloseRequest = async (req, res) => {
   try {
-    if (!req.user.is_admin) {
-      const { canEdit } = await getApprovalsPerms(req.user.id);
-      if (!canEdit) return res.status(403).json({ message: 'You do not have permission to reject requests' });
-    }
     const [rows] = await db.query(
       'SELECT * FROM task_close_requests WHERE id = ? AND deleted = 0',
       [req.params.id]
@@ -582,29 +543,20 @@ exports.getApprovalsPage = async (req, res) => {
     const isAdmin = req.user.is_admin;
     const userId  = req.user.id;
 
-    // Resolve effective approvals permissions for non-admins
-    let canViewAll = isAdmin;
-    let canEdit    = isAdmin;
-    if (!isAdmin) {
-      const perms = await getApprovalsPerms(userId);
-      canViewAll  = perms.canView >= 2;  // View=All → see everyone's requests
-      canEdit     = perms.canEdit;       // can_edit=1 → can approve/reject
-    }
-
     let pendingTasksWhere = "t.deleted = 0 AND t.is_active IN (0, 2)";
     let extWhere          = "er.deleted = 0";
     let fwdWhere          = "fr.deleted = 0 AND fr.status = 'pending'";
     let clsWhere          = "cr.deleted = 0 AND cr.status = 'pending'";
 
-    if (!canViewAll) {
+    if (!isAdmin) {
       pendingTasksWhere += ' AND (t.created_by = ? OR t.assigned_to = ?)';
       extWhere += ' AND er.requested_by = ?';
       fwdWhere += ' AND (fr.forwarded_by = ? OR fr.forwarded_to = ?)';
       clsWhere += ' AND cr.requested_by = ?';
     }
 
-    const scopeParams2 = canViewAll ? [] : [userId, userId];
-    const scopeParams1 = canViewAll ? [] : [userId];
+    const scopeParams2 = isAdmin ? [] : [userId, userId];
+    const scopeParams1 = isAdmin ? [] : [userId];
 
     const [pendingTasks] = await db.query(
       `SELECT t.id, t.title, t.is_active, t.deadline, t.priority,
@@ -651,11 +603,8 @@ exports.getApprovalsPage = async (req, res) => {
       scopeParams1
     );
 
-    // Pending ticket completions (pending_done status)
     let pendingTicketsWhere = "tk.deleted = 0 AND tk.status = 'pending_done'";
-    if (!canViewAll) {
-      pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
-    }
+    if (!isAdmin) pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
     const [pendingTickets] = await db.query(
       `SELECT tk.id, tk.title, tk.status, tk.due_date, tk.priority, tk.mode,
               CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
@@ -665,14 +614,11 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u2 ON u2.id = tk.marked_done_by
        WHERE ${pendingTicketsWhere}
        ORDER BY tk.marked_done_at DESC`,
-      canViewAll ? [] : [userId, userId]
+      isAdmin ? [] : [userId, userId]
     );
 
-    // Ticket extension requests
     let ticketExtWhere = "ter.deleted = 0";
-    if (!canViewAll) {
-      ticketExtWhere += ' AND ter.requested_by = ?';
-    }
+    if (!isAdmin) ticketExtWhere += ' AND ter.requested_by = ?';
     const [ticketExtensions] = await db.query(
       `SELECT ter.*, tk.title AS ticket_title,
               CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
@@ -681,7 +627,7 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u ON u.id = ter.requested_by
        WHERE ${ticketExtWhere}
        ORDER BY ter.created_at DESC`,
-      canViewAll ? [] : [userId]
+      isAdmin ? [] : [userId]
     );
 
     return res.json({
@@ -691,8 +637,6 @@ exports.getApprovalsPage = async (req, res) => {
       close_requests: closeRequests,
       pending_tickets: pendingTickets,
       ticket_extension_requests: ticketExtensions,
-      // Tell the frontend what this user can do
-      canApprove: canEdit,
     });
   } catch (err) {
     console.error('Approvals page error:', err);
@@ -714,16 +658,9 @@ exports.getBadgeCount = async (req, res) => {
     const isAdmin = req.user.is_admin;
     const userId  = req.user.id;
 
-    // Resolve view scope for non-admins
-    let canViewAll = isAdmin;
-    if (!isAdmin) {
-      const perms = await getApprovalsPerms(userId);
-      canViewAll  = perms.canView >= 2;
-    }
-
     let count = 0;
 
-    if (canViewAll) {
+    if (isAdmin) {
       const [[{ task_count }]] = await db.query(
         "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2)"
       );
