@@ -1,6 +1,24 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
 
+// Helper: check if a non-admin user has approvals can_edit permission
+async function canUserApprove(userId) {
+  const [userOverride] = await db.query(
+    'SELECT can_edit FROM user_permissions WHERE user_id = ? AND module = ?',
+    [userId, 'approvals']
+  );
+  if (userOverride.length > 0) return !!userOverride[0].can_edit;
+  const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [userId]);
+  if (userRole.length > 0 && userRole[0].role_id) {
+    const [rolePerms] = await db.query(
+      'SELECT can_edit FROM role_permissions WHERE role_id = ? AND module = ?',
+      [userRole[0].role_id, 'approvals']
+    );
+    if (rolePerms.length > 0) return !!rolePerms[0].can_edit;
+  }
+  return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Log activity
 // ─────────────────────────────────────────────────────────────────────────────
@@ -669,12 +687,16 @@ exports.markDone = async (req, res) => {
 };
 
 /**
- * POST /api/tasks/:id/approve  (admin only)
+ * POST /api/tasks/:id/approve  (admin or approvals can_edit)
  * is_active 0 → 1  (new task approved)
  * is_active 2 → 3  (closing approved)
  */
 exports.approve = async (req, res) => {
   try {
+    if (!req.user.is_admin) {
+      const allowed = await canUserApprove(req.user.id);
+      if (!allowed) return res.status(403).json({ message: 'You do not have permission to approve tasks' });
+    }
     const [rows] = await db.query('SELECT * FROM tasks WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Task not found' });
 
@@ -700,12 +722,16 @@ exports.approve = async (req, res) => {
 };
 
 /**
- * POST /api/tasks/:id/reject  (admin only)
+ * POST /api/tasks/:id/reject  (admin or approvals can_edit)
  * is_active 0 → 4 (rejected, can be resubmitted)
  * is_active 2 → 1 (completion rejected, back to active)
  */
 exports.reject = async (req, res) => {
   try {
+    if (!req.user.is_admin) {
+      const allowed = await canUserApprove(req.user.id);
+      if (!allowed) return res.status(403).json({ message: 'You do not have permission to reject tasks' });
+    }
     const [rows] = await db.query('SELECT * FROM tasks WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Task not found' });
 
