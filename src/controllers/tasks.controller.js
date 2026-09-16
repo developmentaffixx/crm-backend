@@ -72,24 +72,29 @@ exports.list = async (req, res) => {
     let where = 't.deleted = 0';
     const params = [];
 
+    let canView = 0;
+    let canApprove = 0;
     if (!req.user.is_admin) {
-      // Resolve effective can_view for tasks:
+      // Resolve effective can_view and can_approve for tasks:
       // User-level override wins over role default
-      let canView = 0;
       const [userOverride] = await db.query(
-        'SELECT can_view FROM user_permissions WHERE user_id = ? AND module = ?',
+        'SELECT can_view, can_approve FROM user_permissions WHERE user_id = ? AND module = ?',
         [req.user.id, 'tasks']
       );
       if (userOverride.length > 0) {
         canView = userOverride[0].can_view;
+        canApprove = userOverride[0].can_approve;
       } else {
         const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
         if (userRole.length > 0 && userRole[0].role_id) {
           const [rolePerms] = await db.query(
-            'SELECT can_view FROM role_permissions WHERE role_id = ? AND module = ?',
+            'SELECT can_view, can_approve FROM role_permissions WHERE role_id = ? AND module = ?',
             [userRole[0].role_id, 'tasks']
           );
-          if (rolePerms.length > 0) canView = rolePerms[0].can_view;
+          if (rolePerms.length > 0) {
+            canView = rolePerms[0].can_view;
+            canApprove = rolePerms[0].can_approve;
+          }
         }
       }
 
@@ -211,21 +216,32 @@ exports.list = async (req, res) => {
 
     // Summary counts (over ALL matching tasks, not just current page)
     // We need a separate query for accurate counts
-    let summaryWhere = 't.deleted = 0' + (!req.user.is_admin
-      ? ` AND (
-        (t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
-          SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
-        )))
-        OR
-        (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
-      )`
-      : '')
-      // Mirror the same cycle filter used in the main query so tab counts match the table
-      + ` AND NOT EXISTS (
-        SELECT 1 FROM cycle_tasks ct_pause
-        JOIN service_cycles sc_pause ON sc_pause.id = ct_pause.cycle_id
-        WHERE ct_pause.task_id = t.id AND sc_pause.status IN ('paused', 'skipped', 'completed')
-      )`;    const summaryParams = !req.user.is_admin ? [req.user.id, req.user.id, req.user.id, req.user.id] : [];
+    let summaryWhere = 't.deleted = 0';
+    const summaryParams = [];
+
+    if (!req.user.is_admin) {
+      if (canView >= 2 || canApprove) {
+        // Full visibility / Approver: see counts across all tasks just like admin
+      } else if (canView === 1) {
+        summaryWhere += ` AND (
+          (t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
+            SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
+          )))
+          OR
+          (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
+        )`;
+        summaryParams.push(req.user.id, req.user.id, req.user.id, req.user.id);
+      } else {
+        summaryWhere += ' AND 1 = 0';
+      }
+    }
+
+    // Mirror the same cycle filter used in the main query so tab counts match the table
+    summaryWhere += ` AND NOT EXISTS (
+      SELECT 1 FROM cycle_tasks ct_pause
+      JOIN service_cycles sc_pause ON sc_pause.id = ct_pause.cycle_id
+      WHERE ct_pause.task_id = t.id AND sc_pause.status IN ('paused', 'skipped', 'completed')
+    )`;
 
     // Apply assigned_to filter to summary counts as well, so tab counts reflect the filtered user
     if (assigned_to) {
@@ -505,10 +521,35 @@ exports.update = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM tasks WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Task not found' });
 
-    const task = rows[0];
+    let canEdit = 0;
+    let canApprove = 0;
+    if (!req.user.is_admin) {
+      const [userOverride] = await db.query(
+        'SELECT can_edit, can_approve FROM user_permissions WHERE user_id = ? AND module = ?',
+        [req.user.id, 'tasks']
+      );
+      if (userOverride.length > 0) {
+        canEdit = userOverride[0].can_edit;
+        canApprove = userOverride[0].can_approve;
+      } else {
+        const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+        if (userRole.length > 0 && userRole[0].role_id) {
+          const [rolePerms] = await db.query(
+            'SELECT can_edit, can_approve FROM role_permissions WHERE role_id = ? AND module = ?',
+            [userRole[0].role_id, 'tasks']
+          );
+          if (rolePerms.length > 0) {
+            canEdit = rolePerms[0].can_edit;
+            canApprove = rolePerms[0].can_approve;
+          }
+        }
+      }
+    }
 
-    // Closed tasks cannot be edited (except by admin)
-    if (task.is_active === 3 && !req.user.is_admin) {
+    const hasEditAll = req.user.is_admin || canEdit >= 2 || canApprove;
+
+    // Closed tasks cannot be edited (except by admin or manager with full edit access)
+    if (task.is_active === 3 && !hasEditAll) {
       return res.status(400).json({ message: 'Closed tasks cannot be edited' });
     }
 
@@ -526,8 +567,8 @@ exports.update = async (req, res) => {
       }
     }
 
-    // Admin has full access, otherwise only creator can edit
-    if (!req.user.is_admin && task.created_by !== req.user.id) {
+    // Admin has full access, managers with edit-all/approvals have full edit, otherwise only creator can edit
+    if (!hasEditAll && task.created_by !== req.user.id) {
       return res.status(403).json({ message: 'Only the task creator can edit this task' });
     }
 
