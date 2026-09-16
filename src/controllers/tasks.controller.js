@@ -879,17 +879,39 @@ exports.getActivity = async (req, res) => {
     const [task] = await db.query('SELECT id, assigned_to, created_by FROM tasks WHERE id = ? AND deleted = 0', [req.params.id]);
     if (task.length === 0) return res.status(404).json({ message: 'Task not found' });
 
-    // Access check
-    if (!req.user.is_admin &&
-        task[0].assigned_to !== req.user.id &&
-        task[0].created_by  !== req.user.id) {
+    // Access check: admin, assignee, creator, collaborator, or user with view-all/approvals/edit-all
+    let allowed = req.user.is_admin || task[0].assigned_to === req.user.id || task[0].created_by === req.user.id;
+    if (!allowed) {
       const [collab] = await db.query(
         'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?',
         [req.params.id, req.user.id]
       );
-      if (collab.length === 0) {
-        return res.status(403).json({ message: 'Access denied' });
+      if (collab.length > 0) {
+        allowed = true;
+      } else {
+        const [userPerm] = await db.query(
+          'SELECT can_view, can_approve, can_edit FROM user_permissions WHERE user_id = ? AND module = ?',
+          [req.user.id, 'tasks']
+        );
+        if (userPerm.length > 0) {
+          allowed = userPerm[0].can_view >= 2 || !!userPerm[0].can_approve || userPerm[0].can_edit >= 2;
+        } else {
+          const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+          if (userRole.length > 0 && userRole[0].role_id) {
+            const [rolePerm] = await db.query(
+              'SELECT can_view, can_approve, can_edit FROM role_permissions WHERE role_id = ? AND module = ?',
+              [userRole[0].role_id, 'tasks']
+            );
+            if (rolePerm.length > 0) {
+              allowed = rolePerm[0].can_view >= 2 || !!rolePerm[0].can_approve || rolePerm[0].can_edit >= 2;
+            }
+          }
+        }
       }
+    }
+
+    if (!allowed) {
+      return res.status(403).json({ message: 'Access denied' });
     }
 
     const [logs] = await db.query(

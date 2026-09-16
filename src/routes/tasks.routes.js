@@ -123,11 +123,11 @@ router.get('/:id/time-logs', param('id').isInt(), timeLogsController.getLogs);
 // GET  /api/tasks/:id/time-logs/export  — CSV download
 router.get('/:id/time-logs/export', param('id').isInt(), timeLogsController.exportLogs);
 
-// POST /api/tasks/:id/time-logs         — manual entry (admin only)
+// POST /api/tasks/:id/time-logs         — manual entry (admin or task approver)
 router.post(
   '/:id/time-logs',
   param('id').isInt(),
-  requireAdmin,
+  requireAdminOrTaskApprove,
   [
     bodyV('started_at').notEmpty().withMessage('started_at required'),
     bodyV('ended_at').notEmpty().withMessage('ended_at required'),
@@ -135,19 +135,19 @@ router.post(
   timeLogsController.createLog
 );
 
-// PUT  /api/tasks/:taskId/time-logs/:logId  — edit entry (admin only)
+// PUT  /api/tasks/:taskId/time-logs/:logId  — edit entry (admin or task approver)
 router.put(
   '/:id/time-logs/:logId',
   [param('id').isInt(), param('logId').isInt()],
-  requireAdmin,
+  requireAdminOrTaskApprove,
   timeLogsController.updateLog
 );
 
-// DELETE /api/tasks/:taskId/time-logs/:logId  — delete entry (admin only)
+// DELETE /api/tasks/:taskId/time-logs/:logId  — delete entry (admin or task approver)
 router.delete(
   '/:id/time-logs/:logId',
   [param('id').isInt(), param('logId').isInt()],
-  requireAdmin,
+  requireAdminOrTaskApprove,
   timeLogsController.deleteLog
 );
 
