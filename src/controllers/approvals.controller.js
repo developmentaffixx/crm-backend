@@ -1,5 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
+const { canApproveTasks } = require('../middleware/auth');
 
 // Helper: Log to task_activity_log
 async function logActivity(taskId, userId, action, { field_name, old_value, new_value, note } = {}) {
@@ -541,6 +542,7 @@ exports.cancelForward = async (req, res) => {
 exports.getApprovalsPage = async (req, res) => {
   try {
     const isAdmin = req.user.is_admin;
+    const canApprove = isAdmin || (await canApproveTasks(req.user));
     const userId  = req.user.id;
 
     let pendingTasksWhere = "t.deleted = 0 AND t.is_active IN (0, 2)";
@@ -548,15 +550,15 @@ exports.getApprovalsPage = async (req, res) => {
     let fwdWhere          = "fr.deleted = 0 AND fr.status = 'pending'";
     let clsWhere          = "cr.deleted = 0 AND cr.status = 'pending'";
 
-    if (!isAdmin) {
+    if (!canApprove) {
       pendingTasksWhere += ' AND (t.created_by = ? OR t.assigned_to = ?)';
       extWhere += ' AND er.requested_by = ?';
       fwdWhere += ' AND (fr.forwarded_by = ? OR fr.forwarded_to = ?)';
       clsWhere += ' AND cr.requested_by = ?';
     }
 
-    const scopeParams2 = isAdmin ? [] : [userId, userId];
-    const scopeParams1 = isAdmin ? [] : [userId];
+    const scopeParams2 = canApprove ? [] : [userId, userId];
+    const scopeParams1 = canApprove ? [] : [userId];
 
     const [pendingTasks] = await db.query(
       `SELECT t.id, t.title, t.is_active, t.deadline, t.priority,
@@ -650,17 +652,18 @@ exports.getApprovalsPage = async (req, res) => {
 
 /**
  * GET /api/approvals/badge
- * Admin: total pending items across all users.
+ * Admin / Task Approver: total pending items across all users.
  * Team member: their own pending items only.
  */
 exports.getBadgeCount = async (req, res) => {
   try {
     const isAdmin = req.user.is_admin;
+    const canApprove = isAdmin || (await canApproveTasks(req.user));
     const userId  = req.user.id;
 
     let count = 0;
 
-    if (isAdmin) {
+    if (canApprove) {
       const [[{ task_count }]] = await db.query(
         "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2)"
       );
@@ -674,10 +677,16 @@ exports.getBadgeCount = async (req, res) => {
         "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending'"
       );
       const [[{ ticket_pending_count }]] = await db.query(
-        "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done'"
+        isAdmin
+          ? "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done'"
+          : "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)",
+        isAdmin ? [] : [userId, userId]
       );
       const [[{ ticket_ext_count }]] = await db.query(
-        "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'"
+        isAdmin
+          ? "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'"
+          : "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
+        isAdmin ? [] : [userId]
       );
       count = task_count + ext_count + fwd_count + cls_count + ticket_pending_count + ticket_ext_count;
     } else {

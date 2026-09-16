@@ -1,7 +1,7 @@
 const express = require('express');
 const router  = express.Router();
 const { body, param } = require('express-validator');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireAdminOrTaskApprove } = require('../middleware/auth');
 const approvalsController = require('../controllers/approvals.controller');
 
 router.use(authenticate);
@@ -19,11 +19,11 @@ router.post(
   approvalsController.createExtension
 );
 
-// POST /api/approvals/extensions/:id/approve  (admin)
-router.post('/extensions/:id/approve', param('id').isInt(), requireAdmin, approvalsController.approveExtension);
+// POST /api/approvals/extensions/:id/approve  (admin or task approver)
+router.post('/extensions/:id/approve', param('id').isInt(), requireAdminOrTaskApprove, approvalsController.approveExtension);
 
-// POST /api/approvals/extensions/:id/reject   (admin)
-router.post('/extensions/:id/reject', param('id').isInt(), requireAdmin, approvalsController.rejectExtension);
+// POST /api/approvals/extensions/:id/reject   (admin or task approver)
+router.post('/extensions/:id/reject', param('id').isInt(), requireAdminOrTaskApprove, approvalsController.rejectExtension);
 
 // DELETE /api/approvals/extensions/:id/cancel (team member cancels own pending)
 router.delete('/extensions/:id/cancel', param('id').isInt(), approvalsController.cancelExtension);
@@ -61,11 +61,11 @@ router.post(
   approvalsController.createCloseRequest
 );
 
-// POST /api/approvals/closes/:id/approve  (admin)
-router.post('/closes/:id/approve', param('id').isInt(), requireAdmin, approvalsController.approveCloseRequest);
+// POST /api/approvals/closes/:id/approve  (admin or task approver)
+router.post('/closes/:id/approve', param('id').isInt(), requireAdminOrTaskApprove, approvalsController.approveCloseRequest);
 
-// POST /api/approvals/closes/:id/reject   (admin)
-router.post('/closes/:id/reject', param('id').isInt(), requireAdmin, approvalsController.rejectCloseRequest);
+// POST /api/approvals/closes/:id/reject   (admin or task approver)
+router.post('/closes/:id/reject', param('id').isInt(), requireAdminOrTaskApprove, approvalsController.rejectCloseRequest);
 
 // DELETE /api/approvals/closes/:id/cancel (team member cancels own pending)
 router.delete('/closes/:id/cancel', param('id').isInt(), approvalsController.cancelCloseRequest);

@@ -52,4 +52,62 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-module.exports = { authenticate, requireAdmin };
+/**
+ * Checks if user has task approval permission (admin or can_approve on tasks module).
+ */
+async function canApproveTasks(user) {
+  if (!user) return false;
+  if (user.is_admin) return true;
+
+  try {
+    // User-level override wins over role
+    const [userPerms] = await db.query(
+      'SELECT can_approve FROM user_permissions WHERE user_id = ? AND module = ?',
+      [user.id, 'tasks']
+    );
+    if (userPerms.length > 0) {
+      return !!userPerms[0].can_approve;
+    }
+
+    // Role-level baseline
+    const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [user.id]);
+    if (userRole.length > 0 && userRole[0].role_id) {
+      const [rolePerms] = await db.query(
+        'SELECT can_approve FROM role_permissions WHERE role_id = ? AND module = ?',
+        [userRole[0].role_id, 'tasks']
+      );
+      if (rolePerms.length > 0) {
+        return !!rolePerms[0].can_approve;
+      }
+    }
+  } catch (err) {
+    console.error('canApproveTasks check error:', err);
+  }
+
+  return false;
+}
+
+/**
+ * Allows admins or users with tasks can_approve permission.
+ */
+async function requireAdminOrTaskApprove(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+  if (req.user.is_admin) {
+    return next();
+  }
+  try {
+    const allowed = await canApproveTasks(req.user);
+    if (!allowed) {
+      return res.status(403).json({ message: 'Approvals access required' });
+    }
+    next();
+  } catch (err) {
+    console.error('requireAdminOrTaskApprove error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+}
+
+module.exports = { authenticate, requireAdmin, canApproveTasks, requireAdminOrTaskApprove };
+
