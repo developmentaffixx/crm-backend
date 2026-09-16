@@ -7,18 +7,9 @@ const db = require('../config/db');
  */
 exports.dropdown = async (req, res) => {
   try {
-    let where = "deleted = 0 AND status NOT IN ('Won', 'Converted')";
-    const params = [];
-
-    // Non-admin: only see leads assigned to or created by them
-    if (!req.user.is_admin) {
-      where += ' AND (assigned_to = ? OR created_by = ?)';
-      params.push(req.user.id, req.user.id);
-    }
-
+    const where = "deleted = 0 AND status NOT IN ('Won', 'Converted')";
     const [rows] = await db.query(
-      `SELECT id, name, business_name, phone, address, city, state FROM leads WHERE ${where} ORDER BY business_name ASC, name ASC`,
-      params
+      `SELECT id, name, business_name, email, phone, address, city, state FROM leads WHERE ${where} ORDER BY COALESCE(NULLIF(business_name, ''), name) ASC`
     );
 
     return res.json({ leads: rows });
@@ -88,10 +79,30 @@ exports.list = async (req, res) => {
       params.push(s, s, s, s, s);
     }
 
-    // Non-admin: only see leads assigned to or created by them
+    // Non-admin: check permission scope
     if (!req.user.is_admin) {
-      where += ' AND (l.assigned_to = ? OR l.created_by = ?)';
-      params.push(req.user.id, req.user.id);
+      let canView = 0;
+      const [userOverride] = await db.query(
+        'SELECT can_view FROM user_permissions WHERE user_id = ? AND module = ?',
+        [req.user.id, 'revenue']
+      );
+      if (userOverride.length > 0) {
+        canView = userOverride[0].can_view;
+      } else {
+        const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+        if (userRole.length > 0 && userRole[0].role_id) {
+          const [rolePerms] = await db.query(
+            'SELECT can_view FROM role_permissions WHERE role_id = ? AND module = ?',
+            [userRole[0].role_id, 'revenue']
+          );
+          if (rolePerms.length > 0) canView = rolePerms[0].can_view;
+        }
+      }
+
+      if (canView < 2) {
+        where += ' AND (l.assigned_to = ? OR l.created_by = ?)';
+        params.push(req.user.id, req.user.id);
+      }
     }
 
     // Validate sortBy to prevent SQL injection
@@ -179,7 +190,27 @@ exports.getOne = async (req, res) => {
 
     // Non-admin access check
     if (!req.user.is_admin && lead.assigned_to !== req.user.id && lead.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+      let canView = 0;
+      const [userOverride] = await db.query(
+        'SELECT can_view FROM user_permissions WHERE user_id = ? AND module = ?',
+        [req.user.id, 'revenue']
+      );
+      if (userOverride.length > 0) {
+        canView = userOverride[0].can_view;
+      } else {
+        const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+        if (userRole.length > 0 && userRole[0].role_id) {
+          const [rolePerms] = await db.query(
+            'SELECT can_view FROM role_permissions WHERE role_id = ? AND module = ?',
+            [userRole[0].role_id, 'revenue']
+          );
+          if (rolePerms.length > 0) canView = rolePerms[0].can_view;
+        }
+      }
+
+      if (canView < 2) {
+        return res.status(403).json({ message: 'Access denied' });
+      }
     }
 
     // Fetch social links

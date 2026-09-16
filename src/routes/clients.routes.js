@@ -24,6 +24,9 @@ const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 5
 // All client routes require authentication
 router.use(authenticate);
 
+// GET  /api/clients/dropdown — lightweight list for dropdowns (must be before /:id)
+router.get('/dropdown', clientsController.dropdown);
+
 // GET  /api/clients          — list clients (won leads)
 router.get('/', clientsController.list);
 

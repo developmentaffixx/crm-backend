@@ -18,10 +18,30 @@ exports.list = async (req, res) => {
       params.push(s, s, s, s);
     }
 
-    // Non-admin: only see clients assigned to or created by them
+    // Non-admin: check permission scope
     if (!req.user.is_admin) {
-      where += ' AND (l.assigned_to = ? OR l.created_by = ?)';
-      params.push(req.user.id, req.user.id);
+      let canView = 0;
+      const [userOverride] = await db.query(
+        'SELECT can_view FROM user_permissions WHERE user_id = ? AND module = ?',
+        [req.user.id, 'clients']
+      );
+      if (userOverride.length > 0) {
+        canView = userOverride[0].can_view;
+      } else {
+        const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+        if (userRole.length > 0 && userRole[0].role_id) {
+          const [rolePerms] = await db.query(
+            'SELECT can_view FROM role_permissions WHERE role_id = ? AND module = ?',
+            [userRole[0].role_id, 'clients']
+          );
+          if (rolePerms.length > 0) canView = rolePerms[0].can_view;
+        }
+      }
+
+      if (canView < 2) {
+        where += ' AND (l.assigned_to = ? OR l.created_by = ?)';
+        params.push(req.user.id, req.user.id);
+      }
     }
 
     // Allowed sort columns
@@ -46,6 +66,25 @@ exports.list = async (req, res) => {
   } catch (err) {
     console.error('Clients list error:', err);
     return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/clients/dropdown
+ * Lightweight list of converted clients for dropdowns (quotations, invoices, etc.)
+ */
+exports.dropdown = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, name, business_name, email, phone, address, city, state, lead_id
+       FROM leads
+       WHERE deleted = 0 AND (status = 'Won' OR lead_stage = 'Won')
+       ORDER BY COALESCE(NULLIF(business_name, ''), name) ASC`
+    );
+    return res.json({ clients: rows });
+  } catch (err) {
+    console.error('Clients dropdown error:', err);
+    return res.status(500).json({ message: err.message || 'Server error' });
   }
 };
 
