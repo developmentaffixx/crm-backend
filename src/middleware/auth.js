@@ -209,6 +209,28 @@ async function canViewProject(user, projectId) {
   return false;
 }
 
+/**
+ * Allows admins or users with attendance module permission.
+ */
+async function requireAdminOrAttendanceAccess(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+  if (req.user.is_admin) {
+    return next();
+  }
+  try {
+    const perms = await getUserModulePermission(req.user.id, 'attendance');
+    if (perms.can_view >= 1 || perms.can_edit >= 1) {
+      return next();
+    }
+    return res.status(403).json({ message: 'Attendance access required' });
+  } catch (err) {
+    console.error('requireAdminOrAttendanceAccess error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+}
+
 module.exports = {
   authenticate,
   requireAdmin,
@@ -217,5 +239,7 @@ module.exports = {
   getUserModulePermission,
   canEditProject,
   canViewProject,
+  requireAdminOrAttendanceAccess,
 };
+
 

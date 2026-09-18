@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireAdminOrAttendanceAccess } = require('../middleware/auth');
 const ctrl = require('../controllers/attendance.controller');
 
 // All routes require authentication
@@ -26,18 +26,19 @@ router.post('/afs/end', ctrl.afsEnd);
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 router.get('/settings', ctrl.getSettings);
-router.put('/settings', requireAdmin, ctrl.updateSettings);
+router.put('/settings', requireAdminOrAttendanceAccess, ctrl.updateSettings);
 
 // ── Admin routes ──────────────────────────────────────────────────────────────
-router.get('/admin/today', requireAdmin, ctrl.adminGetToday);
-router.get('/admin/timesheet/team', requireAdmin, ctrl.adminTimesheetTeam);
-router.get('/admin/timesheet', requireAdmin, ctrl.adminTimesheet);
-router.get('/admin/timesheet/day', requireAdmin, ctrl.adminTimesheetDay);
-router.get('/admin/week-report', requireAdmin, ctrl.adminWeekReport);
-router.get('/admin/month-balance-report', requireAdmin, ctrl.adminMonthBalanceReport);
-router.get('/admin/plans/:userId/:date', requireAdmin, ctrl.adminGetPlans);
-router.get('/admin/pending-resolution/:userId', requireAdmin, ctrl.adminGetPendingResolution);
-router.post('/admin/resolve-pending/:userId', requireAdmin, ctrl.adminResolvePending);
-router.get('/admin/all-pending', requireAdmin, ctrl.adminGetAllPending);
+router.get('/admin/today', requireAdminOrAttendanceAccess, ctrl.adminGetToday);
+router.get('/admin/timesheet/team', requireAdminOrAttendanceAccess, ctrl.adminTimesheetTeam);
+router.get('/admin/timesheet', requireAdminOrAttendanceAccess, ctrl.adminTimesheet);
+router.get('/admin/timesheet/day', requireAdminOrAttendanceAccess, ctrl.adminTimesheetDay);
+router.get('/admin/week-report', requireAdminOrAttendanceAccess, ctrl.adminWeekReport);
+router.get('/admin/month-balance-report', requireAdminOrAttendanceAccess, ctrl.adminMonthBalanceReport);
+router.get('/admin/plans/:userId/:date', requireAdminOrAttendanceAccess, ctrl.adminGetPlans);
+router.get('/admin/pending-resolution/:userId', requireAdminOrAttendanceAccess, ctrl.adminGetPendingResolution);
+router.post('/admin/resolve-pending/:userId', requireAdminOrAttendanceAccess, ctrl.adminResolvePending);
+router.get('/admin/all-pending', requireAdminOrAttendanceAccess, ctrl.adminGetAllPending);
+
 
 module.exports = router;
