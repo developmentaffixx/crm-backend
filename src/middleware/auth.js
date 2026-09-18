@@ -109,5 +109,113 @@ async function requireAdminOrTaskApprove(req, res, next) {
   }
 }
 
-module.exports = { authenticate, requireAdmin, canApproveTasks, requireAdminOrTaskApprove };
+/**
+ * Fetch effective permissions for a user on a given module,
+ * taking user-level overrides into account with fallback to role permissions.
+ */
+async function getUserModulePermission(userId, module) {
+  try {
+    // 1. User-level override wins
+    const [userPerms] = await db.query(
+      'SELECT can_view, can_create, can_edit, can_delete, can_approve FROM user_permissions WHERE user_id = ? AND module = ?',
+      [userId, module]
+    );
+    if (userPerms.length > 0) {
+      return {
+        can_view:    userPerms[0].can_view ?? 0,
+        can_create:  userPerms[0].can_create ?? 0,
+        can_edit:    userPerms[0].can_edit ?? 0,
+        can_delete:  userPerms[0].can_delete ?? 0,
+        can_approve: userPerms[0].can_approve ?? 0,
+      };
+    }
+
+    // 2. Role-level baseline
+    const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [userId]);
+    if (userRole.length > 0 && userRole[0].role_id) {
+      const [rolePerms] = await db.query(
+        'SELECT can_view, can_create, can_edit, can_delete, can_approve FROM role_permissions WHERE role_id = ? AND module = ?',
+        [userRole[0].role_id, module]
+      );
+      if (rolePerms.length > 0) {
+        return {
+          can_view:    rolePerms[0].can_view ?? 0,
+          can_create:  rolePerms[0].can_create ?? 0,
+          can_edit:    rolePerms[0].can_edit ?? 0,
+          can_delete:  rolePerms[0].can_delete ?? 0,
+          can_approve: rolePerms[0].can_approve ?? 0,
+        };
+      }
+    }
+  } catch (err) {
+    console.error('getUserModulePermission error:', err);
+  }
+
+  return { can_view: 0, can_create: 0, can_edit: 0, can_delete: 0, can_approve: 0 };
+}
+
+/**
+ * Checks if user has permission to edit a specific project or all projects.
+ * - Admin: always true
+ * - can_edit >= 2 (All): true for all projects
+ * - can_edit === 1 (Own): true if user created the project or is a project member
+ */
+async function canEditProject(user, projectId) {
+  if (!user) return false;
+  if (user.is_admin) return true;
+
+  const perms = await getUserModulePermission(user.id, 'projects');
+  const canEdit = perms.can_edit ?? 0;
+
+  if (canEdit >= 2) return true;
+  if (canEdit === 1 && projectId) {
+    const [proj] = await db.query(
+      `SELECT p.id FROM projects p
+       LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = ?
+       WHERE p.id = ? AND (p.created_by = ? OR pm.user_id IS NOT NULL)
+       LIMIT 1`,
+      [user.id, projectId, user.id]
+    );
+    return proj.length > 0;
+  }
+  return false;
+}
+
+/**
+ * Checks if user has permission to view a specific project or all projects.
+ * - Admin: always true
+ * - can_view >= 2 or can_edit >= 2: true
+ * - can_view === 1 or can_edit === 1: true if user created the project or is a project member
+ */
+async function canViewProject(user, projectId) {
+  if (!user) return false;
+  if (user.is_admin) return true;
+
+  const perms = await getUserModulePermission(user.id, 'projects');
+  const canView = perms.can_view ?? 0;
+  const canEdit = perms.can_edit ?? 0;
+
+  if (canView >= 2 || canEdit >= 2) return true;
+  if ((canView >= 1 || canEdit >= 1) && projectId) {
+    const [proj] = await db.query(
+      `SELECT p.id FROM projects p
+       LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = ?
+       WHERE p.id = ? AND (p.created_by = ? OR pm.user_id IS NOT NULL)
+       LIMIT 1`,
+      [user.id, projectId, user.id]
+    );
+    return proj.length > 0;
+  }
+  return false;
+}
+
+module.exports = {
+  authenticate,
+  requireAdmin,
+  canApproveTasks,
+  requireAdminOrTaskApprove,
+  getUserModulePermission,
+  canEditProject,
+  canViewProject,
+};
 

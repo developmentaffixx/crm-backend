@@ -1,8 +1,45 @@
 const db = require('../config/db');
 
-// ─── Helper: Check if user has inventory write access (admin only) ────────────
-function canWrite(req) {
-  return req.user && req.user.is_admin;
+// ─── Helper: Check if user has inventory manage access ───────────────────────
+async function canAccessInventories(req) {
+  if (!req.user) return false;
+  if (req.user.is_admin) return true;
+
+  try {
+    // 1. User-level submenu override wins
+    const [userOverride] = await db.query(
+      'SELECT can_access FROM user_submenu_permissions WHERE user_id = ? AND module = ? AND submenu = ?',
+      [req.user.id, 'finance', 'inventories']
+    );
+    if (userOverride.length > 0) {
+      return userOverride[0].can_access >= 1;
+    }
+
+    // 2. Role-level submenu permissions
+    const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+    if (userRole.length > 0 && userRole[0].role_id) {
+      const [rolePerms] = await db.query(
+        'SELECT can_access FROM role_submenu_permissions WHERE role_id = ? AND module = ? AND submenu = ?',
+        [userRole[0].role_id, 'finance', 'inventories']
+      );
+      if (rolePerms.length > 0) {
+        return rolePerms[0].can_access >= 1;
+      }
+
+      // 3. Fallback: check finance module permissions
+      const [modulePerms] = await db.query(
+        'SELECT can_create, can_edit FROM role_permissions WHERE role_id = ? AND module = ?',
+        [userRole[0].role_id, 'finance']
+      );
+      if (modulePerms.length > 0 && (modulePerms[0].can_create || modulePerms[0].can_edit)) {
+        return true;
+      }
+    }
+  } catch (err) {
+    console.error('canAccessInventories error:', err);
+  }
+
+  return false;
 }
 
 // ─── GET /api/inventories ─────────────────────────────────────────────────────
@@ -72,7 +109,8 @@ exports.getCategories = async (req, res) => {
 // ─── POST /api/inventories/categories (Admin only) ────────────────────────────
 exports.createCategory = async (req, res) => {
   try {
-    if (!canWrite(req)) return res.status(403).json({ message: 'Admin access required' });
+    const allowed = await canAccessInventories(req);
+    if (!allowed) return res.status(403).json({ message: 'Inventory access required' });
     const { name } = req.body;
     if (!name) return res.status(400).json({ message: 'Category name is required' });
 
@@ -115,7 +153,8 @@ exports.getOne = async (req, res) => {
 // ─── POST /api/inventories (Admin only) ───────────────────────────────────────
 exports.create = async (req, res) => {
   try {
-    if (!canWrite(req)) return res.status(403).json({ message: 'Admin access required' });
+    const allowed = await canAccessInventories(req);
+    if (!allowed) return res.status(403).json({ message: 'Inventory access required' });
 
     const {
       item_name, category, unit, sku_code, quantity, unit_price,
@@ -177,7 +216,8 @@ exports.create = async (req, res) => {
 // ─── PUT /api/inventories/:id (Admin only) ────────────────────────────────────
 exports.update = async (req, res) => {
   try {
-    if (!canWrite(req)) return res.status(403).json({ message: 'Admin access required' });
+    const allowed = await canAccessInventories(req);
+    if (!allowed) return res.status(403).json({ message: 'Inventory access required' });
 
     const [rows] = await db.query('SELECT * FROM inventories WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Inventory item not found' });
@@ -230,7 +270,7 @@ exports.update = async (req, res) => {
 // ─── DELETE /api/inventories/:id (Admin only, soft delete) ────────────────────
 exports.remove = async (req, res) => {
   try {
-    if (!canWrite(req)) return res.status(403).json({ message: 'Admin access required' });
+    if (!req.user || !req.user.is_admin) return res.status(403).json({ message: 'Admin access required to delete inventory' });
 
     const [rows] = await db.query('SELECT * FROM inventories WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Inventory item not found' });
@@ -246,7 +286,8 @@ exports.remove = async (req, res) => {
 // ─── POST /api/inventories/:id/stock-in (Admin only) ──────────────────────────
 exports.stockIn = async (req, res) => {
   try {
-    if (!canWrite(req)) return res.status(403).json({ message: 'Admin access required' });
+    const allowed = await canAccessInventories(req);
+    if (!allowed) return res.status(403).json({ message: 'Inventory access required' });
 
     const { id } = req.params;
     const { quantity, transaction_date, vendor, bill_number, remarks } = req.body;
@@ -280,7 +321,8 @@ exports.stockIn = async (req, res) => {
 // ─── POST /api/inventories/:id/stock-out (Admin only) ─────────────────────────
 exports.stockOut = async (req, res) => {
   try {
-    if (!canWrite(req)) return res.status(403).json({ message: 'Admin access required' });
+    const allowed = await canAccessInventories(req);
+    if (!allowed) return res.status(403).json({ message: 'Inventory access required' });
 
     const { id } = req.params;
     const { quantity, transaction_date, purpose, issued_by, remarks } = req.body;

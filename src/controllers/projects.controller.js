@@ -1,5 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
+const { canEditProject, getUserModulePermission } = require('../middleware/auth');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/projects — list all projects
@@ -18,14 +19,24 @@ exports.list = async (req, res) => {
       const s = `%${search}%`;
       baseParams.push(s, s);
     }
+
+    let hasViewAll = false;
     if (!req.user.is_admin) {
+      const perms = await getUserModulePermission(req.user.id, 'projects');
+      if (perms.can_view >= 2 || perms.can_edit >= 2) {
+        hasViewAll = true;
+      }
+    }
+
+    const needSelfJoin = !req.user.is_admin && !hasViewAll;
+    if (needSelfJoin) {
       baseWhere += ' AND (p.created_by = ? OR pm_self.user_id IS NOT NULL)';
       baseParams.push(req.user.id);
     }
 
     // ── Summary query — always runs across ALL statuses ──
     // For non-admin: JOIN param (user_id) comes first in SQL, followed by WHERE params
-    const summaryParams = !req.user.is_admin ? [req.user.id, ...baseParams] : [...baseParams];
+    const summaryParams = needSelfJoin ? [req.user.id, ...baseParams] : [...baseParams];
     const [[summaryRow]] = await db.query(
       `SELECT
          COUNT(*)                                AS total,
@@ -33,7 +44,7 @@ exports.list = async (req, res) => {
          SUM(p.status = 'inactive')             AS inactive
        FROM projects p
        LEFT JOIN leads l ON l.id = p.client_id
-       ${!req.user.is_admin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ?' : ''}
+       ${needSelfJoin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ?' : ''}
        WHERE ${baseWhere}`,
       summaryParams
     );
@@ -53,9 +64,9 @@ exports.list = async (req, res) => {
     }
     // No filter passed — show all (no status restriction)
 
-    // Add user_id param for the pm_self join if non-admin
+    // Add user_id param for the pm_self join if needed
     const mainParams = [...params];
-    if (!req.user.is_admin) {
+    if (needSelfJoin) {
       mainParams.unshift(req.user.id);
     }
 
@@ -70,7 +81,7 @@ exports.list = async (req, res) => {
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN services s ON s.id = p.service_id
        LEFT JOIN users uc ON uc.id = p.created_by
-       ${!req.user.is_admin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ?' : ''}
+       ${needSelfJoin ? 'LEFT JOIN project_members pm_self ON pm_self.project_id = p.id AND pm_self.user_id = ?' : ''}
        WHERE ${where}
        ORDER BY p.status = 'active' DESC, p.created_at DESC`,
       mainParams
@@ -304,8 +315,8 @@ exports.update = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM projects WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Project not found' });
 
-    const project = rows[0];
-    if (!req.user.is_admin && project.created_by !== req.user.id) {
+    const hasEdit = await canEditProject(req.user, req.params.id);
+    if (!hasEdit) {
       return res.status(403).json({ message: 'Access denied' });
     }
 

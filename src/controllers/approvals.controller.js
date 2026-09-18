@@ -561,7 +561,8 @@ exports.getApprovalsPage = async (req, res) => {
     const scopeParams1 = canApprove ? [] : [userId];
 
     const [pendingTasks] = await db.query(
-      `SELECT t.id, t.title, t.is_active, t.deadline, t.priority,
+      `SELECT t.id, t.task_id_code, t.title, t.is_active, t.deadline, t.priority,
+              (SELECT p.title FROM project_tasks pt JOIN projects p ON p.id = pt.project_id AND p.deleted = 0 WHERE pt.task_id = t.id LIMIT 1) AS project_name,
               CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name
        FROM tasks t
        LEFT JOIN users u ON u.id = t.assigned_to
@@ -571,7 +572,8 @@ exports.getApprovalsPage = async (req, res) => {
     );
 
     const [extensions] = await db.query(
-      `SELECT er.*, t.title AS task_title,
+      `SELECT er.*, t.title AS task_title, t.task_id_code,
+              (SELECT p.title FROM project_tasks pt JOIN projects p ON p.id = pt.project_id AND p.deleted = 0 WHERE pt.task_id = t.id LIMIT 1) AS project_name,
               CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
        FROM task_deadline_extension_requests er
        LEFT JOIN tasks t ON t.id = er.task_id
@@ -582,7 +584,8 @@ exports.getApprovalsPage = async (req, res) => {
     );
 
     const [forwards] = await db.query(
-      `SELECT fr.*, t.title AS task_title,
+      `SELECT fr.*, t.title AS task_title, t.task_id_code,
+              (SELECT p.title FROM project_tasks pt JOIN projects p ON p.id = pt.project_id AND p.deleted = 0 WHERE pt.task_id = t.id LIMIT 1) AS project_name,
               CONCAT(u1.first_name, ' ', u1.last_name) AS forwarded_by_name,
               CONCAT(u2.first_name, ' ', u2.last_name) AS forwarded_to_name
        FROM task_forward_requests fr
@@ -595,7 +598,8 @@ exports.getApprovalsPage = async (req, res) => {
     );
 
     const [closeRequests] = await db.query(
-      `SELECT cr.*, t.title AS task_title, t.deadline,
+      `SELECT cr.*, t.title AS task_title, t.deadline, t.task_id_code,
+              (SELECT p.title FROM project_tasks pt JOIN projects p ON p.id = pt.project_id AND p.deleted = 0 WHERE pt.task_id = t.id LIMIT 1) AS project_name,
               CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
        FROM task_close_requests cr
        LEFT JOIN tasks t ON t.id = cr.task_id

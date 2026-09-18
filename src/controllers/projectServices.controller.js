@@ -1,5 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
+const { canEditProject, canViewProject } = require('../middleware/auth');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Auto-recalculate project status based on service statuses
@@ -54,10 +55,14 @@ exports.list = async (req, res) => {
     let accessFilter = '';
     const params = [projectId];
 
-    // Non-admins: only see services they are assigned to
+    // Non-admins: if user has view or edit access to this project, show all services.
+    // Otherwise, only show services they are explicitly assigned to.
     if (!req.user.is_admin) {
-      accessFilter = ' AND EXISTS (SELECT 1 FROM project_service_members psm WHERE psm.project_service_id = ps.id AND psm.user_id = ?)';
-      params.push(req.user.id);
+      const hasFullAccess = await canViewProject(req.user, projectId);
+      if (!hasFullAccess) {
+        accessFilter = ' AND EXISTS (SELECT 1 FROM project_service_members psm WHERE psm.project_service_id = ps.id AND psm.user_id = ?)';
+        params.push(req.user.id);
+      }
     }
 
     const [rows] = await db.query(
@@ -616,9 +621,10 @@ exports.addServiceMember = async (req, res) => {
     const { projectId, serviceId } = req.params;
     const { user_id } = req.body;
 
-    // Only admins can manage service members
-    if (!req.user.is_admin) {
-      return res.status(403).json({ message: 'Only admins can manage service members' });
+    // Admin or users with Edit permission on this project can manage service members
+    const hasEdit = await canEditProject(req.user, projectId);
+    if (!hasEdit) {
+      return res.status(403).json({ message: 'You do not have permission to manage team members for this project' });
     }
 
     // Verify service exists
@@ -662,9 +668,10 @@ exports.removeServiceMember = async (req, res) => {
   try {
     const { projectId, serviceId, userId } = req.params;
 
-    // Only admins can manage service members
-    if (!req.user.is_admin) {
-      return res.status(403).json({ message: 'Only admins can manage service members' });
+    // Admin or users with Edit permission on this project can manage service members
+    const hasEdit = await canEditProject(req.user, projectId);
+    if (!hasEdit) {
+      return res.status(403).json({ message: 'You do not have permission to manage team members for this project' });
     }
 
     // Verify service exists
@@ -680,6 +687,18 @@ exports.removeServiceMember = async (req, res) => {
       'DELETE FROM project_service_members WHERE project_service_id = ? AND user_id = ?',
       [serviceId, userId]
     );
+
+    // If user has no other services in this project, also remove from project_members
+    const [remaining] = await db.query(
+      `SELECT 1 FROM project_service_members psm
+       JOIN project_services ps ON ps.id = psm.project_service_id
+       WHERE ps.project_id = ? AND psm.user_id = ?
+       LIMIT 1`,
+      [projectId, userId]
+    );
+    if (remaining.length === 0) {
+      await db.query('DELETE FROM project_members WHERE project_id = ? AND user_id = ?', [projectId, userId]);
+    }
 
     return res.json({ message: 'Member removed from service' });
   } catch (err) {
