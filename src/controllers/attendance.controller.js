@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { getExpectedHoursForDate, getExpectedHoursForRange } = require('./workSchedule.controller');
+const { getUserModulePermission } = require('../middleware/auth');
 
 exports.clockIn = async (req, res) => {
   try {
@@ -551,11 +552,17 @@ exports.getMyMonth = async (req, res) => {
 exports.getHistory = async (req, res) => {
   try {
     const requestingUserId = req.user.id;
-    const isAdmin = req.user.is_admin;
+    let hasFullAccess = req.user.is_admin;
+    if (!hasFullAccess) {
+      const perms = await getUserModulePermission(req.user.id, 'attendance');
+      if (perms.can_view >= 1 || perms.can_edit >= 1) {
+        hasFullAccess = true;
+      }
+    }
     let { user_id, month, start_date, end_date } = req.query;
 
-    // Non-admins can only see their own records
-    if (!isAdmin || !user_id) {
+    // Users without attendance access can only see their own records
+    if (!hasFullAccess || !user_id) {
       user_id = requestingUserId;
     }
 
@@ -577,8 +584,8 @@ exports.getHistory = async (req, res) => {
       endDate = `${year}-${mon}-${String(lastDay).padStart(2, '0')}`;
     }
 
-    // If admin requests all employees
-    if (isAdmin && user_id === 'all') {
+    // If admin or user with attendance access requests all employees
+    if (hasFullAccess && user_id === 'all') {
       const [users] = await db.query(
         'SELECT id, first_name, last_name, department, avatar_url FROM users WHERE is_active = 1 AND deleted = 0 ORDER BY first_name'
       );
