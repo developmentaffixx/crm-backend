@@ -490,6 +490,18 @@ exports.sendEmail = async (req, res) => {
         </tr>`}
       </table>
     </div>
+    <!-- Bank Details -->
+    ${(invoice.bank_name || invoice.account_number) ? `
+    <div style="background:#fafafa;border:1px solid #e8e2dc;border-radius:8px;padding:16px;margin-bottom:16px;">
+      <p style="margin:0 0 8px;font-size:11px;font-weight:700;color:#b8a994;text-transform:uppercase;letter-spacing:0.5px;">Bank Details for Payment</p>
+      <p style="margin:0;font-size:12px;color:#4a4340;line-height:1.8;">
+        Account Name: <strong>SCALEFORGE PRIVATE LIMITED</strong><br>
+        ${invoice.bank_name ? `Bank: <strong>${invoice.bank_name}</strong><br>` : ''}
+        ${invoice.account_number ? `A/C No: <strong>${invoice.account_number}</strong><br>` : ''}
+        ${invoice.ifsc_code ? `IFSC: <strong>${invoice.ifsc_code}</strong><br>` : ''}
+        ${invoice.branch ? `Branch: ${invoice.branch}` : ''}
+      </p>
+    </div>` : ''}
     <p style="font-size:11px;color:#9a8e82;margin:0;">The detailed invoice is attached as a PDF.</p>
   </div>
   <div style="padding:14px 24px;text-align:center;border-top:1px solid #e8e2dc;">
@@ -610,8 +622,9 @@ exports.sendReminder = async (req, res) => {
     <div style="background:#fafafa;border:1px solid #e8e2dc;border-radius:8px;padding:16px;margin-bottom:20px;">
       <p style="margin:0 0 8px;font-size:11px;font-weight:700;color:#b8a994;text-transform:uppercase;letter-spacing:0.5px;">Bank Details for Payment</p>
       <p style="margin:0;font-size:12px;color:#4a4340;line-height:1.8;">
+        Account Name: <strong>SCALEFORGE PRIVATE LIMITED</strong><br>
         ${invoice.bank_name ? `Bank: <strong>${invoice.bank_name}</strong><br>` : ''}
-        ${invoice.account_number ? `A/c No: <strong>${invoice.account_number}</strong><br>` : ''}
+        ${invoice.account_number ? `A/C No: <strong>${invoice.account_number}</strong><br>` : ''}
         ${invoice.ifsc_code ? `IFSC: <strong>${invoice.ifsc_code}</strong><br>` : ''}
         ${invoice.branch ? `Branch: ${invoice.branch}` : ''}
       </p>
