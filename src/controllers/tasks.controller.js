@@ -521,6 +521,8 @@ exports.update = async (req, res) => {
     const [rows] = await db.query('SELECT * FROM tasks WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Task not found' });
 
+    const task = rows[0];
+
     let canEdit = 0;
     let canApprove = 0;
     if (!req.user.is_admin) {
@@ -576,26 +578,40 @@ exports.update = async (req, res) => {
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
 
+    if (updates.deadline === '') updates.deadline = null;
+    if (updates.start_date === '') updates.start_date = null;
+    if (updates.description === '') updates.description = null;
+
     if (Object.keys(updates).length === 0 && req.body.project_id === undefined && req.body.service_id === undefined && req.body.collaborators === undefined && req.body.cycle_id === undefined) {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
     // Hard block: if deadline is being updated and exceeds cycle end_date
     if (updates.deadline) {
-      const [cycleLink] = await db.query(
-        `SELECT sc.end_date FROM cycle_tasks ct
-         JOIN service_cycles sc ON sc.id = ct.cycle_id
-         WHERE ct.task_id = ?
-         LIMIT 1`,
-        [req.params.id]
-      );
-      if (cycleLink.length > 0 && cycleLink[0].end_date) {
+      let cycleToCheck = null;
+      if (req.body.cycle_id !== undefined) {
+        if (req.body.cycle_id) {
+          const [c] = await db.query('SELECT end_date FROM service_cycles WHERE id = ?', [req.body.cycle_id]);
+          if (c.length > 0) cycleToCheck = c[0];
+        }
+      } else {
+        const [cycleLink] = await db.query(
+          `SELECT sc.end_date FROM cycle_tasks ct
+           JOIN service_cycles sc ON sc.id = ct.cycle_id
+           WHERE ct.task_id = ?
+           LIMIT 1`,
+          [req.params.id]
+        );
+        if (cycleLink.length > 0) cycleToCheck = cycleLink[0];
+      }
+
+      if (cycleToCheck && cycleToCheck.end_date) {
         const deadlineDate = new Date(updates.deadline);
-        const cycleEndDate = new Date(cycleLink[0].end_date);
+        const cycleEndDate = new Date(cycleToCheck.end_date);
         if (deadlineDate > cycleEndDate) {
-          const endStr = cycleLink[0].end_date instanceof Date
-            ? cycleLink[0].end_date.toISOString().split('T')[0]
-            : String(cycleLink[0].end_date).split('T')[0];
+          const endStr = cycleToCheck.end_date instanceof Date
+            ? cycleToCheck.end_date.toISOString().split('T')[0]
+            : String(cycleToCheck.end_date).split('T')[0];
           return res.status(400).json({
             message: `Task deadline exceeds the cycle end date (${endStr}). Please extend the cycle end date first, then update the task.`,
           });
@@ -798,10 +814,10 @@ exports.resubmit = async (req, res) => {
     }
 
     // Allow updating fields during resubmit
-    const { title, description, assigned_to, start_date, deadline, priority } = req.body;
+    const { title, description, assigned_to, start_date, deadline, priority, collaborators, cycle_id } = req.body;
     const updates = {};
     if (title)       updates.title = title;
-    if (description !== undefined) updates.description = description;
+    if (description !== undefined) updates.description = description || null;
     if (assigned_to) updates.assigned_to = assigned_to;
     if (start_date !== undefined)  updates.start_date = start_date || null;
     if (deadline !== undefined)    updates.deadline = deadline || null;
@@ -825,6 +841,24 @@ exports.resubmit = async (req, res) => {
           [req.body.project_id, task.id, req.body.service_id || null]
         );
       }
+    }
+
+    // Update cycle link during resubmit if provided
+    if (cycle_id !== undefined) {
+      await db.query('DELETE FROM cycle_tasks WHERE task_id = ?', [task.id]);
+      if (cycle_id) {
+        await db.query(
+          'INSERT IGNORE INTO cycle_tasks (cycle_id, task_id) VALUES (?, ?)',
+          [cycle_id, task.id]
+        );
+      }
+    }
+
+    // Update collaborators during resubmit if provided
+    if (collaborators !== undefined) {
+      const primaryUser = updates.assigned_to || task.assigned_to;
+      const collabIds = Array.isArray(collaborators) ? collaborators.map(Number).filter(Boolean) : [];
+      await syncAssignees(task.id, primaryUser, collabIds);
     }
 
     const [updated] = await db.query('SELECT * FROM tasks WHERE id = ?', [task.id]);
