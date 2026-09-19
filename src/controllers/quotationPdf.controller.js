@@ -334,6 +334,7 @@ exports.generatePdf = async (req, res) => {
 
     // ─── Bank Account Details ─────────────────────────────────────────────────
     // Use quotation-level bank details, fallback to company settings
+    const accountName = quotation.account_name || company.bank_account_name || 'SCALEFORGE PRIVATE LIMITED';
     const bankName = quotation.bank_name || company.bank_name || '';
     const bankAccount = quotation.account_number || company.bank_account_no || '';
     const bankIfsc = quotation.ifsc_code || company.bank_ifsc || '';
@@ -347,6 +348,7 @@ exports.generatePdf = async (req, res) => {
       doc.moveDown(0.5);
 
       const bankDetails = [
+        accountName && ['Account Name', accountName],
         bankName && ['Bank', bankName],
         bankAccount && ['Account No', bankAccount],
         bankIfsc && ['IFSC', bankIfsc],

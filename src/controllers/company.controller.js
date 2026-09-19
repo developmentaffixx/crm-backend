@@ -25,7 +25,7 @@ exports.updateCompanySettings = async (req, res) => {
       'gst_number', 'tax_id', 'registration_no',
       'timezone', 'date_format', 'currency', 'currency_symbol', 'financial_year_start',
       'social_linkedin', 'social_instagram', 'social_twitter', 'social_facebook',
-      'bank_name', 'bank_branch', 'bank_account_no', 'bank_ifsc', 'bank_swift', 'bank_account_type',
+      'bank_account_name', 'bank_name', 'bank_branch', 'bank_account_no', 'bank_ifsc', 'bank_swift', 'bank_account_type',
       'upi_id',
     ];
 

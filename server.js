@@ -205,8 +205,13 @@ server.listen(PORT, () => {
   console.log(`✅  CRM Task API running on http://localhost:${PORT}`);
   console.log(`🔌  Socket.IO ready for real-time connections`);
 
-  // ── One-time: Sync lead_stage with status for existing data ─────────────────
+  // ── One-time: Ensure bank_account_name column exists in company_settings ───
   const db = require('./src/config/db');
+  db.query("ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS bank_account_name VARCHAR(255) NOT NULL DEFAULT 'SCALEFORGE PRIVATE LIMITED' AFTER social_facebook")
+    .then(() => db.query("UPDATE company_settings SET bank_account_name = 'SCALEFORGE PRIVATE LIMITED' WHERE id = 1 AND (bank_account_name = '' OR bank_account_name IS NULL)"))
+    .catch(err => console.error('⚠️  company_settings bank_account_name check error (non-fatal):', err.message));
+
+  // ── One-time: Sync lead_stage with status for existing data ─────────────────
   db.query("UPDATE leads SET status = 'Won', lead_stage = 'Won', lead_score = 5, temperature = 'hot' WHERE client_code IS NOT NULL AND client_code != '' AND (status != 'Won' OR lead_stage != 'Won')")
     .then(() => db.query("UPDATE leads SET lead_stage = 'New' WHERE lead_stage = 'Cold'"))
     .then(() => db.query("UPDATE leads SET lead_stage = 'Meeting' WHERE lead_stage = 'Meeting Scheduled'"))

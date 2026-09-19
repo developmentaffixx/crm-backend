@@ -93,11 +93,12 @@ function buildInvoiceHtml(invoice, comp, items, logoBase64) {
       </div>`;
 
   // Bank details
+  const bankAccName = invoice.account_name || comp.bank_account_name || 'SCALEFORGE PRIVATE LIMITED';
   const bankHtml = (invoice.bank_name || invoice.account_number) ? `
     <div>
       <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#b8a994;margin-bottom:8px;">Bank Details</p>
       <div style="font-size:11px;color:#6b5e50;line-height:1.8;">
-        <p style="margin:0;">Account Name: <strong>SCALEFORGE PRIVATE LIMITED</strong></p>
+        <p style="margin:0;">Account Name: <strong>${bankAccName}</strong></p>
         ${invoice.bank_name ? `<p style="margin:0;">Bank: <strong>${invoice.bank_name}</strong></p>` : ''}
         ${invoice.account_number ? `<p style="margin:0;">A/C No: <strong>${invoice.account_number}</strong></p>` : ''}
         ${invoice.ifsc_code ? `<p style="margin:0;">IFSC: <strong>${invoice.ifsc_code}</strong></p>` : ''}
