@@ -90,6 +90,13 @@ function normalizeHeader(header) {
     'business name': 'business_name',
     'businessname': 'business_name',
     'business_name': 'business_name',
+    'brand': 'business_name',
+    'brand name': 'business_name',
+    'brandname': 'business_name',
+    'brand_name': 'business_name',
+    'company': 'business_name',
+    'company name': 'business_name',
+    'company_name': 'business_name',
     'phone': 'phone',
     'phone number': 'phone',
     'industry': 'industry',
@@ -111,10 +118,20 @@ function normalizeHeader(header) {
   return map[header.toLowerCase().trim()] || null;
 }
 
+// Helper: Normalize business/brand name for case-insensitive duplicate check
+function normalizeBusinessName(name) {
+  if (!name) return '';
+  return name
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' '); // collapse multiple spaces into one
+}
+
 /**
  * POST /api/leads/sync-google-sheet
  * Body: { spreadsheetId, sheetName? }
- * Reads rows from the Google Sheet and inserts new leads (skips duplicates by phone)
+ * Reads rows from the Google Sheet and inserts new leads (skips duplicates by phone or business/brand name)
  */
 exports.syncFromGoogleSheet = async (req, res) => {
   const { spreadsheetId, sheetName } = req.body;
@@ -147,11 +164,20 @@ exports.syncFromGoogleSheet = async (req, res) => {
     const headers = rows[0].map(h => normalizeHeader(h));
     const dataRows = rows.slice(1);
 
-    // Get existing phone numbers to check duplicates
+    // Get existing phone numbers and business names to check duplicates
     const [existingLeads] = await db.query(
-      'SELECT phone FROM leads WHERE deleted = 0 AND phone IS NOT NULL AND phone != ""'
+      'SELECT phone, business_name FROM leads WHERE deleted = 0'
     );
-    const existingPhones = new Set(existingLeads.map(l => l.phone?.replace(/\D/g, '')));
+    const existingPhones = new Set(
+      existingLeads
+        .map(l => l.phone?.replace(/\D/g, ''))
+        .filter(Boolean)
+    );
+    const existingBusinessNames = new Set(
+      existingLeads
+        .map(l => normalizeBusinessName(l.business_name))
+        .filter(Boolean)
+    );
 
     let added = 0;
     let skipped = 0;
@@ -178,15 +204,27 @@ exports.syncFromGoogleSheet = async (req, res) => {
       // Skip empty rows
       if (Object.keys(lead).length === 0) continue;
 
-      // Check duplicate by phone (if phone provided)
-      if (lead.phone) {
-        const cleanPhone = lead.phone.replace(/\D/g, '');
-        if (existingPhones.has(cleanPhone)) {
-          skipped++;
-          continue;
-        }
-        existingPhones.add(cleanPhone); // prevent duplicates within the same sheet
+      // Check duplicates:
+      // 1. By Phone (digits only)
+      const cleanPhone = lead.phone ? lead.phone.replace(/\D/g, '') : null;
+      // 2. By Business / Brand Name (case-insensitive & trimmed)
+      const cleanBizName = lead.business_name ? normalizeBusinessName(lead.business_name) : null;
+
+      let isDuplicate = false;
+      if (cleanPhone && existingPhones.has(cleanPhone)) {
+        isDuplicate = true;
+      } else if (cleanBizName && existingBusinessNames.has(cleanBizName)) {
+        isDuplicate = true;
       }
+
+      if (isDuplicate) {
+        skipped++;
+        continue;
+      }
+
+      // Track newly added leads to prevent duplicate rows within the same sheet
+      if (cleanPhone) existingPhones.add(cleanPhone);
+      if (cleanBizName) existingBusinessNames.add(cleanBizName);
 
       // Normalize temperature
       if (lead.temperature) {
