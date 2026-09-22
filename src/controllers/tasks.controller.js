@@ -871,6 +871,42 @@ exports.resubmit = async (req, res) => {
 };
 
 /**
+ * POST /api/tasks/:id/reopen  (admin only)
+ * Reopens a fully closed task: is_active 3 → 1, status → 'in_progress'.
+ * Clears the closing_statement so the assignee can re-do it.
+ */
+exports.reopen = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM tasks WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Task not found' });
+
+    const task = rows[0];
+
+    if (task.is_active !== 3) {
+      return res.status(400).json({ message: 'Only fully closed tasks (Done) can be reopened' });
+    }
+
+    const reason = req.body.reason || null;
+
+    await db.query(
+      "UPDATE tasks SET is_active = 1, status = 'in_progress', closing_statement = NULL WHERE id = ?",
+      [task.id]
+    );
+
+    await logActivity(task.id, req.user.id, 'reopened', {
+      note: reason || 'Task reopened by admin',
+    });
+
+    const [updated] = await db.query('SELECT * FROM tasks WHERE id = ?', [task.id]);
+    res.emitSocket('tasks:updated', updated[0]);
+    return res.json(updated[0]);
+  } catch (err) {
+    console.error('Task reopen error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * DELETE /api/tasks/:id
  * Admin: can delete any task (except closed).
  * Team member: only the task CREATOR can delete.
