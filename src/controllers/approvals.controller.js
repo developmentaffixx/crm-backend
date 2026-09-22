@@ -24,7 +24,7 @@ async function logActivity(taskId, userId, action, { field_name, old_value, new_
  */
 exports.createExtension = async (req, res) => {
   const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array(), message: errors.array()[0]?.msg });
 
   const { task_id, requested_deadline, reason } = req.body;
 

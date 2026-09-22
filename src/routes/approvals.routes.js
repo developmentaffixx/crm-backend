@@ -14,7 +14,16 @@ router.post(
   [
     body('task_id').isInt().withMessage('task_id required'),
     body('requested_deadline').isDate().withMessage('requested_deadline (YYYY-MM-DD) required'),
-    body('reason').notEmpty().withMessage('reason required'),
+    body('reason')
+      .trim()
+      .notEmpty().withMessage('reason required')
+      .custom((value) => {
+        const letterCount = (value.match(/[a-zA-Z]/g) || []).length;
+        if (letterCount < 30) {
+          throw new Error('Reason must contain at least 30 letters');
+        }
+        return true;
+      }),
   ],
   approvalsController.createExtension
 );
