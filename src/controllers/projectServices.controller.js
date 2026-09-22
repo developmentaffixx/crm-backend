@@ -1,6 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { canEditProject, canViewProject } = require('../middleware/auth');
+const { canEditProject, canViewProject, getUserModulePermission } = require('../middleware/auth');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Auto-recalculate project status based on service statuses
@@ -45,6 +45,24 @@ async function recalculateProjectStatus(projectId) {
   );
 }
 
+/**
+ * Helper: Checks if user has full managerial access to this project
+ * (Admin, can_view >= 2, can_edit >= 2, or the user who created the project).
+ * Regular assigned members have can_view = 1 or can_edit = 1 and only see their assigned services.
+ */
+async function hasFullProjectAccess(user, projectId) {
+  if (!user) return false;
+  if (user.is_admin) return true;
+  const perms = await getUserModulePermission(user.id, 'projects');
+  if ((perms.can_view ?? 0) >= 2 || (perms.can_edit ?? 0) >= 2) return true;
+
+  if (projectId) {
+    const [proj] = await db.query('SELECT created_by FROM projects WHERE id = ?', [projectId]);
+    if (proj.length > 0 && proj[0].created_by === user.id) return true;
+  }
+  return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/projects/:projectId/services — list all services for a project
 // ─────────────────────────────────────────────────────────────────────────────
@@ -55,14 +73,12 @@ exports.list = async (req, res) => {
     let accessFilter = '';
     const params = [projectId];
 
-    // Non-admins: if user has view or edit access to this project, show all services.
-    // Otherwise, only show services they are explicitly assigned to.
-    if (!req.user.is_admin) {
-      const hasFullAccess = await canViewProject(req.user, projectId);
-      if (!hasFullAccess) {
-        accessFilter = ' AND EXISTS (SELECT 1 FROM project_service_members psm WHERE psm.project_service_id = ps.id AND psm.user_id = ?)';
-        params.push(req.user.id);
-      }
+    // Admins, project managers (can_view/edit >= 2), or project creator see all services.
+    // Regular team members only see services where they are in project_service_members.
+    const hasFull = await hasFullProjectAccess(req.user, projectId);
+    if (!hasFull) {
+      accessFilter = ' AND EXISTS (SELECT 1 FROM project_service_members psm WHERE psm.project_service_id = ps.id AND psm.user_id = ?)';
+      params.push(req.user.id);
     }
 
     const [rows] = await db.query(
@@ -233,6 +249,18 @@ exports.remove = async (req, res) => {
 exports.getOne = async (req, res) => {
   try {
     const { projectId, serviceId } = req.params;
+
+    // Check service-level access for non-admins/non-managers
+    const hasFull = await hasFullProjectAccess(req.user, projectId);
+    if (!hasFull) {
+      const [membership] = await db.query(
+        'SELECT 1 FROM project_service_members WHERE project_service_id = ? AND user_id = ?',
+        [serviceId, req.user.id]
+      );
+      if (membership.length === 0) {
+        return res.status(403).json({ message: 'You do not have access to this service' });
+      }
+    }
 
     const [rows] = await db.query(
       `SELECT ps.*,
@@ -594,6 +622,18 @@ exports.listServiceMembers = async (req, res) => {
     );
     if (service.length === 0) {
       return res.status(404).json({ message: 'Service not found' });
+    }
+
+    // Check service-level access
+    const hasFull = await hasFullProjectAccess(req.user, projectId);
+    if (!hasFull) {
+      const [membership] = await db.query(
+        'SELECT 1 FROM project_service_members WHERE project_service_id = ? AND user_id = ?',
+        [serviceId, req.user.id]
+      );
+      if (membership.length === 0) {
+        return res.status(403).json({ message: 'You do not have access to this service' });
+      }
     }
 
     const [members] = await db.query(

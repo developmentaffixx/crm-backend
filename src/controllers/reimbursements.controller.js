@@ -2,13 +2,43 @@ const db = require('../config/db');
 const { uploadToCloudinary } = require('../config/cloudinary');
 
 /**
+ * Helper: returns true if the user is an admin OR has been granted
+ * "All" submenu access on the reimbursements page (can_access >= 2).
+ * Checks user-level overrides first, then role-level baseline.
+ */
+async function hasReimbursementsAllAccess(user) {
+  if (user.is_admin) return true;
+  try {
+    // 1. User-level override wins
+    const [userOverride] = await db.query(
+      'SELECT can_access FROM user_submenu_permissions WHERE user_id = ? AND module = ? AND submenu = ?',
+      [user.id, 'people_ops', 'reimbursements']
+    );
+    if (userOverride.length > 0) return userOverride[0].can_access >= 2;
+
+    // 2. Role-level baseline
+    const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [user.id]);
+    if (userRole.length > 0 && userRole[0].role_id) {
+      const [rolePerms] = await db.query(
+        'SELECT can_access FROM role_submenu_permissions WHERE role_id = ? AND module = ? AND submenu = ?',
+        [userRole[0].role_id, 'people_ops', 'reimbursements']
+      );
+      if (rolePerms.length > 0) return rolePerms[0].can_access >= 2;
+    }
+  } catch (err) {
+    console.error('hasReimbursementsAllAccess error:', err);
+  }
+  return false;
+}
+
+/**
  * GET /api/reimbursements
- * Admin: all requests; Employee: own requests
+ * Admin / users with "All" submenu access: all requests; Employee: own requests
  */
 exports.list = async (req, res) => {
   try {
     const { status, search } = req.query;
-    const isAdmin = req.user.is_admin;
+    const isAdmin = await hasReimbursementsAllAccess(req.user);
 
     let sql = `
       SELECT r.*,

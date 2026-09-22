@@ -1,14 +1,44 @@
 const db = require('../config/db');
 
 /**
+ * Helper: returns true if the user is an admin OR has been granted
+ * "All" submenu access on the leaves page (can_access >= 2).
+ * Checks user-level overrides first, then role-level baseline.
+ */
+async function hasLeavesAllAccess(user) {
+  if (user.is_admin) return true;
+  try {
+    // 1. User-level override wins
+    const [userOverride] = await db.query(
+      'SELECT can_access FROM user_submenu_permissions WHERE user_id = ? AND module = ? AND submenu = ?',
+      [user.id, 'people_ops', 'leaves']
+    );
+    if (userOverride.length > 0) return userOverride[0].can_access >= 2;
+
+    // 2. Role-level baseline
+    const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [user.id]);
+    if (userRole.length > 0 && userRole[0].role_id) {
+      const [rolePerms] = await db.query(
+        'SELECT can_access FROM role_submenu_permissions WHERE role_id = ? AND module = ? AND submenu = ?',
+        [userRole[0].role_id, 'people_ops', 'leaves']
+      );
+      if (rolePerms.length > 0) return rolePerms[0].can_access >= 2;
+    }
+  } catch (err) {
+    console.error('hasLeavesAllAccess error:', err);
+  }
+  return false;
+}
+
+/**
  * GET /api/leaves
- * Admin: get all leave requests with filters
+ * Admin / users with "All" submenu access: get all leave requests with filters
  * Employee: get own leave requests
  */
 exports.list = async (req, res) => {
   try {
     const { status, search } = req.query;
-    const isAdmin = req.user.is_admin;
+    const isAdmin = await hasLeavesAllAccess(req.user);
 
     let sql = `
       SELECT l.*, 
