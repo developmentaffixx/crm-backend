@@ -27,8 +27,8 @@ exports.getUnifiedNotifications = async (req, res) => {
       let userFilter = '';
       const params = [];
       if (!isAdmin) {
-        userFilter = 'AND (l.assigned_to = ? OR l.created_by = ?)';
-        params.push(userId, userId);
+        userFilter = 'AND (l.assigned_to = ? OR l.created_by = ? OR f.created_by = ?)';
+        params.push(userId, userId, userId);
       }
 
       const [rows] = await db.query(
@@ -38,26 +38,46 @@ exports.getUnifiedNotifications = async (req, res) => {
          FROM lead_follow_ups f
          JOIN leads l ON l.id = f.lead_id AND l.deleted = 0
          WHERE f.follow_up_date IS NOT NULL
-           AND DATE(f.follow_up_date) <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+           AND (l.lead_stage NOT IN ('Won', 'Lost') OR l.lead_stage IS NULL)
+           AND (l.status NOT IN ('Won', 'Lost') OR l.status IS NULL)
+           AND NOT EXISTS (
+             SELECT 1 FROM lead_follow_ups f2
+             WHERE f2.lead_id = f.lead_id
+               AND (f2.created_at > f.created_at OR (f2.created_at = f.created_at AND f2.id > f.id))
+           )
+           AND DATE(f.follow_up_date) <= DATE_ADD(CURDATE(), INTERVAL 7 DAY)
            AND DATE(f.follow_up_date) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
            ${userFilter}
-         ORDER BY f.follow_up_date ASC
-         LIMIT 15`,
+         ORDER BY 
+           CASE 
+             WHEN DATEDIFF(CURDATE(), DATE(f.follow_up_date)) = 0 THEN 1
+             WHEN DATEDIFF(CURDATE(), DATE(f.follow_up_date)) > 0 THEN 2
+             ELSE 3
+           END,
+           f.follow_up_date ASC
+         LIMIT 30`,
         params
       );
 
       rows.forEach(r => {
         const isOverdue = r.days_overdue > 0;
         const isDueToday = r.days_overdue === 0;
+        const isDueTomorrow = r.days_overdue === -1;
+        const message = isOverdue
+          ? `Overdue by ${r.days_overdue} day${r.days_overdue > 1 ? 's' : ''}`
+          : isDueToday
+          ? 'Due today'
+          : isDueTomorrow
+          ? 'Due tomorrow'
+          : `Due in ${Math.abs(r.days_overdue)} days`;
+
         notifications.push({
           id: `lead-${r.id}`,
           category: 'lead_followup',
           priority: isOverdue ? 'high' : isDueToday ? 'medium' : 'low',
           title: r.lead_name,
           subtitle: `${r.type}: ${r.note || ''}`.trim(),
-          message: isOverdue
-            ? `Overdue by ${r.days_overdue} day${r.days_overdue > 1 ? 's' : ''}`
-            : isDueToday ? 'Due today' : 'Due tomorrow',
+          message,
           link: `/revenue/leads/${r.lead_id}`,
           date: r.follow_up_date,
           days_overdue: r.days_overdue,

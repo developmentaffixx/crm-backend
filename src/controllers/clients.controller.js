@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const path = require('path');
 const fs = require('fs');
+const { getUserModulePermission } = require('../middleware/auth');
 
 /**
  * GET /api/clients
@@ -20,22 +21,11 @@ exports.list = async (req, res) => {
 
     // Non-admin: check permission scope
     if (!req.user.is_admin) {
-      let canView = 0;
-      const [userOverride] = await db.query(
-        'SELECT can_view FROM user_permissions WHERE user_id = ? AND module = ?',
-        [req.user.id, 'clients']
-      );
-      if (userOverride.length > 0) {
-        canView = userOverride[0].can_view;
-      } else {
-        const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
-        if (userRole.length > 0 && userRole[0].role_id) {
-          const [rolePerms] = await db.query(
-            'SELECT can_view FROM role_permissions WHERE role_id = ? AND module = ?',
-            [userRole[0].role_id, 'clients']
-          );
-          if (rolePerms.length > 0) canView = rolePerms[0].can_view;
-        }
+      const perms = await getUserModulePermission(req.user.id, 'clients');
+      const canView = perms.can_view ?? 0;
+
+      if (canView === 0) {
+        return res.json({ clients: [], total: 0 });
       }
 
       if (canView < 2) {
@@ -110,8 +100,17 @@ exports.getOne = async (req, res) => {
     const client = rows[0];
 
     // Non-admin access check
-    if (!req.user.is_admin && client.assigned_to !== req.user.id && client.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+    if (!req.user.is_admin) {
+      const perms = await getUserModulePermission(req.user.id, 'clients');
+      const canView = perms.can_view ?? 0;
+
+      if (canView === 0) {
+        return res.status(403).json({ message: 'Access denied' });
+      }
+
+      if (canView < 2 && client.assigned_to !== req.user.id && client.created_by !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied' });
+      }
     }
 
     // Fetch social links

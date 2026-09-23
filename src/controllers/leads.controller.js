@@ -692,10 +692,10 @@ exports.getFollowUpReminders = async (req, res) => {
     let userFilter = '';
     const params = [];
 
-    // Non-admin: only see reminders for leads assigned to or created by them
+    // Non-admin: only see reminders for leads assigned to, created by, or follow-ups created by them
     if (!req.user.is_admin) {
-      userFilter = 'AND (l.assigned_to = ? OR l.created_by = ?)';
-      params.push(req.user.id, req.user.id);
+      userFilter = 'AND (l.assigned_to = ? OR l.created_by = ? OR f.created_by = ?)';
+      params.push(req.user.id, req.user.id, req.user.id);
     }
 
     const [reminders] = await db.query(
@@ -707,11 +707,24 @@ exports.getFollowUpReminders = async (req, res) => {
        JOIN leads l ON l.id = f.lead_id AND l.deleted = 0
        LEFT JOIN users u ON u.id = f.created_by
        WHERE f.follow_up_date IS NOT NULL
-         AND DATE(f.follow_up_date) <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+         AND (l.lead_stage NOT IN ('Won', 'Lost') OR l.lead_stage IS NULL)
+         AND (l.status NOT IN ('Won', 'Lost') OR l.status IS NULL)
+         AND NOT EXISTS (
+           SELECT 1 FROM lead_follow_ups f2
+           WHERE f2.lead_id = f.lead_id
+             AND (f2.created_at > f.created_at OR (f2.created_at = f.created_at AND f2.id > f.id))
+         )
+         AND DATE(f.follow_up_date) <= DATE_ADD(CURDATE(), INTERVAL 7 DAY)
          AND DATE(f.follow_up_date) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
          ${userFilter}
-       ORDER BY f.follow_up_date ASC
-       LIMIT 20`,
+       ORDER BY 
+         CASE 
+           WHEN DATEDIFF(CURDATE(), DATE(f.follow_up_date)) = 0 THEN 1
+           WHEN DATEDIFF(CURDATE(), DATE(f.follow_up_date)) > 0 THEN 2
+           ELSE 3
+         END,
+         f.follow_up_date ASC
+       LIMIT 30`,
       params
     );
 
