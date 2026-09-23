@@ -35,6 +35,9 @@ router.put('/reject', controller.rejectSlot);
 // PUT  /api/content-calendar-slots/complete     — mark approved slot as completed
 router.put('/complete', controller.completeSlot);
 
+// PUT  /api/content-calendar-slots/footage      — update footage drive location & shoot statement
+router.put('/footage', controller.updateFootageDetails);
+
 // PUT  /api/content-calendar-slots/bulk-approve — bulk approve multiple slots
 router.put('/bulk-approve', controller.bulkApprove);
 

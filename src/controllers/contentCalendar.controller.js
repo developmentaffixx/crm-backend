@@ -713,7 +713,8 @@ exports.calendarView = async (req, res) => {
                 COALESCE(cwr.caption_content, cwr2.caption_content) AS brief_caption,
                 COALESCE(cwr.creative_suggestion, cwr2.creative_suggestion) AS brief_creative,
                 COALESCE(cwr.status, cwr2.status) AS brief_status,
-                CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
+                CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name,
+                CONCAT(fu.first_name, ' ', fu.last_name) AS footage_updated_by_name
          FROM content_calendar_posts cp
          JOIN content_calendar_plans p ON p.id = cp.plan_id
          LEFT JOIN leads l ON l.id = p.client_id
@@ -728,6 +729,7 @@ exports.calendarView = async (req, res) => {
            WHERE cwr_inner.deleted = 0 AND cwr_inner.calendar_slot_id IS NOT NULL
          ) cwr2 ON cwr2.calendar_slot_id = cp.id AND cwr2.rn = 1
          LEFT JOIN users au ON au.id = cp.assigned_to
+         LEFT JOIN users fu ON fu.id = cp.footage_updated_by
          WHERE cp.plan_id IN (?)
          ORDER BY cp.id ASC`,
         [planIds]

@@ -84,7 +84,8 @@ exports.listSlots = async (req, res) => {
       const postSelect = (withWrite) => `SELECT cp.*,
                 CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
                 CONCAT(ab.first_name, ' ', ab.last_name) AS assigned_by_name,
-                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name${withWrite ? `,
+                CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name,
+                CONCAT(fu.first_name, ' ', fu.last_name) AS footage_updated_by_name${withWrite ? `,
                 cwr.hook_opening_line AS brief_hook,
                 cwr.core_message AS brief_core_message,
                 cwr.call_to_action AS brief_cta,
@@ -96,7 +97,8 @@ exports.listSlots = async (req, res) => {
          FROM content_calendar_posts cp
          LEFT JOIN users u ON u.id = cp.assigned_to
          LEFT JOIN users ab ON ab.id = cp.assigned_by
-         LEFT JOIN users au ON au.id = cp.approved_by${withWrite ? `
+         LEFT JOIN users au ON au.id = cp.approved_by
+         LEFT JOIN users fu ON fu.id = cp.footage_updated_by${withWrite ? `
          LEFT JOIN content_write_requests cwr
            ON (cwr.calendar_slot_id = cp.id OR cwr.id = cp.linked_brief_id)
            AND cwr.deleted = 0
@@ -119,6 +121,7 @@ exports.listSlots = async (req, res) => {
                 CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
                 CONCAT(ab.first_name, ' ', ab.last_name) AS assigned_by_name,
                 CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name,
+                CONCAT(fu.first_name, ' ', fu.last_name) AS footage_updated_by_name,
                 cwr.hook_opening_line AS brief_hook,
                 cwr.core_message AS brief_core_message,
                 cwr.call_to_action AS brief_cta,
@@ -1158,5 +1161,81 @@ exports.clientViewCalendar = async (req, res) => {
   } catch (err) {
     console.error('clientViewCalendar error:', err);
     return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── HELPER: Ensure Footage Columns Exist ────────────────────────────────────
+let footageColumnsChecked = false;
+async function ensureFootageColumns() {
+  if (footageColumnsChecked) return;
+  try {
+    await db.query(`
+      ALTER TABLE content_calendar_posts
+        ADD COLUMN footage_drive_link TEXT DEFAULT NULL,
+        ADD COLUMN shoot_statement TEXT DEFAULT NULL,
+        ADD COLUMN footage_updated_by INT UNSIGNED DEFAULT NULL,
+        ADD COLUMN footage_updated_at DATETIME DEFAULT NULL
+    `);
+    footageColumnsChecked = true;
+  } catch (e) {
+    if (e.errno === 1060 || e.code === 'ER_DUP_FIELDNAME') {
+      footageColumnsChecked = true;
+    } else {
+      console.warn('ensureFootageColumns check warning:', e.message);
+    }
+  }
+}
+// Run once on module load
+ensureFootageColumns().catch(() => {});
+
+// ─── UPDATE FOOTAGE DETAILS (Drive Link & Shoot Statement) ───────────────────
+// Called by Shoot Manager / Videographer / Admin to set where the footage is stored
+exports.updateFootageDetails = async (req, res) => {
+  try {
+    await ensureFootageColumns();
+    const { slot_id, footage_drive_link, shoot_statement } = req.body;
+    const userId = req.user.id;
+
+    if (!slot_id) {
+      return res.status(400).json({ message: 'slot_id is required' });
+    }
+
+    const [rows] = await db.query('SELECT * FROM content_calendar_posts WHERE id = ?', [slot_id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Post slot not found' });
+    }
+
+    await db.query(
+      `UPDATE content_calendar_posts 
+       SET footage_drive_link = ?, shoot_statement = ?, footage_updated_by = ?, footage_updated_at = NOW()
+       WHERE id = ?`,
+      [footage_drive_link || null, shoot_statement || null, userId, slot_id]
+    );
+
+    // Get the updater's name
+    const [updater] = await db.query('SELECT CONCAT(first_name, " ", last_name) AS name FROM users WHERE id = ?', [userId]);
+    const updaterName = updater[0]?.name || req.user.first_name || 'Team Member';
+
+    res.emitSocket('content-calendar:footage-updated', {
+      slot_id,
+      footage_drive_link: footage_drive_link || null,
+      shoot_statement: shoot_statement || null,
+      footage_updated_by: userId,
+      footage_updated_by_name: updaterName,
+      footage_updated_at: new Date(),
+    });
+
+    return res.json({
+      message: 'Footage location and shoot statement saved successfully',
+      slot_id,
+      footage_drive_link: footage_drive_link || null,
+      shoot_statement: shoot_statement || null,
+      footage_updated_by: userId,
+      footage_updated_by_name: updaterName,
+      footage_updated_at: new Date(),
+    });
+  } catch (err) {
+    console.error('Update footage details error:', err);
+    return res.status(500).json({ message: 'Server error: ' + err.message });
   }
 };

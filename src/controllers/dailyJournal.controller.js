@@ -142,6 +142,14 @@ exports.create = async (req, res) => {
       return res.status(400).json({ message: 'Project and date are required' });
     }
 
+    // Disallow past dates for daily journal entries (non-admins)
+    if (!req.user.is_admin) {
+      const [dateCheck] = await db.query('SELECT ? < CURDATE() AS is_past', [journal_date]);
+      if (dateCheck[0]?.is_past) {
+        return res.status(400).json({ message: 'Cannot submit a Daily Update for past dates.' });
+      }
+    }
+
     // Check project exists
     const [project] = await db.query(
       'SELECT id FROM projects WHERE id = ? AND deleted = 0',
