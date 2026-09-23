@@ -18,6 +18,9 @@ router.get('/', expensesController.list);
 // GET  /api/expenses/custom-categories — get unique custom categories
 router.get('/custom-categories', expensesController.getCustomCategories);
 
+// GET  /api/expenses/vendors — get unique vendors and frequency stats
+router.get('/vendors', expensesController.getVendors);
+
 // GET  /api/expenses/:id/download — proxy download bill copy
 router.get('/:id/download', param('id').isInt(), expensesController.downloadBill);
 

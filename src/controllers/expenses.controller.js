@@ -249,6 +249,25 @@ exports.getCustomCategories = async (req, res) => {
   }
 };
 
+// ─── GET /api/expenses/vendors ────────────────────────────────────────────────
+exports.getVendors = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT vendor_name, COUNT(*) as usage_count,
+              MAX(category) as last_category,
+              MAX(payment_mode) as last_payment_mode
+       FROM expenses
+       WHERE vendor_name IS NOT NULL AND vendor_name != '' AND deleted = 0
+       GROUP BY vendor_name
+       ORDER BY usage_count DESC, vendor_name ASC`
+    );
+    return res.json({ vendors: rows });
+  } catch (err) {
+    console.error('Expenses vendors error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── GET /api/expenses/:id/download — proxy download bill ─────────────────────
 exports.downloadBill = async (req, res) => {
   try {
