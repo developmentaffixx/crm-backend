@@ -74,8 +74,8 @@ router.post('/:id/reject', param('id').isInt(), requireAdminOrTaskApprove, tasks
 // POST /api/tasks/:id/resubmit   — creator resubmits rejected task (4→0)
 router.post('/:id/resubmit', param('id').isInt(), tasksController.resubmit);
 
-// POST /api/tasks/:id/reopen     — admin reopens a fully closed task (3→1)
-router.post('/:id/reopen', param('id').isInt(), requireAdmin, tasksController.reopen);
+// POST /api/tasks/:id/reopen     — admin or task approver reopens a fully closed task (3→1)
+router.post('/:id/reopen', param('id').isInt(), requireAdminOrTaskApprove, tasksController.reopen);
 
 
 // GET  /api/tasks/:id/activity   — get activity log for a task
