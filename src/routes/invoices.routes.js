@@ -18,6 +18,9 @@ router.get('/preview-number', invoicesController.previewNumber);
 // GET  /api/invoices/expected-cost — total expected cost from active client plans
 router.get('/expected-cost', invoicesController.getExpectedCost);
 
+// GET  /api/invoices/payments — list all payments across invoices (for Income page)
+router.get('/payments', invoicesController.getAllPayments);
+
 // GET  /api/invoices — list all invoices
 router.get('/', invoicesController.list);
 

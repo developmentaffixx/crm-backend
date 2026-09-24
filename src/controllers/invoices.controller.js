@@ -387,6 +387,131 @@ exports.recordPayment = async (req, res) => {
   }
 };
 
+// ─── GET /api/invoices/payments — Payment history across all invoices (for Income page) ──
+exports.getAllPayments = async (req, res) => {
+  try {
+    const { from, to, search, payment_method, status } = req.query;
+
+    let paymentsWhere = 'i.deleted = 0';
+    const params = [];
+
+    if (from) {
+      paymentsWhere += ' AND p.payment_date >= ?';
+      params.push(from);
+    }
+    if (to) {
+      paymentsWhere += ' AND p.payment_date <= ?';
+      params.push(to);
+    }
+    if (payment_method && payment_method !== 'all') {
+      paymentsWhere += ' AND p.payment_method = ?';
+      params.push(payment_method);
+    }
+    if (status && status !== 'all') {
+      paymentsWhere += ' AND i.status = ?';
+      params.push(status);
+    }
+    if (search) {
+      paymentsWhere += ' AND (i.invoice_number LIKE ? OR l.name LIKE ? OR l.business_name LIKE ? OR p.reference_id LIKE ?)';
+      const s = `%${search}%`;
+      params.push(s, s, s, s);
+    }
+
+    const [paymentRows] = await db.query(
+      `SELECT p.id,
+              p.invoice_id,
+              p.payment_date,
+              p.payment_method,
+              p.amount,
+              p.reference_id,
+              p.created_at,
+              i.invoice_number,
+              i.bill_date,
+              i.due_date,
+              i.total_amount,
+              i.paid_amount AS invoice_total_paid,
+              i.balance_amount,
+              i.status AS invoice_status,
+              l.name AS lead_name,
+              l.business_name AS lead_business,
+              CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+       FROM invoice_payments p
+       JOIN invoices i ON i.id = p.invoice_id
+       LEFT JOIN leads l ON l.id = i.lead_id
+       LEFT JOIN users u ON u.id = p.created_by
+       WHERE ${paymentsWhere}
+       ORDER BY p.payment_date DESC, p.id DESC`,
+      params
+    );
+
+    // Legacy fallback: Invoices with paid_amount > 0 but NO rows in invoice_payments
+    let legacyWhere = 'i.deleted = 0 AND i.paid_amount > 0 AND NOT EXISTS (SELECT 1 FROM invoice_payments ip WHERE ip.invoice_id = i.id)';
+    const legacyParams = [];
+
+    if (from) {
+      legacyWhere += ' AND i.bill_date >= ?';
+      legacyParams.push(from);
+    }
+    if (to) {
+      legacyWhere += ' AND i.bill_date <= ?';
+      legacyParams.push(to);
+    }
+    if (payment_method && payment_method !== 'all') {
+      if (payment_method !== 'Bank') {
+        legacyWhere += ' AND 1=0';
+      }
+    }
+    if (status && status !== 'all') {
+      legacyWhere += ' AND i.status = ?';
+      legacyParams.push(status);
+    }
+    if (search) {
+      legacyWhere += ' AND (i.invoice_number LIKE ? OR l.name LIKE ? OR l.business_name LIKE ?)';
+      const s = `%${search}%`;
+      legacyParams.push(s, s, s);
+    }
+
+    const [legacyRows] = await db.query(
+      `SELECT CONCAT('legacy-', i.id) AS id,
+              i.id AS invoice_id,
+              i.bill_date AS payment_date,
+              'Bank' AS payment_method,
+              i.paid_amount AS amount,
+              NULL AS reference_id,
+              i.created_at,
+              i.invoice_number,
+              i.bill_date,
+              i.due_date,
+              i.total_amount,
+              i.paid_amount AS invoice_total_paid,
+              i.balance_amount,
+              i.status AS invoice_status,
+              l.name AS lead_name,
+              l.business_name AS lead_business,
+              CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+       FROM invoices i
+       LEFT JOIN leads l ON l.id = i.lead_id
+       LEFT JOIN users u ON u.id = i.created_by
+       WHERE ${legacyWhere}
+       ORDER BY i.bill_date DESC`,
+      legacyParams
+    );
+
+    const allPayments = [...paymentRows, ...legacyRows].sort((a, b) => {
+      const dateA = new Date(a.payment_date || a.created_at);
+      const dateB = new Date(b.payment_date || b.created_at);
+      return dateB - dateA;
+    });
+
+    const totalIncome = allPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+
+    return res.json({ payments: allPayments, totalIncome });
+  } catch (err) {
+    console.error('All payments list error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── GET /api/invoices/:id/payments — Payment history ─────────────────────────
 exports.getPayments = async (req, res) => {
   try {
