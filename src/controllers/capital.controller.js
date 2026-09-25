@@ -247,13 +247,25 @@ exports.totals = async (req, res) => {
       `SELECT COALESCE(SUM(amount), 0) AS total_withdrawals FROM withdrawals WHERE deleted = 0`
     );
 
+    let total_loans = 0;
+    try {
+      const [loanRows] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total_loans FROM loans WHERE deleted = 0`);
+      total_loans = parseFloat(loanRows[0].total_loans || 0);
+    } catch (_) {}
+
+    let total_other_credits = 0;
+    try {
+      const [creditRows] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total_credits FROM other_credits WHERE deleted = 0`);
+      total_other_credits = parseFloat(creditRows[0].total_credits || 0);
+    } catch (_) {}
+
     const total_capital = parseFloat(capitalRows[0].total_capital);
     const total_expenses = parseFloat(expenseRows[0].total_expenses);
     const total_income = parseFloat(incomeRows[0].total_income);
     const total_withdrawals = parseFloat(withdrawalRows[0].total_withdrawals);
-    const net_balance = (total_capital + total_income) - (total_expenses + total_withdrawals);
+    const net_balance = (total_capital + total_income + total_loans + total_other_credits) - (total_expenses + total_withdrawals);
 
-    return res.json({ total_capital, total_income, total_expenses, total_withdrawals, net_balance });
+    return res.json({ total_capital, total_income, total_loans, total_other_credits, total_expenses, total_withdrawals, net_balance });
   } catch (err) {
     console.error('Capital totals error:', err);
     return res.status(500).json({ message: 'Server error' });
