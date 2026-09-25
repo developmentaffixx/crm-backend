@@ -1,17 +1,60 @@
 const db = require('../config/db');
 
+let schemaChecked = false;
+async function ensureSchema() {
+  if (schemaChecked) return;
+  try {
+    await db.query(`ALTER TABLE capital MODIFY COLUMN source VARCHAR(100) NOT NULL DEFAULT 'Founder'`);
+    schemaChecked = true;
+  } catch (err) {
+    schemaChecked = true;
+  }
+}
+
 // ─── GET /api/capital ─────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
-    const { source, search } = req.query;
+    await ensureSchema();
+    const { source, not_source, search, from, to, payment_mode } = req.query;
     let where = 'c.deleted = 0';
     const params = [];
 
-    if (source) { where += ' AND c.source = ?'; params.push(source); }
+    if (source) {
+      if (source.includes(',')) {
+        const sources = source.split(',').map(s => s.trim()).filter(Boolean);
+        where += ` AND c.source IN (${sources.map(() => '?').join(',')})`;
+        params.push(...sources);
+      } else {
+        where += ' AND c.source = ?';
+        params.push(source);
+      }
+    }
+    if (not_source) {
+      if (not_source.includes(',')) {
+        const notSources = not_source.split(',').map(s => s.trim()).filter(Boolean);
+        where += ` AND c.source NOT IN (${notSources.map(() => '?').join(',')})`;
+        params.push(...notSources);
+      } else {
+        where += ' AND c.source != ?';
+        params.push(not_source);
+      }
+    }
+    if (from) {
+      where += ' AND c.capital_date >= ?';
+      params.push(from);
+    }
+    if (to) {
+      where += ' AND c.capital_date <= ?';
+      params.push(to);
+    }
+    if (payment_mode && payment_mode !== 'all') {
+      where += ' AND c.payment_mode = ?';
+      params.push(payment_mode);
+    }
     if (search) {
-      where += ' AND (c.title LIKE ? OR c.note LIKE ?)';
+      where += ' AND (c.title LIKE ? OR c.note LIKE ? OR c.source LIKE ?)';
       const s = `%${search}%`;
-      params.push(s, s);
+      params.push(s, s, s);
     }
 
     const [rows] = await db.query(

@@ -3,15 +3,27 @@ const db = require('../config/db');
 // ─── GET /api/withdrawals ─────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
-    const { recipient, search } = req.query;
+    const { recipient, search, from, to, payment_mode } = req.query;
     let where = 'w.deleted = 0';
     const params = [];
 
     if (recipient) { where += ' AND w.recipient = ?'; params.push(recipient); }
+    if (from) {
+      where += ' AND w.withdrawal_date >= ?';
+      params.push(from);
+    }
+    if (to) {
+      where += ' AND w.withdrawal_date <= ?';
+      params.push(to);
+    }
+    if (payment_mode && payment_mode !== 'all') {
+      where += ' AND w.payment_mode = ?';
+      params.push(payment_mode);
+    }
     if (search) {
-      where += ' AND (w.title LIKE ? OR w.note LIKE ?)';
+      where += ' AND (w.title LIKE ? OR w.note LIKE ? OR w.recipient LIKE ?)';
       const s = `%${search}%`;
-      params.push(s, s);
+      params.push(s, s, s);
     }
 
     const [rows] = await db.query(
