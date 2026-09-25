@@ -100,26 +100,51 @@ exports.getOne = async (req, res) => {
 // ─── POST /api/capital ────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
   try {
-    const { title, amount, capital_date, source, payment_mode, transaction_id, note } = req.body;
+    await ensureSchema();
+    let { title, amount, capital_date, source, payment_mode, transaction_id, note } = req.body;
 
     if (!title || !amount) {
       return res.status(400).json({ message: 'Title and amount are required' });
     }
 
-    const [result] = await db.query(
-      `INSERT INTO capital (title, amount, capital_date, source, payment_mode, transaction_id, note, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        title,
-        parseFloat(amount),
-        capital_date || new Date().toISOString().split('T')[0],
-        source || 'Founder',
-        payment_mode || 'Bank',
-        transaction_id || null,
-        note || null,
-        req.user.id
-      ]
-    );
+    let insertSource = source || 'Founder';
+    let result;
+    try {
+      [result] = await db.query(
+        `INSERT INTO capital (title, amount, capital_date, source, payment_mode, transaction_id, note, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          title,
+          parseFloat(amount),
+          capital_date || new Date().toISOString().split('T')[0],
+          insertSource,
+          payment_mode || 'Bank',
+          transaction_id || null,
+          note || null,
+          req.user.id
+        ]
+      );
+    } catch (insertErr) {
+      // Fallback if source column is restricted ENUM
+      if (insertSource === 'Other Credits') {
+        [result] = await db.query(
+          `INSERT INTO capital (title, amount, capital_date, source, payment_mode, transaction_id, note, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            title,
+            parseFloat(amount),
+            capital_date || new Date().toISOString().split('T')[0],
+            'Other',
+            payment_mode || 'Bank',
+            transaction_id || null,
+            note ? `[Other Credits] ${note}` : '[Other Credits]',
+            req.user.id
+          ]
+        );
+      } else {
+        throw insertErr;
+      }
+    }
 
     const [created] = await db.query(
       `SELECT c.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
@@ -136,26 +161,49 @@ exports.create = async (req, res) => {
 // ─── PUT /api/capital/:id ─────────────────────────────────────────────────────
 exports.update = async (req, res) => {
   try {
+    await ensureSchema();
     const [rows] = await db.query('SELECT * FROM capital WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Capital entry not found' });
 
     const existing = rows[0];
     const { title, amount, capital_date, source, payment_mode, transaction_id, note } = req.body;
 
-    await db.query(
-      `UPDATE capital SET title = ?, amount = ?, capital_date = ?, source = ?, payment_mode = ?, transaction_id = ?, note = ?
-       WHERE id = ?`,
-      [
-        title !== undefined ? title : existing.title,
-        amount !== undefined ? parseFloat(amount) : existing.amount,
-        capital_date || existing.capital_date,
-        source || existing.source,
-        payment_mode || existing.payment_mode,
-        transaction_id !== undefined ? transaction_id : existing.transaction_id,
-        note !== undefined ? note : existing.note,
-        req.params.id
-      ]
-    );
+    let updateSource = source || existing.source;
+    try {
+      await db.query(
+        `UPDATE capital SET title = ?, amount = ?, capital_date = ?, source = ?, payment_mode = ?, transaction_id = ?, note = ?
+         WHERE id = ?`,
+        [
+          title !== undefined ? title : existing.title,
+          amount !== undefined ? parseFloat(amount) : existing.amount,
+          capital_date || existing.capital_date,
+          updateSource,
+          payment_mode || existing.payment_mode,
+          transaction_id !== undefined ? transaction_id : existing.transaction_id,
+          note !== undefined ? note : existing.note,
+          req.params.id
+        ]
+      );
+    } catch (updateErr) {
+      if (updateSource === 'Other Credits') {
+        await db.query(
+          `UPDATE capital SET title = ?, amount = ?, capital_date = ?, source = ?, payment_mode = ?, transaction_id = ?, note = ?
+           WHERE id = ?`,
+          [
+            title !== undefined ? title : existing.title,
+            amount !== undefined ? parseFloat(amount) : existing.amount,
+            capital_date || existing.capital_date,
+            'Other',
+            payment_mode || existing.payment_mode,
+            transaction_id !== undefined ? transaction_id : existing.transaction_id,
+            note !== undefined ? note : existing.note,
+            req.params.id
+          ]
+        );
+      } else {
+        throw updateErr;
+      }
+    }
 
     const [updated] = await db.query(
       `SELECT c.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
