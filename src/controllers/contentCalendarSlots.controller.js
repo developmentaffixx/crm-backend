@@ -91,6 +91,7 @@ exports.listSlots = async (req, res) => {
                 cwr.call_to_action AS brief_cta,
                 cwr.caption_content AS brief_caption,
                 cwr.creative_suggestion AS brief_creative,
+                cwr.reference_links AS brief_reference_links,
                 cwr.caption_content AS write_caption_content,
                 cwr.reference_links AS write_reference_links,
                 cwr.content_id_code AS write_content_id_code` : ''}
@@ -127,6 +128,7 @@ exports.listSlots = async (req, res) => {
                 cwr.call_to_action AS brief_cta,
                 cwr.caption_content AS brief_caption,
                 cwr.creative_suggestion AS brief_creative,
+                cwr.reference_links AS brief_reference_links,
                 cwr.caption_content AS write_caption_content,
                 cwr.reference_links AS write_reference_links,
                 cwr.content_id_code AS write_content_id_code
@@ -144,7 +146,7 @@ exports.listSlots = async (req, res) => {
           const seen = new Map();
           simpleRows.forEach(r => {
             const existing = seen.get(r.id);
-            if (!existing || r.brief_hook || r.brief_caption || r.brief_creative) {
+            if (!existing || r.brief_hook || r.brief_caption || r.brief_creative || r.brief_reference_links || r.write_reference_links) {
               seen.set(r.id, r);
             }
           });

@@ -150,11 +150,19 @@ exports.getOne = async (req, res) => {
     // Fetch children
     const [posts] = await db.query(
       `SELECT cp.*,
-              cwr.hook_opening_line AS brief_hook, cwr.content_id_code AS brief_code,
-              cwr.content_type AS brief_content_type, cwr.platform AS brief_platform,
-              cwr.call_to_action AS brief_cta
+              COALESCE(cwr.hook_opening_line, cwr2.hook_opening_line) AS brief_hook,
+              COALESCE(cwr.content_id_code, cwr2.content_id_code) AS brief_code,
+              COALESCE(cwr.content_type, cwr2.content_type) AS brief_content_type,
+              COALESCE(cwr.platform, cwr2.platform) AS brief_platform,
+              COALESCE(cwr.core_message, cwr2.core_message) AS brief_core_message,
+              COALESCE(cwr.call_to_action, cwr2.call_to_action) AS brief_cta,
+              COALESCE(cwr.caption_content, cwr2.caption_content) AS brief_caption,
+              COALESCE(cwr.creative_suggestion, cwr2.creative_suggestion) AS brief_creative,
+              COALESCE(cwr.reference_links, cwr2.reference_links) AS brief_reference_links,
+              COALESCE(cwr.status, cwr2.status) AS brief_status
        FROM content_calendar_posts cp
-       LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id
+       LEFT JOIN content_write_requests cwr ON cwr.id = cp.linked_brief_id AND cwr.deleted = 0
+       LEFT JOIN content_write_requests cwr2 ON cwr2.calendar_slot_id = cp.id AND cwr2.deleted = 0
        WHERE cp.plan_id = ?
        ORDER BY cp.id ASC`,
       [plan.id]
@@ -712,6 +720,7 @@ exports.calendarView = async (req, res) => {
                 COALESCE(cwr.call_to_action, cwr2.call_to_action, cp.cta) AS brief_cta,
                 COALESCE(cwr.caption_content, cwr2.caption_content) AS brief_caption,
                 COALESCE(cwr.creative_suggestion, cwr2.creative_suggestion) AS brief_creative,
+                COALESCE(cwr.reference_links, cwr2.reference_links) AS brief_reference_links,
                 COALESCE(cwr.status, cwr2.status) AS brief_status,
                 CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name,
                 CONCAT(fu.first_name, ' ', fu.last_name) AS footage_updated_by_name
@@ -749,6 +758,7 @@ exports.calendarView = async (req, res) => {
                   COALESCE(cwr.call_to_action, cwr2.call_to_action, cp.cta) AS brief_cta,
                   COALESCE(cwr.caption_content, cwr2.caption_content) AS brief_caption,
                   COALESCE(cwr.creative_suggestion, cwr2.creative_suggestion) AS brief_creative,
+                  COALESCE(cwr.reference_links, cwr2.reference_links) AS brief_reference_links,
                   COALESCE(cwr.status, cwr2.status) AS brief_status,
                   CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
            FROM content_calendar_posts cp
@@ -765,7 +775,7 @@ exports.calendarView = async (req, res) => {
         const seen = new Map();
         rows.forEach(r => {
           const existing = seen.get(r.id);
-          if (!existing || r.brief_hook || r.brief_caption || r.brief_creative) {
+          if (!existing || r.brief_hook || r.brief_caption || r.brief_creative || r.brief_reference_links) {
             seen.set(r.id, r);
           }
         });
@@ -785,6 +795,7 @@ exports.calendarView = async (req, res) => {
                     COALESCE(cwr.call_to_action, cp.cta) AS brief_cta,
                     cwr.caption_content AS brief_caption,
                     cwr.creative_suggestion AS brief_creative,
+                    cwr.reference_links AS brief_reference_links,
                     cwr.status AS brief_status
              FROM content_calendar_posts cp
              JOIN content_calendar_plans p ON p.id = cp.plan_id

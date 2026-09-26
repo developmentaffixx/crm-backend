@@ -6,13 +6,14 @@ const db = require('../config/db');
  */
 exports.list = async (req, res) => {
   try {
-    const { status, service_type, content_type, search } = req.query;
+    const { status, service_type, content_type, search, project_id, cycle_id } = req.query;
     let where = 'cwr.deleted = 0';
     const params = [];
 
     if (status) { where += ' AND cwr.status = ?'; params.push(status); }
     if (service_type) { where += ' AND cwr.service_type = ?'; params.push(service_type); }
     if (content_type) { where += ' AND cwr.content_type = ?'; params.push(content_type); }
+    if (project_id) { where += ' AND cwr.project_id = ?'; params.push(project_id); }
     if (search) {
       where += ' AND (cwr.hook_opening_line LIKE ? OR cwr.core_message LIKE ? OR l.business_name LIKE ?)';
       const s = `%${search}%`;
@@ -29,13 +30,64 @@ exports.list = async (req, res) => {
       }
     }
 
+    // Fetch cycle info if cycle_id is provided
+    let cycleDateFilter = null;
+    if (cycle_id) {
+      try {
+        const [cycleRows] = await db.query(
+          'SELECT id, start_date, end_date FROM service_cycles WHERE id = ?',
+          [cycle_id]
+        );
+        if (cycleRows.length > 0) {
+          cycleDateFilter = cycleRows[0];
+        }
+      } catch (cErr) {
+        console.warn('Cycle lookup warning:', cErr.message);
+      }
+    }
+
     // Build the query. `cwr.posting_date` may not exist yet if the migration
     // hasn't run — fall back to slot-only posting date in that case.
     const buildListQuery = (hasPostingDate) => {
       const postingExpr = hasPostingDate
         ? 'COALESCE(cwr.posting_date, ccp.posting_date)'
         : 'ccp.posting_date';
-      return `SELECT cwr.*,
+
+      let queryWhere = where;
+      const queryParams = [...params];
+
+      if (cycle_id) {
+        const startDateStr = cycleDateFilter?.start_date
+          ? new Date(cycleDateFilter.start_date).toISOString().split('T')[0]
+          : null;
+        const endDateStr = cycleDateFilter?.end_date
+          ? new Date(cycleDateFilter.end_date).toISOString().split('T')[0]
+          : null;
+
+        if (startDateStr && endDateStr) {
+          queryWhere += ` AND (
+            EXISTS (
+              SELECT 1 FROM content_calendar_posts ccp2
+              JOIN content_calendar_plans p2 ON p2.id = ccp2.plan_id
+              WHERE (ccp2.id = cwr.calendar_slot_id OR ccp2.linked_brief_id = cwr.id)
+                AND p2.cycle_id = ?
+            )
+            OR (${postingExpr} BETWEEN ? AND ?)
+            OR (cwr.deadline BETWEEN ? AND ?)
+          )`;
+          queryParams.push(cycle_id, startDateStr, endDateStr, startDateStr, endDateStr);
+        } else {
+          queryWhere += ` AND EXISTS (
+            SELECT 1 FROM content_calendar_posts ccp2
+            JOIN content_calendar_plans p2 ON p2.id = ccp2.plan_id
+            WHERE (ccp2.id = cwr.calendar_slot_id OR ccp2.linked_brief_id = cwr.id)
+              AND p2.cycle_id = ?
+          )`;
+          queryParams.push(cycle_id);
+        }
+      }
+
+      const sql = `SELECT cwr.*,
               l.business_name AS client_brand_name,
               p.title AS project_title,
               s.name AS service_name,
@@ -43,7 +95,16 @@ exports.list = async (req, res) => {
               CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name,
               ccp.posting_date AS slot_posting_date,
               ${postingExpr} AS effective_posting_date,
-              COALESCE(cwr.content_type, ccp.format) AS content_type
+              COALESCE(cwr.content_type, ccp.format) AS content_type,
+              COALESCE(
+                (SELECT sc2.title FROM content_calendar_posts ccp3
+                 JOIN content_calendar_plans p3 ON p3.id = ccp3.plan_id
+                 JOIN service_cycles sc2 ON sc2.id = p3.cycle_id
+                 WHERE (ccp3.id = cwr.calendar_slot_id OR ccp3.linked_brief_id = cwr.id) LIMIT 1),
+                (SELECT sc3.title FROM service_cycles sc3
+                 WHERE sc3.project_id = cwr.project_id
+                   AND ${postingExpr} BETWEEN sc3.start_date AND sc3.end_date LIMIT 1)
+              ) AS cycle_title
        FROM content_write_requests cwr
        LEFT JOIN leads l ON l.id = cwr.client_brand_id
        LEFT JOIN projects p ON p.id = cwr.project_id
@@ -51,17 +112,21 @@ exports.list = async (req, res) => {
        LEFT JOIN users u_creator ON u_creator.id = cwr.created_by
        LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
        LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
-       WHERE ${where}
+       WHERE ${queryWhere}
        ORDER BY (${postingExpr} IS NULL) ASC, ${postingExpr} ASC, cwr.created_at ASC`;
+
+      return { sql, params: queryParams };
     };
 
     let rows;
     try {
-      [rows] = await db.query(buildListQuery(true), params);
+      const q = buildListQuery(true);
+      [rows] = await db.query(q.sql, q.params);
     } catch (qErr) {
       const errMsg = String(qErr.message || qErr.sqlMessage || '');
       if (qErr.code === 'ER_BAD_FIELD_ERROR' || qErr.errno === 1054 || errMsg.includes('posting_date')) {
-        [rows] = await db.query(buildListQuery(false), params);
+        const q = buildListQuery(false);
+        [rows] = await db.query(q.sql, q.params);
       } else {
         throw qErr;
       }
