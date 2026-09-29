@@ -592,8 +592,9 @@ exports.approveSlot = async (req, res) => {
   try {
     const { item_type, item_id } = req.body;
 
-    if (!req.user.is_admin && req.socialAccessLevel < 2) {
-      return res.status(403).json({ message: 'Only admin or SMM leads can approve slots' });
+    const canApprove = req.user.is_admin || req.userCanApprove || (req.socialAccessLevel && req.socialAccessLevel >= 2);
+    if (!canApprove) {
+      return res.status(403).json({ message: 'Only admin or authorized leads can approve slots' });
     }
 
     if (!item_type || !item_id) {
@@ -658,8 +659,9 @@ exports.rejectSlot = async (req, res) => {
   try {
     const { item_type, item_id, reason } = req.body;
 
-    if (!req.user.is_admin && req.socialAccessLevel < 2) {
-      return res.status(403).json({ message: 'Only admin or SMM leads can reject slots' });
+    const canReject = req.user.is_admin || req.userCanApprove || (req.socialAccessLevel && req.socialAccessLevel >= 2);
+    if (!canReject) {
+      return res.status(403).json({ message: 'Only admin or authorized leads can reject slots' });
     }
 
     if (!item_type || !item_id) {
@@ -742,9 +744,13 @@ exports.completeSlot = async (req, res) => {
 
     const slot = rows[0];
 
-    // Only admin or SMM lead can mark complete
-    if (!req.user.is_admin && req.socialAccessLevel < 2) {
-      return res.status(403).json({ message: 'Only admin or SMM leads can mark as completed' });
+    // Admin, user with can_complete toggle, SMM lead, or the slot's assignee can mark complete
+    const canComplete = req.user.is_admin || 
+                        req.userCanComplete || 
+                        (req.socialAccessLevel && req.socialAccessLevel >= 2) || 
+                        slot.assigned_to === userId;
+    if (!canComplete) {
+      return res.status(403).json({ message: 'Only admin, assigned user, or authorized leads can mark as completed' });
     }
 
     // Must be approved first
@@ -827,8 +833,9 @@ exports.bulkApprove = async (req, res) => {
   try {
     const { items } = req.body;
 
-    if (!req.user.is_admin && req.socialAccessLevel < 2) {
-      return res.status(403).json({ message: 'Only admin or SMM leads can approve' });
+    const canBulkApprove = req.user.is_admin || req.userCanApprove || (req.socialAccessLevel && req.socialAccessLevel >= 2);
+    if (!canBulkApprove) {
+      return res.status(403).json({ message: 'Only admin or authorized leads can approve' });
     }
 
     if (!items || !Array.isArray(items) || items.length === 0) {

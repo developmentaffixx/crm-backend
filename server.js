@@ -223,7 +223,22 @@ server.listen(PORT, () => {
     .then(() => db.query("UPDATE leads SET status = lead_stage WHERE status != lead_stage AND lead_stage IS NOT NULL AND client_code IS NULL"))
     .then(() => console.log('✅  Lead stages synced'))
     .catch(err => console.error('⚠️  Lead stage sync error (non-fatal):', err.message));
-
+  // ── One-time: Ensure can_complete column and reschedule_history table exist ──
+  db.query("ALTER TABLE role_permissions ADD COLUMN IF NOT EXISTS can_complete TINYINT(1) NOT NULL DEFAULT 0")
+    .catch(err => console.error('⚠️  role_permissions can_complete check error (non-fatal):', err.message));
+  db.query("ALTER TABLE user_permissions ADD COLUMN IF NOT EXISTS can_complete TINYINT(1) NOT NULL DEFAULT 0")
+    .catch(err => console.error('⚠️  user_permissions can_complete check error (non-fatal):', err.message));
+  db.query(`CREATE TABLE IF NOT EXISTS content_calendar_reschedule_history (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    item_type ENUM('post', 'shoot', 'ad') NOT NULL,
+    item_id INT NOT NULL,
+    old_date VARCHAR(50) DEFAULT NULL,
+    new_date VARCHAR(50) DEFAULT NULL,
+    reason TEXT NOT NULL,
+    rescheduled_by INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_item (item_type, item_id)
+  )`).catch(err => console.error('⚠️  content_calendar_reschedule_history table check error (non-fatal):', err.message));
 
   // ── Start Performance Review Cron ──────────────────────────────────────────
   const { startPerformanceCron } = require('./src/jobs/performanceCron');

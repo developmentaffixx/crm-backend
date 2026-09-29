@@ -230,18 +230,33 @@ exports.updateRolePermissions = async (req, res) => {
     // System roles can now be fully customized
 
     for (const perm of permissions) {
-      const { module, can_view = 0, can_create = 0, can_edit = 0, can_delete = 0, can_approve = 0 } = perm;
-      await db.query(
-        `INSERT INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete, can_approve)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-           can_view    = VALUES(can_view),
-           can_create  = VALUES(can_create),
-           can_edit    = VALUES(can_edit),
-           can_delete  = VALUES(can_delete),
-           can_approve = VALUES(can_approve)`,
-        [roleId, module, can_view, can_create, can_edit, can_delete, can_approve]
-      );
+      const { module, can_view = 0, can_create = 0, can_edit = 0, can_delete = 0, can_approve = 0, can_complete = 0 } = perm;
+      try {
+        await db.query(
+          `INSERT INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete, can_approve, can_complete)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             can_view     = VALUES(can_view),
+             can_create   = VALUES(can_create),
+             can_edit     = VALUES(can_edit),
+             can_delete   = VALUES(can_delete),
+             can_approve  = VALUES(can_approve),
+             can_complete = VALUES(can_complete)`,
+          [roleId, module, can_view, can_create, can_edit, can_delete, can_approve, can_complete]
+        );
+      } catch (colErr) {
+        await db.query(
+          `INSERT INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete, can_approve)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+             can_view    = VALUES(can_view),
+             can_create  = VALUES(can_create),
+             can_edit    = VALUES(can_edit),
+             can_delete  = VALUES(can_delete),
+             can_approve = VALUES(can_approve)`,
+          [roleId, module, can_view, can_create, can_edit, can_delete, can_approve]
+        );
+      }
     }
 
     await logAudit(db, req.user.id, 'permissions_updated', 'role', roleId, { permissions }, req.ip);
@@ -436,30 +451,52 @@ exports.getUserPermissionOverrides = async (req, res) => {
     // Role-level module permissions (baseline)
     let rolePermissions = {};
     if (roleId) {
-      const [rp] = await db.query(
-        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM role_permissions WHERE role_id = ?',
-        [roleId]
-      );
+      let rp = [];
+      try {
+        const [rows] = await db.query(
+          'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM role_permissions WHERE role_id = ?',
+          [roleId]
+        );
+        rp = rows;
+      } catch (e) {
+        const [rows] = await db.query(
+          'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM role_permissions WHERE role_id = ?',
+          [roleId]
+        );
+        rp = rows;
+      }
       rp.forEach(p => {
         rolePermissions[p.module] = {
           can_view: p.can_view, can_create: p.can_create,
           can_edit: p.can_edit, can_delete: p.can_delete,
           can_approve: p.can_approve ?? 0,
+          can_complete: p.can_complete ?? 0,
         };
       });
     }
 
     // User module overrides
-    const [up] = await db.query(
-      'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM user_permissions WHERE user_id = ?',
-      [userId]
-    );
+    let up = [];
+    try {
+      const [rows] = await db.query(
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM user_permissions WHERE user_id = ?',
+        [userId]
+      );
+      up = rows;
+    } catch (e) {
+      const [rows] = await db.query(
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM user_permissions WHERE user_id = ?',
+        [userId]
+      );
+      up = rows;
+    }
     const userPermissions = {};
     up.forEach(p => {
       userPermissions[p.module] = {
         can_view: p.can_view, can_create: p.can_create,
         can_edit: p.can_edit, can_delete: p.can_delete,
         can_approve: p.can_approve ?? 0,
+        can_complete: p.can_complete ?? 0,
       };
     });
 
@@ -526,17 +563,27 @@ exports.updateUserPermissionOverrides = async (req, res) => {
     if (permEntries.length > 0) {
       const permValues = permEntries.map(([module, p]) => [
         userId, module,
-        parseInt(p.can_view    ?? 0, 10),
-        parseInt(p.can_create  ?? 0, 10),
-        parseInt(p.can_edit    ?? 0, 10),
-        parseInt(p.can_delete  ?? 0, 10),
-        parseInt(p.can_approve ?? 0, 10),
+        parseInt(p.can_view     ?? 0, 10),
+        parseInt(p.can_create   ?? 0, 10),
+        parseInt(p.can_edit     ?? 0, 10),
+        parseInt(p.can_delete   ?? 0, 10),
+        parseInt(p.can_approve  ?? 0, 10),
+        parseInt(p.can_complete ?? 0, 10),
       ]);
-      await db.query(
-        `INSERT INTO user_permissions (user_id, module, can_view, can_create, can_edit, can_delete, can_approve)
-         VALUES ?`,
-        [permValues]
-      );
+      try {
+        await db.query(
+          `INSERT INTO user_permissions (user_id, module, can_view, can_create, can_edit, can_delete, can_approve, can_complete)
+           VALUES ?`,
+          [permValues]
+        );
+      } catch (e) {
+        const fallbackValues = permValues.map(v => v.slice(0, 7));
+        await db.query(
+          `INSERT INTO user_permissions (user_id, module, can_view, can_create, can_edit, can_delete, can_approve)
+           VALUES ?`,
+          [fallbackValues]
+        );
+      }
     }
 
     // ── Submenu-level overrides ───────────────────────────────────────────────

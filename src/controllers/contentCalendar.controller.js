@@ -133,10 +133,9 @@ exports.getOne = async (req, res) => {
     const plan = plans[0];
 
     if (!req.user.is_admin && plan.created_by !== req.user.id) {
-      // Allow if user is a member of the plan's project, or has full social access
-      if (req.socialAccessLevel >= 2) {
-        // SMM lead — allow
-      } else {
+      // Allow if user has edit, view, or submenu access (>= 1) or is a project member
+      const hasCalendarAccess = req.userCanEdit || req.userCanView || (req.socialAccessLevel && req.socialAccessLevel >= 1);
+      if (!hasCalendarAccess) {
         const [member] = await db.query(
           `SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ? LIMIT 1`,
           [plan.project_id, req.user.id]
@@ -400,9 +399,13 @@ exports.update = async (req, res) => {
     }
 
     const plan = plans[0];
-    if (!req.user.is_admin && plan.created_by !== req.user.id) {
+    const canEditPlan = req.user.is_admin || 
+                        plan.created_by === req.user.id || 
+                        req.userCanEdit || 
+                        (req.socialAccessLevel && req.socialAccessLevel >= 2);
+    if (!canEditPlan) {
       await conn.rollback(); conn.release();
-      return res.status(403).json({ message: 'Access denied' });
+      return res.status(403).json({ message: 'Access denied: You do not have permission to edit this plan' });
     }
 
     const { client_id, project_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, status, posts, shoots, ads } = req.body;
@@ -1016,23 +1019,43 @@ exports.reschedule = async (req, res) => {
       return res.status(400).json({ message: 'A reason for rescheduling is required' });
     }
 
+    let oldDate = null;
+
     if (item_type === 'post') {
       const [postRows] = await db.query(
-        `SELECT cp.plan_id FROM content_calendar_posts cp WHERE cp.id = ?`,
+        `SELECT cp.posting_date FROM content_calendar_posts cp WHERE cp.id = ?`,
         [item_id]
       );
       if (postRows.length === 0) return res.status(404).json({ message: 'Post not found' });
+      const rawDate = postRows[0].posting_date;
+      oldDate = rawDate ? (rawDate.toISOString ? rawDate.toISOString().split('T')[0] : String(rawDate).split('T')[0]) : null;
 
       await db.query(
         'UPDATE content_calendar_posts SET posting_date = ?, reschedule_reason = ? WHERE id = ?',
         [new_date, reason.trim(), item_id]
       );
     } else if (item_type === 'shoot') {
+      const [shootRows] = await db.query(
+        `SELECT cs.shoot_date FROM content_calendar_shoots cs WHERE cs.id = ?`,
+        [item_id]
+      );
+      if (shootRows.length === 0) return res.status(404).json({ message: 'Shoot not found' });
+      const rawDate = shootRows[0].shoot_date;
+      oldDate = rawDate ? (rawDate.toISOString ? rawDate.toISOString().split('T')[0] : String(rawDate).split('T')[0]) : null;
+
       await db.query(
         'UPDATE content_calendar_shoots SET shoot_date = ?, reschedule_reason = ? WHERE id = ?',
         [new_date, reason.trim(), item_id]
       );
     } else if (item_type === 'ad') {
+      const [adRows] = await db.query(
+        `SELECT ca.start_date FROM content_calendar_ads ca WHERE ca.id = ?`,
+        [item_id]
+      );
+      if (adRows.length === 0) return res.status(404).json({ message: 'Ad not found' });
+      const rawDate = adRows[0].start_date;
+      oldDate = rawDate ? (rawDate.toISOString ? rawDate.toISOString().split('T')[0] : String(rawDate).split('T')[0]) : null;
+
       await db.query(
         'UPDATE content_calendar_ads SET start_date = ?, reschedule_reason = ? WHERE id = ?',
         [new_date, reason.trim(), item_id]
@@ -1041,11 +1064,41 @@ exports.reschedule = async (req, res) => {
       return res.status(400).json({ message: 'Invalid item_type' });
     }
 
-    res.emitSocket('content-calendar:updated', { item_type, item_id, new_date, reason });
-    return res.json({ message: 'Rescheduled successfully' });
+    // Insert into reschedule history log
+    try {
+      await db.query(
+        `INSERT INTO content_calendar_reschedule_history (item_type, item_id, old_date, new_date, reason, rescheduled_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [item_type, item_id, oldDate, new_date, reason.trim(), req.user.id]
+      );
+    } catch (histErr) {
+      console.warn('Could not insert reschedule history log:', histErr.message);
+    }
+
+    res.emitSocket('content-calendar:updated', { item_type, item_id, old_date: oldDate, new_date, reason: reason.trim() });
+    return res.json({ message: 'Rescheduled successfully', old_date: oldDate, new_date, reason: reason.trim() });
   } catch (err) {
     console.error('Content calendar reschedule error:', err);
     return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── GET RESCHEDULE HISTORY ───────────────────────────────────────────────────
+exports.getRescheduleHistory = async (req, res) => {
+  try {
+    const { item_type, item_id } = req.params;
+    const [rows] = await db.query(
+      `SELECT h.*, CONCAT(u.first_name, ' ', u.last_name) AS rescheduled_by_name
+       FROM content_calendar_reschedule_history h
+       LEFT JOIN users u ON u.id = h.rescheduled_by
+       WHERE h.item_type = ? AND h.item_id = ?
+       ORDER BY h.created_at DESC`,
+      [item_type, item_id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('getRescheduleHistory error:', err);
+    return res.json([]);
   }
 };
 

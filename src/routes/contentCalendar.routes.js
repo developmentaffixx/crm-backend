@@ -23,6 +23,9 @@ router.get('/approved-shoots', controller.approvedShoots);
 // PUT  /api/content-calendar/reschedule   — drag & drop reschedule
 router.put('/reschedule', controller.reschedule);
 
+// GET  /api/content-calendar/reschedule-history/:item_type/:item_id — get reschedule audit history
+router.get('/reschedule-history/:item_type/:item_id', controller.getRescheduleHistory);
+
 // PUT  /api/content-calendar/post-status  — update post status with workflow enforcement
 router.put('/post-status', controller.updatePostStatus);
 

@@ -211,34 +211,56 @@ exports.myPermissions = async (req, res) => {
     const responsibilities = roleRows[0]?.responsibilities || null;
 
     // Base module permissions from role
-    const [permRows] = await db.query(
-      'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM role_permissions WHERE role_id = ?',
-      [roleId]
-    );
+    let permRows = [];
+    try {
+      const [rows] = await db.query(
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM role_permissions WHERE role_id = ?',
+        [roleId]
+      );
+      permRows = rows;
+    } catch (e) {
+      const [rows] = await db.query(
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM role_permissions WHERE role_id = ?',
+        [roleId]
+      );
+      permRows = rows;
+    }
     const permissions = permRows.reduce((acc, p) => {
       acc[p.module] = {
-        can_view:    p.can_view,
-        can_create:  p.can_create,
-        can_edit:    p.can_edit,
-        can_delete:  p.can_delete,
-        can_approve: p.can_approve ?? 0,
+        can_view:     p.can_view,
+        can_create:   p.can_create,
+        can_edit:     p.can_edit,
+        can_delete:   p.can_delete,
+        can_approve:  p.can_approve ?? 0,
+        can_complete: p.can_complete ?? 0,
       };
       return acc;
     }, {});
 
     // ── Merge user-level module overrides ─────────────────────────────────────
-    const [userPermRows] = await db.query(
-      'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM user_permissions WHERE user_id = ?',
-      [req.user.id]
-    );
+    let userPermRows = [];
+    try {
+      const [rows] = await db.query(
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM user_permissions WHERE user_id = ?',
+        [req.user.id]
+      );
+      userPermRows = rows;
+    } catch (e) {
+      const [rows] = await db.query(
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve FROM user_permissions WHERE user_id = ?',
+        [req.user.id]
+      );
+      userPermRows = rows;
+    }
     const hasUserOverrides = userPermRows.length > 0;
     userPermRows.forEach(p => {
       permissions[p.module] = {
-        can_view:    p.can_view,
-        can_create:  p.can_create,
-        can_edit:    p.can_edit,
-        can_delete:  p.can_delete,
-        can_approve: p.can_approve ?? 0,
+        can_view:     p.can_view,
+        can_create:   p.can_create,
+        can_edit:     p.can_edit,
+        can_delete:   p.can_delete,
+        can_approve:  p.can_approve ?? 0,
+        can_complete: p.can_complete ?? 0,
       };
     });
 
