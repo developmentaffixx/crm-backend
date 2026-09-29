@@ -223,15 +223,16 @@ exports.update = async (req, res) => {
     const [existing] = await db.query('SELECT * FROM ad_campaigns WHERE id = ? AND deleted = 0', [req.params.id]);
     if (existing.length === 0) return res.status(404).json({ message: 'Campaign not found' });
 
-    if (!req.user.is_admin && existing[0].created_by !== req.user.id && existing[0].assigned_to !== req.user.id) {
+    const canManageAds = req.user.is_admin || (req.socialAccessLevel && req.socialAccessLevel >= 2);
+    if (!canManageAds && existing[0].created_by !== req.user.id && existing[0].assigned_to !== req.user.id) {
       return res.status(403).json({ message: 'Access denied' });
     }
 
     const campaign = existing[0];
 
-    // Non-admin re-editing after rejection/approval → reset to pending_approval
-    // Admin can set any status directly — don't override
-    if (!req.user.is_admin && ['rejected', 'approved', 'active'].includes(campaign.status)) {
+    // Non-admin/non-lead re-editing after rejection/approval → reset to pending_approval
+    // Admin and leads can set any status directly (approve, reject, rework)
+    if (!canManageAds && ['rejected', 'approved', 'active'].includes(campaign.status)) {
       req.body.status = 'pending_approval';
     }
 
