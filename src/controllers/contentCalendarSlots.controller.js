@@ -909,7 +909,18 @@ exports.pendingCount = async (req, res) => {
 
     // Pending approval count (for admin/SMM leads)
     let pendingApproval = 0;
-    if (req.user.is_admin || (req.socialAccessLevel && req.socialAccessLevel >= 2)) {
+    let isLeadOrAdmin = req.user.is_admin || (req.socialAccessLevel && req.socialAccessLevel >= 2);
+    if (!isLeadOrAdmin) {
+      try {
+        const [r] = await db.query(
+          `SELECT content_calendar FROM role_social_permissions rsp 
+           JOIN users u ON u.role_id = rsp.role_id WHERE u.id = ?`,
+          [userId]
+        );
+        if (r.length > 0 && r[0].content_calendar >= 2) isLeadOrAdmin = true;
+      } catch (e) {}
+    }
+    if (isLeadOrAdmin) {
       try {
         const [pc] = await db.query(
           `SELECT 
