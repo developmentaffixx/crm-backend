@@ -714,7 +714,7 @@ exports.calendarView = async (req, res) => {
     let posts = [];
     try {
       const [rows] = await db.query(
-        `SELECT cp.*, p.client_id, l.business_name AS client_name,
+        `SELECT cp.*, p.client_id, p.project_id, p.cycle_id, l.business_name AS client_name,
                 COALESCE(cwr.hook_opening_line, cwr2.hook_opening_line, cp.topic) AS brief_hook,
                 COALESCE(cwr.content_id_code, cwr2.content_id_code) AS brief_code,
                 COALESCE(cwr.content_type, cwr2.content_type, cp.format) AS brief_content_type,
@@ -752,7 +752,7 @@ exports.calendarView = async (req, res) => {
       // Fallback: try simpler join without ROW_NUMBER (for MySQL < 8.0)
       try {
         const [rows] = await db.query(
-          `SELECT cp.*, p.client_id, l.business_name AS client_name,
+          `SELECT cp.*, p.client_id, p.project_id, p.cycle_id, l.business_name AS client_name,
                   COALESCE(cwr.hook_opening_line, cwr2.hook_opening_line, cp.topic) AS brief_hook,
                   COALESCE(cwr.content_id_code, cwr2.content_id_code) AS brief_code,
                   COALESCE(cwr.content_type, cwr2.content_type, cp.format) AS brief_content_type,
@@ -938,6 +938,12 @@ exports.calendarView = async (req, res) => {
         ads = rows;
       } else throw colErr;
     }
+
+    const planMap = {};
+    plans.forEach(p => { planMap[p.id] = p; });
+    posts = posts.map(r => ({ ...r, _plan: planMap[r.plan_id] || null, project_id: r.project_id || planMap[r.plan_id]?.project_id || null }));
+    shoots = shoots.map(r => ({ ...r, _plan: planMap[r.plan_id] || null, project_id: r.project_id || planMap[r.plan_id]?.project_id || null }));
+    ads = ads.map(r => ({ ...r, _plan: planMap[r.plan_id] || null, project_id: r.project_id || planMap[r.plan_id]?.project_id || null }));
 
     return res.json({ posts, shoots, ads, plans });
   } catch (err) {
