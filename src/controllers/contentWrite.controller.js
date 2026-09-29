@@ -87,6 +87,15 @@ exports.list = async (req, res) => {
         }
       }
 
+      let orderBy = 'cwr.created_at DESC, cwr.id DESC';
+      if (req.query.sort === 'posting_date_asc') {
+        orderBy = `(${postingExpr} IS NULL) ASC, ${postingExpr} ASC, cwr.created_at DESC`;
+      } else if (req.query.sort === 'posting_date_desc') {
+        orderBy = `(${postingExpr} IS NULL) ASC, ${postingExpr} DESC, cwr.created_at DESC`;
+      } else if (req.query.sort === 'oldest') {
+        orderBy = 'cwr.created_at ASC, cwr.id ASC';
+      }
+
       const sql = `SELECT cwr.*,
               l.business_name AS client_brand_name,
               p.title AS project_title,
@@ -113,7 +122,7 @@ exports.list = async (req, res) => {
        LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
        LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
        WHERE ${queryWhere}
-       ORDER BY (${postingExpr} IS NULL) ASC, ${postingExpr} ASC, cwr.created_at ASC`;
+       ORDER BY ${orderBy}`;
 
       return { sql, params: queryParams };
     };
