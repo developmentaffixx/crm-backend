@@ -625,7 +625,7 @@ exports.approveSlot = async (req, res) => {
       [req.user.id, item_id]
     );
 
-    // ─── Reverse sync: update any linked content write request to 'approved' ──
+    // ─── Reverse sync: update any linked module to 'approved' ──
     if (item_type === 'post') {
       try {
         await db.query(
@@ -636,6 +636,18 @@ exports.approveSlot = async (req, res) => {
         );
       } catch (syncErr) {
         console.warn('[approveSlot] Write request sync warning:', syncErr.message);
+      }
+    } else if (item_type === 'ad') {
+      try {
+        await db.query(
+          `UPDATE ad_campaigns
+           SET status = 'approved'
+           WHERE (linked_calendar_ad_id = ? OR calendar_slot_id = ?) AND deleted = 0`,
+          [item_id, item_id]
+        );
+        res.emitSocket('ads:updated', { status: 'approved' });
+      } catch (syncErr) {
+        console.warn('[approveSlot] Ad campaign sync warning:', syncErr.message);
       }
     }
 
@@ -708,6 +720,18 @@ exports.rejectSlot = async (req, res) => {
         );
       } catch (syncErr) {
         console.warn('[rejectSlot] Write request sync warning:', syncErr.message);
+      }
+    } else if (item_type === 'ad') {
+      try {
+        await db.query(
+          `UPDATE ad_campaigns
+           SET status = 'rejected', notes = ?
+           WHERE (linked_calendar_ad_id = ? OR calendar_slot_id = ?) AND deleted = 0`,
+          [reason.trim(), item_id, item_id]
+        );
+        res.emitSocket('ads:updated', { status: 'rejected' });
+      } catch (syncErr) {
+        console.warn('[rejectSlot] Ad campaign sync warning:', syncErr.message);
       }
     }
 

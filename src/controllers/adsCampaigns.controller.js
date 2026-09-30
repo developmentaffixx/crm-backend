@@ -29,13 +29,15 @@ exports.list = async (req, res) => {
               CONCAT(ua.first_name, ' ', ua.last_name) AS assigned_to_name,
               CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
               acr.amount_spent AS report_amount_spent,
-              COALESCE(acr.recommendations, acr.best_performing_ad) AS report_notes
+              COALESCE(acr.recommendations, acr.best_performing_ad) AS report_notes,
+              ca.slot_status AS slot_status
        FROM ad_campaigns ac
        LEFT JOIN projects p ON p.id = ac.project_id
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN users ua ON ua.id = ac.assigned_to
        LEFT JOIN users uc ON uc.id = ac.created_by
        LEFT JOIN ad_campaign_reports acr ON acr.campaign_id = ac.id
+       LEFT JOIN content_calendar_ads ca ON (ca.id = ac.linked_calendar_ad_id OR ca.id = ac.calendar_slot_id)
        ${!req.user.is_admin ? 'LEFT JOIN project_members pm ON pm.project_id = ac.project_id AND pm.user_id = ' + req.user.id : ''}
        WHERE ${where}
        ORDER BY ac.created_at DESC
@@ -64,12 +66,14 @@ exports.getOne = async (req, res) => {
       `SELECT ac.*,
               p.title AS project_title, l.business_name AS client_name,
               CONCAT(ua.first_name, ' ', ua.last_name) AS assigned_to_name,
-              CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name
+              CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
+              ca.slot_status AS slot_status
        FROM ad_campaigns ac
        LEFT JOIN projects p ON p.id = ac.project_id
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN users ua ON ua.id = ac.assigned_to
        LEFT JOIN users uc ON uc.id = ac.created_by
+       LEFT JOIN content_calendar_ads ca ON (ca.id = ac.linked_calendar_ad_id OR ca.id = ac.calendar_slot_id)
        WHERE ac.id = ? AND ac.deleted = 0`,
       [req.params.id]
     );
