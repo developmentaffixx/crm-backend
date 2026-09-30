@@ -745,12 +745,10 @@ exports.completeSlot = async (req, res) => {
 
     const slot = rows[0];
 
-    // Admin, user with can_complete permission, or the slot's assignee can mark complete
-    const canComplete = req.user.is_admin || 
-                        req.userCanComplete || 
-                        slot.assigned_to === userId;
+    // Admin or user with can_complete permission can mark complete
+    const canComplete = req.user.is_admin || req.userCanComplete;
     if (!canComplete) {
-      return res.status(403).json({ message: 'Only admin, assigned user, or users with Mark as Done permission can mark as completed' });
+      return res.status(403).json({ message: 'Only admin or users with Mark as Done permission can mark as completed' });
     }
 
     // Must be approved first
