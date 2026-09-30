@@ -592,9 +592,9 @@ exports.approveSlot = async (req, res) => {
   try {
     const { item_type, item_id } = req.body;
 
-    const canApprove = req.user.is_admin || req.userCanApprove || (req.socialAccessLevel && req.socialAccessLevel >= 2);
+    const canApprove = req.user.is_admin || req.userCanApprove;
     if (!canApprove) {
-      return res.status(403).json({ message: 'Only admin or authorized leads can approve slots' });
+      return res.status(403).json({ message: 'Only admin or authorized leads with approve permission can approve slots' });
     }
 
     if (!item_type || !item_id) {
@@ -653,15 +653,15 @@ exports.approveSlot = async (req, res) => {
   }
 };
 
-// ─── REJECT SLOT (Admin or SMM with 'all' access) ─────────────────────────────
+// ─── REJECT / REWORK SLOT (Admin or User with can_approve permission) ──────────
 
 exports.rejectSlot = async (req, res) => {
   try {
-    const { item_type, item_id, reason } = req.body;
+    const { item_type, item_id, reason, action = 'reject' } = req.body;
 
-    const canReject = req.user.is_admin || req.userCanApprove || (req.socialAccessLevel && req.socialAccessLevel >= 2);
+    const canReject = req.user.is_admin || req.userCanApprove;
     if (!canReject) {
-      return res.status(403).json({ message: 'Only admin or authorized leads can reject slots' });
+      return res.status(403).json({ message: 'Only admin or authorized leads with approve permission can reject or request re-work for slots' });
     }
 
     if (!item_type || !item_id) {
@@ -669,7 +669,7 @@ exports.rejectSlot = async (req, res) => {
     }
 
     if (!reason || reason.trim().length === 0) {
-      return res.status(400).json({ message: 'Rejection reason is required' });
+      return res.status(400).json({ message: 'Rejection/rework reason is required' });
     }
 
     const table = TABLE_MAP[item_type];
@@ -678,8 +678,8 @@ exports.rejectSlot = async (req, res) => {
     const [rows] = await db.query(`SELECT * FROM ${table} WHERE id = ?`, [item_id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Slot not found' });
 
-    if (rows[0].slot_status !== 'submitted') {
-      return res.status(400).json({ message: `Can only reject slots with status "submitted".` });
+    if (rows[0].slot_status !== 'submitted' && rows[0].slot_status !== 'approved') {
+      return res.status(400).json({ message: `Can only reject or rework slots with status "submitted" or "approved". Current: "${rows[0].slot_status}"` });
     }
 
     await db.query(
@@ -694,7 +694,7 @@ exports.rejectSlot = async (req, res) => {
           `UPDATE content_write_requests
            SET status = 'pending', approved_by = NULL, approved_at = NULL,
                admin_remarks = ?
-           WHERE calendar_slot_id = ? AND deleted = 0 AND status != 'pending'`,
+           WHERE calendar_slot_id = ? AND deleted = 0`,
           [reason.trim(), item_id]
         );
       } catch (syncErr) {
@@ -704,28 +704,29 @@ exports.rejectSlot = async (req, res) => {
 
     // Notify assignee
     if (rows[0].assigned_to) {
+      const isRework = action === 'rework';
       await createSmmNotification(null, {
         user_id: rows[0].assigned_to,
         triggered_by: req.user.id,
-        type: 'slot_rejected',
+        type: isRework ? 'slot_rework' : 'slot_rejected',
         slot_type: item_type,
         slot_id: item_id,
-        title: `Your ${item_type} slot was rejected`,
-        message: `Reason: ${reason.trim()}. Please re-edit and resubmit.`,
+        title: isRework ? `Re-work requested for your ${item_type} slot` : `Your ${item_type} slot was rejected`,
+        message: `Reason: ${reason.trim()}. Please update and resubmit.`,
         link: getPageLink(item_type),
       });
-      res.emitSocket('smm:notification', { user_id: rows[0].assigned_to, type: 'slot_rejected' });
+      res.emitSocket('smm:notification', { user_id: rows[0].assigned_to, type: isRework ? 'slot_rework' : 'slot_rejected' });
     }
 
-    res.emitSocket('content-calendar:slot-rejected', { item_type, item_id, reason: reason.trim() });
-    return res.json({ message: 'Slot rejected', item_type, item_id });
+    res.emitSocket('content-calendar:slot-rejected', { item_type, item_id, reason: reason.trim(), action });
+    return res.json({ message: action === 'rework' ? 'Slot sent for re-work' : 'Slot rejected', item_type, item_id });
   } catch (err) {
     console.error('Reject slot error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
-// ─── COMPLETE SLOT (assignee marks as done — no approval needed) ──────────────
+// ─── COMPLETE SLOT (assignee or user with can_complete marks as done) ──────────
 
 exports.completeSlot = async (req, res) => {
   try {
@@ -744,13 +745,12 @@ exports.completeSlot = async (req, res) => {
 
     const slot = rows[0];
 
-    // Admin, user with can_complete toggle, SMM lead, or the slot's assignee can mark complete
+    // Admin, user with can_complete permission, or the slot's assignee can mark complete
     const canComplete = req.user.is_admin || 
                         req.userCanComplete || 
-                        (req.socialAccessLevel && req.socialAccessLevel >= 2) || 
                         slot.assigned_to === userId;
     if (!canComplete) {
-      return res.status(403).json({ message: 'Only admin, assigned user, or authorized leads can mark as completed' });
+      return res.status(403).json({ message: 'Only admin, assigned user, or users with Mark as Done permission can mark as completed' });
     }
 
     // Must be approved first

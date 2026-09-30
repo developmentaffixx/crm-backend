@@ -199,6 +199,10 @@ exports.create = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
+  if (!req.user.is_admin && !req.userCanCreate) {
+    return res.status(403).json({ message: 'Access denied: You do not have permission to create content plans' });
+  }
+
   const { client_id, project_id, cycle_id, plan_month, primary_goal, target_audience, budget_allocation, hero_offer, posts, shoots, ads } = req.body;
 
   const conn = await db.getConnection();
@@ -401,8 +405,7 @@ exports.update = async (req, res) => {
     const plan = plans[0];
     const canEditPlan = req.user.is_admin || 
                         plan.created_by === req.user.id || 
-                        req.userCanEdit || 
-                        (req.socialAccessLevel && req.socialAccessLevel >= 2);
+                        req.userCanEdit;
     if (!canEditPlan) {
       await conn.rollback(); conn.release();
       return res.status(403).json({ message: 'Access denied: You do not have permission to edit this plan' });
