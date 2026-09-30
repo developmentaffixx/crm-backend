@@ -179,9 +179,12 @@ exports.getOne = async (req, res) => {
     );
 
     const [ads] = await db.query(
-      `SELECT ca.*, ac.campaign_name AS linked_campaign_name, ac.status AS linked_campaign_status
+      `SELECT ca.*, ac.campaign_name AS linked_campaign_name, ac.status AS linked_campaign_status,
+              COALESCE(acr.amount_spent, ca.amount_spent) AS report_amount_spent,
+              COALESCE(acr.recommendations, acr.best_performing_ad, ca.report_notes) AS report_notes
        FROM content_calendar_ads ca
-       LEFT JOIN ad_campaigns ac ON ac.id = ca.linked_campaign_id
+       LEFT JOIN ad_campaigns ac ON (ac.id = ca.linked_campaign_id OR ac.linked_calendar_ad_id = ca.id) AND ac.deleted = 0
+       LEFT JOIN ad_campaign_reports acr ON acr.campaign_id = ac.id
        WHERE ca.plan_id = ? ORDER BY ca.start_date ASC`,
       [plan.id]
     );
@@ -916,11 +919,14 @@ exports.calendarView = async (req, res) => {
                 COALESCE(ac.budget, ca.budget) AS budget_resolved,
                 ac.status AS linked_campaign_status,
                 ac.notes AS campaign_notes,
+                COALESCE(acr.amount_spent, ca.amount_spent) AS report_amount_spent,
+                COALESCE(acr.recommendations, acr.best_performing_ad, ca.report_notes) AS report_notes,
                 CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
          FROM content_calendar_ads ca
          JOIN content_calendar_plans p ON p.id = ca.plan_id
          LEFT JOIN leads l ON l.id = p.client_id
-         LEFT JOIN ad_campaigns ac ON ac.linked_calendar_ad_id = ca.id AND ac.deleted = 0
+         LEFT JOIN ad_campaigns ac ON (ac.linked_calendar_ad_id = ca.id OR ac.id = ca.linked_campaign_id) AND ac.deleted = 0
+         LEFT JOIN ad_campaign_reports acr ON acr.campaign_id = ac.id
          LEFT JOIN users au ON au.id = ca.assigned_to
          WHERE ca.plan_id IN (?)
          ORDER BY ca.start_date ASC`,

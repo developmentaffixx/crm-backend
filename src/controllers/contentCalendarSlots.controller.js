@@ -236,14 +236,23 @@ exports.listSlots = async (req, res) => {
                 CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name${withLink ? `,
                 acmp.campaign_name AS linked_campaign_name,
                 acmp.campaign_id_code AS linked_campaign_code,
+                acmp.status AS linked_campaign_status,
                 COALESCE(acmp.objective, ca.campaign_objective) AS campaign_objective_resolved,
                 COALESCE(acmp.budget, ca.budget) AS budget_resolved,
-                acmp.notes AS campaign_notes` : ''}
+                acmp.notes AS campaign_notes,
+                COALESCE(acr.amount_spent, ca.amount_spent) AS report_amount_spent,
+                COALESCE(acr.recommendations, acr.best_performing_ad, ca.report_notes) AS report_notes,
+                acr.reach AS report_reach,
+                acr.impressions AS report_impressions,
+                acr.clicks AS report_clicks,
+                acr.leads AS report_leads,
+                acr.conversions AS report_conversions` : ''}
          FROM content_calendar_ads ca
          LEFT JOIN users u ON u.id = ca.assigned_to
          LEFT JOIN users ab ON ab.id = ca.assigned_by
          LEFT JOIN users au ON au.id = ca.approved_by${withLink ? `
-         LEFT JOIN ad_campaigns acmp ON acmp.linked_calendar_ad_id = ca.id AND acmp.deleted = 0` : ''}
+         LEFT JOIN ad_campaigns acmp ON (acmp.linked_calendar_ad_id = ca.id OR acmp.calendar_slot_id = ca.id) AND acmp.deleted = 0
+         LEFT JOIN ad_campaign_reports acr ON acr.campaign_id = acmp.id` : ''}
          WHERE ca.plan_id IN (?) ${statusFilter} ${assignedFilter}
          ORDER BY ca.start_date ASC, ca.id ASC`;
 
@@ -786,15 +795,51 @@ exports.completeSlot = async (req, res) => {
           );
         }
       } else if (item_type === 'ad') {
+        const { amount_spent, amount, report, report_notes, recommendations } = req.body;
+        const spentVal = (amount_spent !== undefined && amount_spent !== '') ? amount_spent
+          : ((amount !== undefined && amount !== '') ? amount : null);
+        const reportVal = report || report_notes || recommendations || null;
+
+        // Try updating amount_spent and report_notes on slot directly
+        try {
+          await db.query(
+            `UPDATE content_calendar_ads 
+             SET amount_spent = COALESCE(?, amount_spent), 
+                 report_notes = COALESCE(?, report_notes) 
+             WHERE id = ?`,
+            [spentVal, reportVal, item_id]
+          );
+        } catch (e) { /* column may not exist */ }
+
         await db.query(
-          `UPDATE ad_campaigns SET status = 'completed' WHERE linked_calendar_ad_id = ? AND deleted = 0`,
-          [item_id]
+          `UPDATE ad_campaigns SET status = 'completed' WHERE (linked_calendar_ad_id = ? OR calendar_slot_id = ?) AND deleted = 0`,
+          [item_id, item_id]
         );
-        const [linkedAd] = await db.query('SELECT id FROM ad_campaigns WHERE linked_calendar_ad_id = ? AND deleted = 0 LIMIT 1', [item_id]);
+        const [linkedAd] = await db.query(
+          'SELECT id FROM ad_campaigns WHERE (linked_calendar_ad_id = ? OR calendar_slot_id = ?) AND deleted = 0 LIMIT 1',
+          [item_id, item_id]
+        );
         if (linkedAd.length > 0) {
+          const campId = linkedAd[0].id;
+          if (spentVal !== null || reportVal !== null) {
+            const [existingRep] = await db.query('SELECT id FROM ad_campaign_reports WHERE campaign_id = ?', [campId]);
+            if (existingRep.length > 0) {
+              await db.query(
+                `UPDATE ad_campaign_reports SET amount_spent = COALESCE(?, amount_spent), recommendations = COALESCE(?, recommendations) WHERE campaign_id = ?`,
+                [spentVal, reportVal, campId]
+              );
+            } else {
+              await db.query(
+                `INSERT INTO ad_campaign_reports (campaign_id, amount_spent, recommendations, created_by) VALUES (?, ?, ?, ?)`,
+                [campId, spentVal, reportVal, userId]
+              );
+            }
+            res.emitSocket('ads:report-saved', { campaign_id: campId });
+          }
+          res.emitSocket('ads:updated', { id: campId, status: 'completed' });
           await db.query(
             `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-            ['ads', linkedAd[0].id, 'approve', 'Marked as completed', userId]
+            ['ads', campId, 'approve', 'Marked as completed / Ad closed with report', userId]
           );
         }
       }

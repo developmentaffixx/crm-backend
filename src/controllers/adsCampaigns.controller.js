@@ -27,12 +27,15 @@ exports.list = async (req, res) => {
               p.title AS project_title,
               l.business_name AS client_name,
               CONCAT(ua.first_name, ' ', ua.last_name) AS assigned_to_name,
-              CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name
+              CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
+              acr.amount_spent AS report_amount_spent,
+              COALESCE(acr.recommendations, acr.best_performing_ad) AS report_notes
        FROM ad_campaigns ac
        LEFT JOIN projects p ON p.id = ac.project_id
        LEFT JOIN leads l ON l.id = p.client_id
        LEFT JOIN users ua ON ua.id = ac.assigned_to
        LEFT JOIN users uc ON uc.id = ac.created_by
+       LEFT JOIN ad_campaign_reports acr ON acr.campaign_id = ac.id
        ${!req.user.is_admin ? 'LEFT JOIN project_members pm ON pm.project_id = ac.project_id AND pm.user_id = ' + req.user.id : ''}
        WHERE ${where}
        ORDER BY ac.created_at DESC
@@ -167,14 +170,25 @@ exports.create = async (req, res) => {
       }
     }
 
-    // Sync slot to submitted
+    // Sync slot to submitted and auto-sync filled dates/budget
     if (slotIdVal) {
       try {
         await db.query(
-          `UPDATE content_calendar_ads SET linked_campaign_id = ?, slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-          [insertId, slotIdVal]
+          `UPDATE content_calendar_ads 
+           SET linked_campaign_id = ?, 
+               slot_status = 'submitted', 
+               submitted_at = NOW(), 
+               rejection_reason = NULL,
+               start_date = COALESCE(?, start_date),
+               end_date = COALESCE(?, end_date),
+               budget = COALESCE(?, budget),
+               platform = COALESCE(?, platform),
+               campaign_objective = COALESCE(?, campaign_objective)
+           WHERE id = ?`,
+          [insertId, start_date || null, end_date || null, budget || null, platform || null, objective || null, slotIdVal]
         );
         res.emitSocket('content-calendar:slot-submitted', { item_type: 'ad', item_id: slotIdVal });
+        res.emitSocket('content-calendar:updated', { slot_id: slotIdVal });
 
         const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_ads WHERE id = ?', [slotIdVal]);
         if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
@@ -251,66 +265,90 @@ exports.update = async (req, res) => {
     }
 
     // ─── Sync to calendar slot when status changes ────────────────────────────
-    // Use linked_calendar_ad_id as the slot reference
-    const slotId = campaign.linked_calendar_ad_id;
-    if (slotId && updates.status) {
-      // Log approval history
-      try {
-        const histAction = updates.status === 'approved' || updates.status === 'active' ? 'approve'
-          : updates.status === 'rejected' ? 'rework'
-          : updates.status === 'pending_approval' ? 'resubmit'
-          : null;
-        if (histAction) {
-          await db.query(
-            `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-            ['ads', req.params.id, histAction, updates.notes || null, req.user.id]
-          );
-        }
-      } catch (e) { /* table may not exist */ }
-      if (updates.status === 'pending_approval') {
-        await db.query(
-          `UPDATE content_calendar_ads SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-          [slotId]
-        );
-        res.emitSocket('content-calendar:slot-submitted', { item_type: 'ad', item_id: slotId });
-
-        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_ads WHERE id = ?', [slotId]);
-        if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-          await db.query(
-            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-             VALUES (?, ?, 'slot_submitted', 'ad', ?, 'Ad slot submitted for approval', 'Campaign details filled. Please review.', '/social/content-calendar')`,
-            [slotInfo[0].assigned_by, req.user.id, slotId]
-          );
-          res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
-        }
-      } else if (updates.status === 'approved' || updates.status === 'active') {
-        await db.query(
-          `UPDATE content_calendar_ads SET slot_status = 'approved', approved_at = NOW(), approved_by = ?, rejection_reason = NULL WHERE id = ?`,
-          [req.user.id, slotId]
-        );
-        if (campaign.created_by) {
-          await db.query(
-            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-             VALUES (?, ?, 'slot_approved', 'ad', ?, 'Your ad slot was approved! 🎉', 'Campaign is now live.', '/social/ads-planning')`,
-            [campaign.created_by, req.user.id, slotId]
-          );
-          res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_approved' });
-        }
-      } else if (updates.status === 'rejected') {
-        await db.query(
-          `UPDATE content_calendar_ads SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
-          [updates.notes || 'Rejected', slotId]
-        );
-        if (campaign.created_by) {
-          await db.query(
-            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-             VALUES (?, ?, 'slot_rejected', 'ad', ?, 'Your ad slot was rejected', ?, '/social/ads-planning')`,
-            [campaign.created_by, req.user.id, slotId, `Reason: ${updates.notes || 'Please re-edit'}`]
-          );
-          res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_rejected' });
-        }
+    // Use linked_calendar_ad_id or calendar_slot_id as the slot reference
+    const slotId = campaign.linked_calendar_ad_id || campaign.calendar_slot_id;
+    if (slotId) {
+      // Auto-sync dates and details to calendar slot if updated in ad campaign
+      const slotSyncUpdates = [];
+      const slotSyncParams = [];
+      if (updates.start_date !== undefined) { slotSyncUpdates.push('start_date = ?'); slotSyncParams.push(updates.start_date); }
+      if (updates.end_date !== undefined) { slotSyncUpdates.push('end_date = ?'); slotSyncParams.push(updates.end_date); }
+      if (updates.budget !== undefined) { slotSyncUpdates.push('budget = ?'); slotSyncParams.push(updates.budget); }
+      if (updates.platform !== undefined) { slotSyncUpdates.push('platform = ?'); slotSyncParams.push(updates.platform); }
+      if (updates.objective !== undefined) { slotSyncUpdates.push('campaign_objective = ?'); slotSyncParams.push(updates.objective); }
+      if (slotSyncUpdates.length > 0) {
+        try {
+          await db.query(`UPDATE content_calendar_ads SET ${slotSyncUpdates.join(', ')} WHERE id = ?`, [...slotSyncParams, slotId]);
+        } catch (e) { /* ignore */ }
       }
-      res.emitSocket('content-calendar:updated', { slot_id: slotId });
+
+      if (updates.status) {
+        // Log approval history
+        try {
+          const histAction = updates.status === 'approved' || updates.status === 'active' ? 'approve'
+            : updates.status === 'rejected' ? 'rework'
+            : updates.status === 'pending_approval' ? 'resubmit'
+            : updates.status === 'completed' ? 'complete'
+            : null;
+          if (histAction) {
+            await db.query(
+              `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
+              ['ads', req.params.id, histAction, updates.notes || null, req.user.id]
+            );
+          }
+        } catch (e) { /* table may not exist */ }
+
+        if (updates.status === 'pending_approval') {
+          await db.query(
+            `UPDATE content_calendar_ads SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+            [slotId]
+          );
+          res.emitSocket('content-calendar:slot-submitted', { item_type: 'ad', item_id: slotId });
+
+          const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_ads WHERE id = ?', [slotId]);
+          if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
+            await db.query(
+              `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+               VALUES (?, ?, 'slot_submitted', 'ad', ?, 'Ad slot submitted for approval', 'Campaign details filled. Please review.', '/social/content-calendar')`,
+              [slotInfo[0].assigned_by, req.user.id, slotId]
+            );
+            res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+          }
+        } else if (updates.status === 'approved' || updates.status === 'active') {
+          await db.query(
+            `UPDATE content_calendar_ads SET slot_status = 'approved', approved_at = NOW(), approved_by = ?, rejection_reason = NULL WHERE id = ?`,
+            [req.user.id, slotId]
+          );
+          if (campaign.created_by) {
+            await db.query(
+              `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+               VALUES (?, ?, 'slot_approved', 'ad', ?, 'Your ad slot was approved! 🎉', 'Campaign is now live.', '/social/ads-planning')`,
+              [campaign.created_by, req.user.id, slotId]
+            );
+            res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_approved' });
+          }
+        } else if (updates.status === 'completed') {
+          await db.query(
+            `UPDATE content_calendar_ads SET slot_status = 'completed', completed_at = NOW(), completed_by = ? WHERE id = ?`,
+            [req.user.id, slotId]
+          );
+          res.emitSocket('content-calendar:slot-completed', { item_type: 'ad', item_id: slotId });
+        } else if (updates.status === 'rejected') {
+          await db.query(
+            `UPDATE content_calendar_ads SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
+            [updates.notes || 'Rejected', slotId]
+          );
+          if (campaign.created_by) {
+            await db.query(
+              `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
+               VALUES (?, ?, 'slot_rejected', 'ad', ?, 'Your ad slot was rejected', ?, '/social/ads-planning')`,
+              [campaign.created_by, req.user.id, slotId, `Reason: ${updates.notes || 'Please re-edit'}`]
+            );
+            res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_rejected' });
+          }
+        }
+        res.emitSocket('content-calendar:updated', { slot_id: slotId });
+      }
     }
 
     const [updated] = await db.query('SELECT * FROM ad_campaigns WHERE id = ?', [req.params.id]);
@@ -341,33 +379,76 @@ exports.remove = async (req, res) => {
   }
 };
 
-// ─── SAVE POST-AD REPORT ─────────────────────────────────────────────────────
+// ─── SAVE POST-AD REPORT & CLOSE CAMPAIGN ────────────────────────────────────
 exports.saveReport = async (req, res) => {
   try {
     const campaignId = req.params.id;
     const [campaign] = await db.query('SELECT * FROM ad_campaigns WHERE id = ? AND deleted = 0', [campaignId]);
     if (campaign.length === 0) return res.status(404).json({ message: 'Campaign not found' });
 
-    const { reach, impressions, clicks, ctr, cpc, cpl, leads, conversions, amount_spent, best_performing_ad, recommendations } = req.body;
+    const {
+      reach, impressions, clicks, ctr, cpc, cpl, leads, conversions,
+      amount_spent, amount, report, recommendations, best_performing_ad,
+      close_campaign, mark_completed
+    } = req.body;
+
+    const spentVal = (amount_spent !== undefined && amount_spent !== '') ? amount_spent
+      : ((amount !== undefined && amount !== '') ? amount : null);
+    const reportText = report || recommendations || best_performing_ad || null;
 
     const [existing] = await db.query('SELECT id FROM ad_campaign_reports WHERE campaign_id = ?', [campaignId]);
 
     if (existing.length > 0) {
       await db.query(
-        `UPDATE ad_campaign_reports SET reach=?, impressions=?, clicks=?, ctr=?, cpc=?, cpl=?, leads=?, conversions=?, amount_spent=?, best_performing_ad=?, recommendations=? WHERE campaign_id=?`,
-        [reach||0, impressions||0, clicks||0, ctr||null, cpc||null, cpl||null, leads||0, conversions||0, amount_spent||null, best_performing_ad||null, recommendations||null, campaignId]
+        `UPDATE ad_campaign_reports 
+         SET reach=?, impressions=?, clicks=?, ctr=?, cpc=?, cpl=?, leads=?, conversions=?, 
+             amount_spent=COALESCE(?, amount_spent), best_performing_ad=COALESCE(?, best_performing_ad), recommendations=COALESCE(?, recommendations) 
+         WHERE campaign_id=?`,
+        [reach||0, impressions||0, clicks||0, ctr||null, cpc||null, cpl||null, leads||0, conversions||0, spentVal, best_performing_ad||null, reportText, campaignId]
       );
     } else {
       await db.query(
         `INSERT INTO ad_campaign_reports (campaign_id, reach, impressions, clicks, ctr, cpc, cpl, leads, conversions, amount_spent, best_performing_ad, recommendations, created_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [campaignId, reach||0, impressions||0, clicks||0, ctr||null, cpc||null, cpl||null, leads||0, conversions||0, amount_spent||null, best_performing_ad||null, recommendations||null, req.user.id]
+        [campaignId, reach||0, impressions||0, clicks||0, ctr||null, cpc||null, cpl||null, leads||0, conversions||0, spentVal, best_performing_ad||null, reportText, req.user.id]
       );
     }
 
-    const [report] = await db.query('SELECT * FROM ad_campaign_reports WHERE campaign_id = ?', [campaignId]);
-    res.emitSocket('ads:report-saved', { campaign_id: campaignId });
-    return res.json(report[0]);
+    const shouldClose = close_campaign === true || close_campaign === 'true' || mark_completed === true || mark_completed === 'true';
+    if (shouldClose) {
+      await db.query(`UPDATE ad_campaigns SET status = 'completed' WHERE id = ?`, [campaignId]);
+
+      const slotId = campaign[0].linked_calendar_ad_id || campaign[0].calendar_slot_id;
+      if (slotId) {
+        try {
+          await db.query(
+            `UPDATE content_calendar_ads SET slot_status = 'completed', completed_at = NOW(), completed_by = ? WHERE id = ?`,
+            [req.user.id, slotId]
+          );
+          try {
+            await db.query(
+              `UPDATE content_calendar_ads SET amount_spent = COALESCE(?, amount_spent), report_notes = COALESCE(?, report_notes) WHERE id = ?`,
+              [spentVal, reportText, slotId]
+            );
+          } catch (e) { /* column may not exist */ }
+
+          res.emitSocket('content-calendar:slot-completed', { item_type: 'ad', item_id: slotId });
+          res.emitSocket('content-calendar:updated', { slot_id: slotId });
+        } catch (slotErr) {
+          console.warn('Ad slot close sync warning:', slotErr.message);
+        }
+      }
+    }
+
+    const [reportRow] = await db.query('SELECT * FROM ad_campaign_reports WHERE campaign_id = ?', [campaignId]);
+    res.emitSocket('ads:report-saved', { campaign_id: campaignId, report: reportRow[0] });
+    res.emitSocket('ads:updated', { id: parseInt(campaignId), status: shouldClose ? 'completed' : campaign[0].status });
+
+    return res.json({
+      message: shouldClose ? 'Ad Campaign closed and report saved' : 'Report saved',
+      report: reportRow[0],
+      status: shouldClose ? 'completed' : campaign[0].status
+    });
   } catch (err) {
     console.error('Ads report save error:', err);
     return res.status(500).json({ message: 'Server error' });
