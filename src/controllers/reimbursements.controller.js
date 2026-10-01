@@ -31,6 +31,37 @@ async function hasReimbursementsAllAccess(user) {
   return false;
 }
 
+function normalizeGroupMembers(input) {
+  if (!input) return null;
+  let parsed = input;
+  if (typeof parsed === 'string') {
+    try {
+      while (typeof parsed === 'string') {
+        const next = JSON.parse(parsed);
+        if (next === parsed) break;
+        parsed = next;
+      }
+    } catch {}
+  }
+  return Array.isArray(parsed) && parsed.length > 0 ? JSON.stringify(parsed) : null;
+}
+
+function parseGroupMembersArray(input) {
+  if (!input) return [];
+  if (Array.isArray(input)) return input;
+  let parsed = input;
+  if (typeof parsed === 'string') {
+    try {
+      while (typeof parsed === 'string') {
+        const next = JSON.parse(parsed);
+        if (next === parsed) break;
+        parsed = next;
+      }
+    } catch {}
+  }
+  return Array.isArray(parsed) ? parsed : [];
+}
+
 /**
  * GET /api/reimbursements
  * Admin / users with "All" submenu access: all requests; Employee: own requests
@@ -71,7 +102,11 @@ exports.list = async (req, res) => {
     sql += ' ORDER BY r.created_at DESC';
 
     const [rows] = await db.query(sql, params);
-    return res.json(rows);
+    const sanitized = rows.map(r => ({
+      ...r,
+      group_members: parseGroupMembersArray(r.group_members),
+    }));
+    return res.json(sanitized);
   } catch (err) {
     console.error('Reimbursements list error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -124,10 +159,13 @@ exports.create = async (req, res) => {
       receiptUrl = url;
     }
 
+    const isGroupVal = is_group === '1' || is_group === 1 || is_group === true || is_group === 'true';
+    const formattedGroupMembers = isGroupVal ? normalizeGroupMembers(group_members) : null;
+
     const [result] = await db.query(
       `INSERT INTO reimbursements (user_id, category, amount, expense_date, description, receipt_url, is_group, group_members)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [req.user.id, category, amount, expense_date, description, receiptUrl, is_group ? 1 : 0, group_members ? JSON.stringify(group_members) : null]
+      [req.user.id, category, amount, expense_date, description, receiptUrl, isGroupVal ? 1 : 0, formattedGroupMembers]
     );
 
     return res.status(201).json({ message: 'Reimbursement submitted', id: result.insertId });
@@ -231,10 +269,14 @@ exports.edit = async (req, res) => {
     if (amount !== undefined && amount !== '') { updates.push('amount = ?'); params.push(amount); }
     if (expense_date) { updates.push('expense_date = ?'); params.push(expense_date); }
     if (description !== undefined) { updates.push('description = ?'); params.push(description); }
-    if (is_group !== undefined) { updates.push('is_group = ?'); params.push(is_group ? 1 : 0); }
+    if (is_group !== undefined) {
+      const isGroupVal = is_group === '1' || is_group === 1 || is_group === true || is_group === 'true';
+      updates.push('is_group = ?');
+      params.push(isGroupVal ? 1 : 0);
+    }
     if (group_members !== undefined) {
       updates.push('group_members = ?');
-      params.push(group_members ? JSON.stringify(group_members) : null);
+      params.push(normalizeGroupMembers(group_members));
     }
 
     // Handle receipt upload
