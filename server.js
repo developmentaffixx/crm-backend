@@ -228,6 +228,9 @@ server.listen(PORT, () => {
     .catch(err => console.error('⚠️  role_permissions can_complete check error (non-fatal):', err.message));
   db.query("ALTER TABLE user_permissions ADD COLUMN IF NOT EXISTS can_complete TINYINT(1) NOT NULL DEFAULT 0")
     .catch(err => console.error('⚠️  user_permissions can_complete check error (non-fatal):', err.message));
+  // ── One-time: Ensure is_visible column exists in daily_targets_settings ──────
+  db.query("ALTER TABLE daily_targets_settings ADD COLUMN IF NOT EXISTS is_visible TINYINT(1) NOT NULL DEFAULT 1")
+    .catch(err => console.error('⚠️  daily_targets_settings is_visible check error (non-fatal):', err.message));
   db.query(`CREATE TABLE IF NOT EXISTS content_calendar_reschedule_history (
     id INT AUTO_INCREMENT PRIMARY KEY,
     item_type ENUM('post', 'shoot', 'ad') NOT NULL,

@@ -1223,7 +1223,11 @@ exports.getDailyTargets = async (req, res) => {
   try {
     const [rows] = await db.query('SELECT * FROM daily_targets_settings WHERE id = 1');
     if (rows.length === 0) return res.status(404).json({ message: 'Daily targets settings not found' });
-    return res.json(rows[0]);
+    const row = rows[0];
+    return res.json({
+      ...row,
+      is_visible: row.is_visible !== undefined && row.is_visible !== null ? (row.is_visible ? 1 : 0) : 1,
+    });
   } catch (err) {
     console.error('getDailyTargets error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -1236,6 +1240,7 @@ exports.getDailyTargets = async (req, res) => {
  */
 exports.updateDailyTargets = async (req, res) => {
   const {
+    is_visible,
     target_mode,
     leads_sourced_min, leads_sourced_max,
     total_outreach_min, total_outreach_max,
@@ -1250,10 +1255,18 @@ exports.updateDailyTargets = async (req, res) => {
   } = req.body;
 
   try {
+    // Ensure is_visible column exists if not added yet
+    try {
+      await db.query('ALTER TABLE daily_targets_settings ADD COLUMN IF NOT EXISTS is_visible TINYINT(1) NOT NULL DEFAULT 1');
+    } catch (_colErr) {
+      // Ignore if column already exists or syntax not supported
+    }
+
     const [existing] = await db.query('SELECT * FROM daily_targets_settings WHERE id = 1');
     const current = existing[0] || {};
 
     const newSettings = {
+      is_visible:            is_visible !== undefined ? (is_visible ? 1 : 0) : (current.is_visible !== undefined && current.is_visible !== null ? current.is_visible : 1),
       target_mode:           target_mode && ['single', 'range'].includes(target_mode) ? target_mode : (current.target_mode || 'range'),
       leads_sourced_min:     leads_sourced_min     !== undefined ? parseInt(leads_sourced_min, 10)     : current.leads_sourced_min,
       leads_sourced_max:     leads_sourced_max     !== undefined ? parseInt(leads_sourced_max, 10)     : current.leads_sourced_max,
@@ -1273,7 +1286,8 @@ exports.updateDailyTargets = async (req, res) => {
 
     await db.query(
       `UPDATE daily_targets_settings
-       SET target_mode           = ?,
+       SET is_visible            = ?,
+           target_mode           = ?,
            leads_sourced_min     = ?, leads_sourced_max     = ?,
            total_outreach_min    = ?, total_outreach_max    = ?,
            follow_ups_min        = ?, follow_ups_max        = ?,
@@ -1283,6 +1297,7 @@ exports.updateDailyTargets = async (req, res) => {
            monthly_revenue_min  = ?, monthly_revenue_max  = ?
        WHERE id = 1`,
       [
+        newSettings.is_visible,
         newSettings.target_mode,
         newSettings.leads_sourced_min, newSettings.leads_sourced_max,
         newSettings.total_outreach_min, newSettings.total_outreach_max,
