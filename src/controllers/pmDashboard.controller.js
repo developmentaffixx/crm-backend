@@ -40,61 +40,98 @@ exports.getOverview = async (req, res) => {
     // If scope === 'own' or coordinator_id is passed, filter accordingly
     const filterUserId = coordinator_id ? parseInt(coordinator_id, 10) : (scope === 'own' && !isAdmin ? userId : null);
 
-    // ── 1. ACTIVE PROJECTS & PROJECT HEALTH ─────────────────────────────────
-    let projWhere = 'p.deleted = 0 AND p.status IN ("open", "in_progress", "active")';
-    const projParams = [];
+    // ── 1. ACTIVE PROJECTS & PROJECT HEALTH (Uses Social Overview base) ────
+    let planWhere = 'p.deleted = 0';
+    const planParams = [];
 
     if (filterUserId) {
-      projWhere += ' AND (p.created_by = ? OR p.id IN (SELECT project_id FROM project_members WHERE user_id = ?))';
-      projParams.push(filterUserId, filterUserId);
+      planWhere += ' AND (p.created_by = ? OR p.project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))';
+      planParams.push(filterUserId, filterUserId);
     }
 
     if (client_id) {
-      projWhere += ' AND p.client_id = ?';
-      projParams.push(parseInt(client_id, 10));
+      planWhere += ' AND (p.client_id = ? OR pr.client_id = ?)';
+      planParams.push(parseInt(client_id, 10), parseInt(client_id, 10));
     }
 
-    const [projects] = await db.query(
+    // First fetch plans (Social Overview base)
+    const [planProjects] = await db.query(
       `SELECT 
-         p.id,
-         p.project_id_code,
-         p.title AS project_name,
-         p.project_type,
+         p.id AS plan_id,
+         p.project_id,
          p.client_id,
-         l.business_name AS client_name,
-         p.start_date,
-         p.end_date,
-         p.status,
+         p.plan_month,
+         COALESCE(pr.title, CONCAT('Plan #', p.id)) AS project_name,
+         COALESCE(pr.project_type, 'external') AS project_type,
+         COALESCE(l.business_name, pr.title, 'Client Project') AS client_name,
+         pr.start_date,
+         pr.end_date,
          CONCAT(u.first_name, ' ', u.last_name) AS owner_name,
-         u.avatar AS owner_avatar,
-         p.created_by
-       FROM projects p
+         u.avatar AS owner_avatar
+       FROM content_calendar_plans p
+       LEFT JOIN projects pr ON pr.id = p.project_id
        LEFT JOIN leads l ON l.id = p.client_id
-       LEFT JOIN users u ON u.id = p.created_by
-       WHERE ${projWhere}
-       ORDER BY p.title ASC`,
-      projParams
+       LEFT JOIN users u ON u.id = COALESCE(pr.created_by, p.created_by)
+       WHERE ${planWhere}
+       GROUP BY p.id
+       ORDER BY p.plan_month DESC, COALESCE(pr.title, '') ASC`,
+      planParams
     );
 
-    // Fetch deliverable counts for these projects
-    const projectIds = projects.map(p => p.id);
+    // If no plans found, also check general projects table
+    let projects = planProjects;
+    if (projects.length === 0) {
+      let projWhere = 'p.deleted = 0';
+      const projParams = [];
+      if (filterUserId) {
+        projWhere += ' AND (p.created_by = ? OR p.id IN (SELECT project_id FROM project_members WHERE user_id = ?))';
+        projParams.push(filterUserId, filterUserId);
+      }
+      const [directProjects] = await db.query(
+        `SELECT 
+           NULL AS plan_id,
+           p.id AS project_id,
+           p.client_id,
+           NULL AS plan_month,
+           p.title AS project_name,
+           COALESCE(p.project_type, 'external') AS project_type,
+           COALESCE(l.business_name, p.title) AS client_name,
+           p.start_date,
+           p.end_date,
+           CONCAT(u.first_name, ' ', u.last_name) AS owner_name,
+           u.avatar AS owner_avatar
+         FROM projects p
+         LEFT JOIN leads l ON l.id = p.client_id
+         LEFT JOIN users u ON u.id = p.created_by
+         WHERE ${projWhere}
+         ORDER BY p.created_at DESC LIMIT 50`,
+        projParams
+      );
+      projects = directProjects;
+    }
+
+    // Fetch deliverable counts for these projects/plans
+    const planIds = projects.map(p => p.plan_id).filter(Boolean);
+    const projectIds = projects.map(p => p.project_id).filter(Boolean);
     let planStatsByProject = {};
-    if (projectIds.length > 0) {
+    if (planIds.length > 0 || projectIds.length > 0) {
       const [planRows] = await db.query(
         `SELECT 
+           cp.id AS plan_id,
            cp.project_id,
            COUNT(DISTINCT cpost.id) AS total_posts,
            SUM(CASE WHEN cpost.slot_status = 'approved' OR cpost.status = 'done' THEN 1 ELSE 0 END) AS approved_posts,
            SUM(CASE WHEN cpost.slot_status = 'pending_approval' THEN 1 ELSE 0 END) AS pending_approval_posts,
            SUM(CASE WHEN cpost.posting_date < CURDATE() AND (cpost.slot_status != 'approved' AND cpost.status != 'done') THEN 1 ELSE 0 END) AS overdue_posts
          FROM content_calendar_plans cp
-         JOIN content_calendar_posts cpost ON cpost.plan_id = cp.id
-         WHERE cp.project_id IN (?) AND cp.deleted = 0
-         GROUP BY cp.project_id`,
-        [projectIds]
+         LEFT JOIN content_calendar_posts cpost ON cpost.plan_id = cp.id
+         WHERE (cp.id IN (?) OR cp.project_id IN (?)) AND cp.deleted = 0
+         GROUP BY cp.id`,
+        [planIds.length ? planIds : [-1], projectIds.length ? projectIds : [-1]]
       );
       planRows.forEach(r => {
-        planStatsByProject[r.project_id] = r;
+        if (r.plan_id) planStatsByProject[`plan_${r.plan_id}`] = r;
+        if (r.project_id) planStatsByProject[`proj_${r.project_id}`] = r;
       });
     }
 
@@ -104,7 +141,7 @@ exports.getOverview = async (req, res) => {
     let delayedCount = 0;
 
     const projectHealthList = projects.map(p => {
-      const stats = planStatsByProject[p.id] || { total_posts: 0, approved_posts: 0, pending_approval_posts: 0, overdue_posts: 0 };
+      const stats = planStatsByProject[`plan_${p.plan_id}`] || planStatsByProject[`proj_${p.project_id}`] || { total_posts: 0, approved_posts: 0, pending_approval_posts: 0, overdue_posts: 0 };
       const total = stats.total_posts || 0;
       const approved = stats.approved_posts || 0;
       const progress = total > 0 ? Math.round((approved / total) * 100) : 0;
@@ -145,7 +182,9 @@ exports.getOverview = async (req, res) => {
       }
 
       return {
-        id: p.id,
+        id: p.plan_id ? `plan_${p.plan_id}` : (p.project_id ? `proj_${p.project_id}` : p.id),
+        plan_id: p.plan_id,
+        project_id: p.project_id,
         project_name: p.project_name,
         client_name: p.client_name || 'Internal',
         client_id: p.client_id,
@@ -285,14 +324,13 @@ exports.getOverview = async (req, res) => {
         COALESCE(u.department, 'Operations') AS department,
         COUNT(t.id) AS assigned_count,
         SUM(CASE WHEN t.status IN ('completed', 'done') THEN 1 ELSE 0 END) AS completed_count,
-        SUM(CASE WHEN t.status NOT IN ('completed', 'done') THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN t.status NOT IN ('completed', 'done') AND t.status IS NOT NULL THEN 1 ELSE 0 END) AS pending_count,
         SUM(CASE WHEN t.status NOT IN ('completed', 'done') AND t.deadline < CURDATE() THEN 1 ELSE 0 END) AS overdue_count
       FROM users u
       LEFT JOIN roles r ON r.id = u.role_id
       LEFT JOIN tasks t ON t.assigned_to = u.id AND t.deleted = 0
       WHERE u.status = 'active'
       GROUP BY u.id
-      HAVING assigned_count > 0 OR pending_count > 0
       ORDER BY pending_count DESC, overdue_count DESC
     `);
 
@@ -317,16 +355,15 @@ exports.getOverview = async (req, res) => {
         COUNT(cp.id) AS total_slots,
         SUM(CASE WHEN cp.slot_status = 'pending_approval' THEN 1 ELSE 0 END) AS pending_slots,
         SUM(CASE WHEN cp.slot_status = 'approved' OR cp.status = 'done' THEN 1 ELSE 0 END) AS approved_slots,
-        DATEDIFF(CURDATE(), MIN(CASE WHEN cp.slot_status = 'pending_approval' THEN cp.submitted_at ELSE NULL END)) AS oldest_pending_days,
+        COALESCE(DATEDIFF(CURDATE(), MIN(CASE WHEN cp.slot_status = 'pending_approval' THEN cp.submitted_at ELSE NULL END)), 0) AS oldest_pending_days,
         (SELECT MAX(f.followed_up_at) FROM pm_approval_followups f WHERE f.client_id = l.id) AS last_follow_up,
         (SELECT MAX(f.next_follow_up_date) FROM pm_approval_followups f WHERE f.client_id = l.id) AS next_follow_up
       FROM content_calendar_plans p
       JOIN leads l ON l.id = p.client_id
-      JOIN content_calendar_posts cp ON cp.plan_id = p.id
-      WHERE p.deleted = 0 AND p.shared_with_client = 1
+      LEFT JOIN content_calendar_posts cp ON cp.plan_id = p.id
+      WHERE p.deleted = 0
       GROUP BY l.id, p.id
-      HAVING pending_slots > 0 OR oldest_pending_days > 0
-      ORDER BY oldest_pending_days DESC, pending_slots DESC
+      ORDER BY pending_slots DESC, oldest_pending_days DESC
     `);
 
     const clientApprovals = approvalRows.map(r => ({
