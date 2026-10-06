@@ -1,5 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
+const { canApproveTasks } = require('../middleware/auth');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Log activity
@@ -703,9 +704,10 @@ exports.markDone = async (req, res) => {
 
     const task = rows[0];
 
-    // Only primary assignee or admin can mark done
-    if (task.assigned_to !== req.user.id && !req.user.is_admin) {
-      return res.status(403).json({ message: 'Only the primary assigned user can mark this task done' });
+    // Only primary assignee, admin, or task manager (can_approve) can mark done
+    const canApprove = req.user.is_admin || (await canApproveTasks(req.user));
+    if (task.assigned_to !== req.user.id && !canApprove) {
+      return res.status(403).json({ message: 'Only the primary assigned user or task managers can mark this task done' });
     }
 
     if (task.is_active !== 1) {

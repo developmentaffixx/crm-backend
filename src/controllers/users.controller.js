@@ -454,6 +454,54 @@ exports.cancelLeave = async (req, res) => {
 };
 
 /**
+ * GET /api/users/me/reimbursements
+ * Get user's personal reimbursement history and summary
+ */
+exports.myReimbursements = async (req, res) => {
+  try {
+    const [reimbursements] = await db.query(
+      `SELECT r.*, CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name
+       FROM reimbursements r
+       LEFT JOIN users a ON a.id = r.approved_by
+       WHERE r.user_id = ? AND r.deleted = 0
+       ORDER BY r.expense_date DESC, r.created_at DESC`,
+      [req.user.id]
+    );
+
+    const [stats] = await db.query(
+      `SELECT
+        COUNT(*) as total_count,
+        COALESCE(SUM(amount), 0) as total_amount,
+        COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) as pending_count,
+        COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0) as pending_amount,
+        COALESCE(SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END), 0) as approved_count,
+        COALESCE(SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), 0) as approved_amount,
+        COALESCE(SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END), 0) as paid_count,
+        COALESCE(SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END), 0) as paid_amount,
+        COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0) as rejected_count,
+        COALESCE(SUM(CASE WHEN status = 'rejected' THEN amount ELSE 0 END), 0) as rejected_amount
+       FROM reimbursements
+       WHERE user_id = ? AND deleted = 0`,
+      [req.user.id]
+    );
+
+    return res.json({
+      reimbursements,
+      stats: stats[0] || {
+        total_count: 0, total_amount: 0,
+        pending_count: 0, pending_amount: 0,
+        approved_count: 0, approved_amount: 0,
+        paid_count: 0, paid_amount: 0,
+        rejected_count: 0, rejected_amount: 0,
+      }
+    });
+  } catch (err) {
+    console.error('My reimbursements error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * GET /api/users/:id/employment
  * Get employment status + probation info for an employee (admin only)
  */

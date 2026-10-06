@@ -11,8 +11,11 @@ const upload = multer({
 
 router.use(authenticate);
 
-// List (admin sees all, employee sees own)
+// List (admin sees all, employee sees own; support ?mine=true)
 router.get('/', ctrl.list);
+
+// Personal stats for user profile page
+router.get('/my-stats', ctrl.myStats);
 
 // Stats (admin)
 router.get('/stats', requireAdmin, ctrl.stats);

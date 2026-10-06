@@ -9,10 +9,16 @@ const { uploadToCloudinary } = require('../config/cloudinary');
 async function hasReimbursementsAllAccess(user) {
   if (user.is_admin) return true;
   try {
-    // 1. User-level override wins
+    // 1. User-level override wins (check finance first, fallback to people_ops)
     const [userOverride] = await db.query(
-      'SELECT can_access FROM user_submenu_permissions WHERE user_id = ? AND module = ? AND submenu = ?',
-      [user.id, 'people_ops', 'reimbursements']
+      `SELECT can_access FROM user_submenu_permissions 
+       WHERE user_id = ? AND (
+         (module = 'finance' AND submenu = 'reimbursements') OR 
+         (module = 'people_ops' AND submenu = 'reimbursements')
+       )
+       ORDER BY CASE WHEN module = 'finance' THEN 1 ELSE 2 END ASC
+       LIMIT 1`,
+      [user.id]
     );
     if (userOverride.length > 0) return userOverride[0].can_access >= 2;
 
@@ -20,8 +26,14 @@ async function hasReimbursementsAllAccess(user) {
     const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [user.id]);
     if (userRole.length > 0 && userRole[0].role_id) {
       const [rolePerms] = await db.query(
-        'SELECT can_access FROM role_submenu_permissions WHERE role_id = ? AND module = ? AND submenu = ?',
-        [userRole[0].role_id, 'people_ops', 'reimbursements']
+        `SELECT can_access FROM role_submenu_permissions 
+         WHERE role_id = ? AND (
+           (module = 'finance' AND submenu = 'reimbursements') OR 
+           (module = 'people_ops' AND submenu = 'reimbursements')
+         )
+         ORDER BY CASE WHEN module = 'finance' THEN 1 ELSE 2 END ASC
+         LIMIT 1`,
+        [userRole[0].role_id]
       );
       if (rolePerms.length > 0) return rolePerms[0].can_access >= 2;
     }
@@ -68,7 +80,7 @@ function parseGroupMembersArray(input) {
  */
 exports.list = async (req, res) => {
   try {
-    const { status, search } = req.query;
+    const { status, search, mine } = req.query;
     const isAdmin = await hasReimbursementsAllAccess(req.user);
 
     let sql = `
@@ -83,7 +95,8 @@ exports.list = async (req, res) => {
     `;
     const params = [];
 
-    if (!isAdmin) {
+    // Filter to own requests if employee OR if explicit mine parameter is passed
+    if (!isAdmin || mine === 'true' || mine === '1') {
       sql += ' AND r.user_id = ?';
       params.push(req.user.id);
     }
@@ -109,6 +122,42 @@ exports.list = async (req, res) => {
     return res.json(sanitized);
   } catch (err) {
     console.error('Reimbursements list error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * GET /api/reimbursements/my-stats
+ * Personal reimbursement stats for profile tab
+ */
+exports.myStats = async (req, res) => {
+  try {
+    const [stats] = await db.query(
+      `SELECT
+        COUNT(*) as total_count,
+        COALESCE(SUM(amount), 0) as total_amount,
+        COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) as pending_count,
+        COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0) as pending_amount,
+        COALESCE(SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END), 0) as approved_count,
+        COALESCE(SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), 0) as approved_amount,
+        COALESCE(SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END), 0) as paid_count,
+        COALESCE(SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END), 0) as paid_amount,
+        COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0) as rejected_count,
+        COALESCE(SUM(CASE WHEN status = 'rejected' THEN amount ELSE 0 END), 0) as rejected_amount
+       FROM reimbursements
+       WHERE user_id = ? AND deleted = 0`,
+      [req.user.id]
+    );
+
+    return res.json(stats[0] || {
+      total_count: 0, total_amount: 0,
+      pending_count: 0, pending_amount: 0,
+      approved_count: 0, approved_amount: 0,
+      paid_count: 0, paid_amount: 0,
+      rejected_count: 0, rejected_amount: 0,
+    });
+  } catch (err) {
+    console.error('My reimbursements stats error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
@@ -148,7 +197,7 @@ exports.stats = async (req, res) => {
  */
 exports.create = async (req, res) => {
   try {
-    const { category, amount, expense_date, description, is_group, group_members } = req.body;
+    const { category, amount, expense_date, description, is_group, group_members, user_id } = req.body;
     if (!category || !amount || !expense_date || !description) {
       return res.status(400).json({ message: 'All fields are required' });
     }
@@ -161,11 +210,12 @@ exports.create = async (req, res) => {
 
     const isGroupVal = is_group === '1' || is_group === 1 || is_group === true || is_group === 'true';
     const formattedGroupMembers = isGroupVal ? normalizeGroupMembers(group_members) : null;
+    const targetUserId = (req.user.is_admin && user_id) ? user_id : req.user.id;
 
     const [result] = await db.query(
       `INSERT INTO reimbursements (user_id, category, amount, expense_date, description, receipt_url, is_group, group_members)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [req.user.id, category, amount, expense_date, description, receiptUrl, isGroupVal ? 1 : 0, formattedGroupMembers]
+      [targetUserId, category, amount, expense_date, description, receiptUrl, isGroupVal ? 1 : 0, formattedGroupMembers]
     );
 
     return res.status(201).json({ message: 'Reimbursement submitted', id: result.insertId });
@@ -256,7 +306,7 @@ exports.markPaid = async (req, res) => {
 exports.edit = async (req, res) => {
   try {
     const { id } = req.params;
-    const { category, amount, expense_date, description, is_group, group_members } = req.body;
+    const { category, amount, expense_date, description, is_group, group_members, user_id } = req.body;
 
     const [rows] = await db.query('SELECT * FROM reimbursements WHERE id = ? AND deleted = 0', [id]);
     if (!rows.length) return res.status(404).json({ message: 'Not found' });
@@ -265,6 +315,7 @@ exports.edit = async (req, res) => {
     const updates = [];
     const params = [];
 
+    if (user_id) { updates.push('user_id = ?'); params.push(user_id); }
     if (category) { updates.push('category = ?'); params.push(category); }
     if (amount !== undefined && amount !== '') { updates.push('amount = ?'); params.push(amount); }
     if (expense_date) { updates.push('expense_date = ?'); params.push(expense_date); }

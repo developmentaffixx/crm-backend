@@ -207,9 +207,10 @@ exports.createCloseRequest = async (req, res) => {
 
     const task = tasks[0];
 
-    // Only the assignee can raise a close request
-    if (task.assigned_to !== req.user.id) {
-      return res.status(403).json({ message: 'Only the assigned user can request task closure' });
+    // Only the assignee, admin, or task approver can raise a close request
+    const canApprove = req.user.is_admin || (await canApproveTasks(req.user));
+    if (task.assigned_to !== req.user.id && !canApprove) {
+      return res.status(403).json({ message: 'Only the assigned user or task managers can request task closure' });
     }
 
     // Block if task is already completed or rejected

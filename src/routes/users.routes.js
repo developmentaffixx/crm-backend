@@ -53,6 +53,9 @@ router.post('/me/leaves', usersController.applyLeave);
 // DELETE /api/users/me/leaves/:id — cancel leave
 router.delete('/me/leaves/:id', usersController.cancelLeave);
 
+// GET /api/users/me/reimbursements — user's reimbursements
+router.get('/me/reimbursements', usersController.myReimbursements);
+
 // ─── Activity Timeline ────────────────────────────────────────────────────────
 router.get('/me/activity', usersController.myActivity);
 
