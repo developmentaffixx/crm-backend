@@ -259,13 +259,19 @@ exports.totals = async (req, res) => {
       total_other_credits = parseFloat(creditRows[0].total_credits || 0);
     } catch (_) {}
 
+    let total_withdrawal_returns = 0;
+    try {
+      const [returnsRows] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total_returns FROM withdrawal_returns WHERE deleted = 0`);
+      total_withdrawal_returns = parseFloat(returnsRows[0].total_returns || 0);
+    } catch (_) {}
+
     const total_capital = parseFloat(capitalRows[0].total_capital);
     const total_expenses = parseFloat(expenseRows[0].total_expenses);
     const total_income = parseFloat(incomeRows[0].total_income);
     const total_withdrawals = parseFloat(withdrawalRows[0].total_withdrawals);
-    const net_balance = (total_capital + total_income + total_loans + total_other_credits) - (total_expenses + total_withdrawals);
+    const net_balance = (total_capital + total_income + total_loans + total_other_credits + total_withdrawal_returns) - (total_expenses + total_withdrawals);
 
-    return res.json({ total_capital, total_income, total_loans, total_other_credits, total_expenses, total_withdrawals, net_balance });
+    return res.json({ total_capital, total_income, total_loans, total_other_credits, total_withdrawal_returns, total_expenses, total_withdrawals, net_balance });
   } catch (err) {
     console.error('Capital totals error:', err);
     return res.status(500).json({ message: 'Server error' });
