@@ -35,6 +35,9 @@ router.post(
   leadsController.create
 );
 
+// GET  /api/leads/sync-google-sheet/info — get Google service account email for sharing
+router.get('/sync-google-sheet/info', googleSheetSyncController.getSyncInfo);
+
 // POST /api/leads/sync-google-sheet — import leads from Google Sheet (must be before /:id)
 router.post('/sync-google-sheet', googleSheetSyncController.syncFromGoogleSheet);
 

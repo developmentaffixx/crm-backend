@@ -1,3 +1,5 @@
+const path = require('path');
+const fs = require('fs');
 const { google } = require('googleapis');
 const db = require('../config/db');
 
@@ -34,10 +36,27 @@ async function generateLeadId(connection, customDate) {
   return `${prefix}-${seq}`;
 }
 
+// ─── Helper: Get service account email ───────────────────────────────────────
+function getServiceAccountEmail() {
+  if (process.env.GOOGLE_CLIENT_EMAIL) {
+    return process.env.GOOGLE_CLIENT_EMAIL;
+  }
+  const credsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || path.resolve(__dirname, '../../google-credentials.json');
+  if (fs.existsSync(credsPath)) {
+    try {
+      const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
+      if (creds.client_email) return creds.client_email;
+    } catch (e) {
+      // ignore
+    }
+  }
+  return 'crm-sheets-sync@live-crm-498812.iam.gserviceaccount.com';
+}
+
 // ─── Helper: Get authenticated Google Sheets client ──────────────────────────
 function getSheetsClient() {
-  // Option 1: Use a key file path (most reliable)
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  // Option 1: Use a key file path from env
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
     const auth = new google.auth.GoogleAuth({
       keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
       scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
@@ -45,7 +64,17 @@ function getSheetsClient() {
     return google.sheets({ version: 'v4', auth });
   }
 
-  // Option 2: Use individual env variables
+  // Option 2: Use default credentials file in backend root
+  const defaultCredsPath = path.resolve(__dirname, '../../google-credentials.json');
+  if (fs.existsSync(defaultCredsPath)) {
+    const auth = new google.auth.GoogleAuth({
+      keyFile: defaultCredsPath,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    });
+    return google.sheets({ version: 'v4', auth });
+  }
+
+  // Option 3: Use individual env variables
   let privateKey = process.env.GOOGLE_PRIVATE_KEY || '';
   
   // Try base64 decode first (safest way to pass private keys via env)
@@ -142,8 +171,12 @@ exports.syncFromGoogleSheet = async (req, res) => {
     return res.status(400).json({ message: 'Spreadsheet ID is required' });
   }
 
-  if (!process.env.GOOGLE_CLIENT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY) {
-    return res.status(500).json({ message: 'Google service account not configured on server. Add GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY.' });
+  const defaultCredsPath = path.resolve(__dirname, '../../google-credentials.json');
+  const hasCredsFile = (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) || fs.existsSync(defaultCredsPath);
+  const hasEnvVars = process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY;
+
+  if (!hasCredsFile && !hasEnvVars) {
+    return res.status(500).json({ message: 'Google service account not configured on server. Add GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY or google-credentials.json.' });
   }
 
   try {
@@ -304,14 +337,40 @@ exports.syncFromGoogleSheet = async (req, res) => {
     });
   } catch (err) {
     console.error('Google Sheet sync error:', err);
+    const serviceAccountEmail = getServiceAccountEmail();
 
     if (err.code === 404) {
-      return res.status(404).json({ message: 'Spreadsheet not found. Check the Sheet ID and make sure it is shared with the service account.' });
+      return res.status(404).json({
+        message: `Spreadsheet not found. Check the Sheet ID and make sure it is shared with: ${serviceAccountEmail}`,
+        serviceAccountEmail,
+      });
     }
     if (err.code === 403) {
-      return res.status(403).json({ message: 'Access denied. Make sure the Google Sheet is shared with the service account email.' });
+      return res.status(403).json({
+        message: `Access denied. Please share your Google Sheet with: ${serviceAccountEmail} (as Viewer)`,
+        serviceAccountEmail,
+      });
     }
 
-    return res.status(500).json({ message: err.message || 'Failed to sync from Google Sheet' });
+    return res.status(500).json({
+      message: err.message || 'Failed to sync from Google Sheet',
+      serviceAccountEmail,
+    });
+  }
+};
+
+/**
+ * GET /api/leads/sync-google-sheet/info
+ * Returns the Google service account email so the UI can prompt the user to share the sheet.
+ */
+exports.getSyncInfo = async (req, res) => {
+  try {
+    const email = getServiceAccountEmail();
+    return res.json({
+      serviceAccountEmail: email,
+      isConfigured: !!email,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: 'Failed to retrieve Google Sheet sync info' });
   }
 };
