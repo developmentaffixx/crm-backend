@@ -215,6 +215,8 @@ exports.syncFromGoogleSheet = async (req, res) => {
     let added = 0;
     let skipped = 0;
     const errors = [];
+    const addedLeads = [];
+    const duplicateLeads = [];
 
     for (let i = 0; i < dataRows.length; i++) {
       const row = dataRows[i];
@@ -244,14 +246,24 @@ exports.syncFromGoogleSheet = async (req, res) => {
       const cleanBizName = lead.business_name ? normalizeBusinessName(lead.business_name) : null;
 
       let isDuplicate = false;
+      let duplicateReason = '';
       if (cleanPhone && existingPhones.has(cleanPhone)) {
         isDuplicate = true;
+        duplicateReason = `Duplicate phone: ${lead.phone}`;
       } else if (cleanBizName && existingBusinessNames.has(cleanBizName)) {
         isDuplicate = true;
+        duplicateReason = `Duplicate business name: ${lead.business_name}`;
       }
 
       if (isDuplicate) {
         skipped++;
+        duplicateLeads.push({
+          row: rowNum,
+          name: lead.name,
+          business_name: lead.business_name || lead.name,
+          phone: lead.phone || null,
+          reason: duplicateReason,
+        });
         continue;
       }
 
@@ -323,6 +335,13 @@ exports.syncFromGoogleSheet = async (req, res) => {
         );
 
         added++;
+        addedLeads.push({
+          row: rowNum,
+          name: lead.name,
+          business_name: lead.business_name || lead.name,
+          phone: lead.phone || null,
+          lead_id,
+        });
       } catch (insertErr) {
         console.error(`Sheet sync - row ${rowNum} insert error:`, insertErr);
         errors.push({ row: rowNum, reason: 'Database insert failed' });
@@ -333,6 +352,8 @@ exports.syncFromGoogleSheet = async (req, res) => {
       added,
       skipped,
       errors,
+      addedLeads,
+      duplicateLeads,
       message: `Sync complete: ${added} leads added, ${skipped} duplicates skipped${errors.length ? `, ${errors.length} errors` : ''}`,
     });
   } catch (err) {
