@@ -106,7 +106,7 @@ exports.list = async (req, res) => {
     }
 
     // Validate sortBy to prevent SQL injection
-    const allowedSortColumns = ['created_at', 'name', 'business_name', 'status', 'temperature', 'source', 'lead_id'];
+    const allowedSortColumns = ['created_at', 'name', 'business_name', 'status', 'temperature', 'source', 'lead_id', 'assigned_to'];
     const safeSortBy = allowedSortColumns.includes(sortBy) ? sortBy : 'created_at';
     const safeSortOrder = sortOrder.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
