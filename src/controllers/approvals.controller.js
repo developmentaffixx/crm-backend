@@ -50,15 +50,25 @@ exports.createExtension = async (req, res) => {
       return res.status(409).json({ message: 'A pending extension request already exists for this task' });
     }
 
+    const canApprove = req.user.is_admin || (await canApproveTasks(req.user));
+    const initialStatus = canApprove ? 'approved' : 'pending';
+
     const [result] = await db.query(
-      'INSERT INTO task_deadline_extension_requests (task_id, requested_by, requested_deadline, reason) VALUES (?, ?, ?, ?)',
-      [task_id, req.user.id, requested_deadline, reason]
+      'INSERT INTO task_deadline_extension_requests (task_id, requested_by, requested_deadline, reason, status, actioned_by) VALUES (?, ?, ?, ?, ?, ?)',
+      [task_id, req.user.id, requested_deadline, reason, initialStatus, canApprove ? req.user.id : null]
     );
 
-    // Log to task activity
-    await logActivity(task_id, req.user.id, 'extension_requested', {
-      note: `Requested new deadline: ${new Date(requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${reason ? ' — Reason: ' + reason : ''}`
-    });
+    if (canApprove) {
+      await db.query('UPDATE tasks SET deadline = ? WHERE id = ?', [requested_deadline, task_id]);
+      await logActivity(task_id, req.user.id, 'extension_approved', {
+        note: `Deadline updated directly by manager to ${new Date(requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${reason ? ' — Reason: ' + reason : ''}`
+      });
+    } else {
+      // Log to task activity
+      await logActivity(task_id, req.user.id, 'extension_requested', {
+        note: `Requested new deadline: ${new Date(requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${reason ? ' — Reason: ' + reason : ''}`
+      });
+    }
 
     const [rows] = await db.query(
       `SELECT er.*, t.title AS task_title,

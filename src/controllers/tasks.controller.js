@@ -261,7 +261,7 @@ exports.list = async (req, res) => {
       to_do:            allRows.filter(r => r.status === 'to_do' && r.is_active === 1).length,
       in_progress:      allRows.filter(r => r.status === 'in_progress' && r.is_active === 1).length,
       done:             allRows.filter(r => r.is_active === 3).length,
-      pending_approval: req.user.is_admin ? allRows.filter(r => r.is_active === 0).length : 0,
+      pending_approval: (req.user.is_admin || canApprove) ? allRows.filter(r => r.is_active === 0).length : 0,
       rejected:         allRows.filter(r => r.is_active === 4).length,
     };
 
@@ -407,7 +407,8 @@ exports.create = async (req, res) => {
 
   try {
     const assignee  = assigned_to || req.user.id;
-    const isActive  = req.user.is_admin ? 1 : 0;
+    const canApprove = req.user.is_admin || (await canApproveTasks(req.user));
+    const isActive  = canApprove ? 1 : 0;
 
     // ── Pre-flight: validate cycle BEFORE inserting the task ─────────────────
     let linkedCycle = null;
@@ -714,9 +715,12 @@ exports.markDone = async (req, res) => {
       return res.status(400).json({ message: 'Task must be active (is_active=1) to mark as done' });
     }
 
-    await db.query("UPDATE tasks SET is_active = 2, status = 'done', closing_statement = ? WHERE id = ?", [closing_statement.trim(), task.id]);
+    const newActiveState = canApprove ? 3 : 2;
+    await db.query("UPDATE tasks SET is_active = ?, status = 'done', closing_statement = ? WHERE id = ?", [newActiveState, closing_statement.trim(), task.id]);
 
-    await logActivity(task.id, req.user.id, 'marked_done', { note: closing_statement.trim() });
+    await logActivity(task.id, req.user.id, canApprove ? 'approved' : 'marked_done', {
+      note: canApprove ? `Task completed and closed: ${closing_statement.trim()}` : closing_statement.trim()
+    });
 
     const [updated] = await db.query('SELECT * FROM tasks WHERE id = ?', [task.id]);
     res.emitSocket('tasks:updated', updated[0]);
