@@ -161,9 +161,18 @@ exports.generateCycles = async (req, res) => {
       return res.status(409).json({ message: `Date range overlaps with "${ov.title}" (${ov.start_date.toISOString().split('T')[0]} to ${ov.end_date.toISOString().split('T')[0]}). Choose non-overlapping dates.` });
     }
 
-    // Determine status based on dates
+    // Determine status based on dates — if an active cycle already exists, schedule as upcoming
     const today = new Date().toISOString().split('T')[0];
-    const cycleStatus = start_date > today ? 'upcoming' : 'active';
+    let cycleStatus = start_date > today ? 'upcoming' : 'active';
+    if (psId && cycleStatus === 'active') {
+      const [existingActive] = await db.query(
+        `SELECT id FROM service_cycles WHERE project_service_id = ? AND status = 'active' LIMIT 1`,
+        [psId]
+      );
+      if (existingActive.length > 0) {
+        cycleStatus = 'upcoming';
+      }
+    }
 
     const cycle = await generateNextCycleForProject(projectId, start_date, end_date, req.user.id, psId, cycleStatus);
 
