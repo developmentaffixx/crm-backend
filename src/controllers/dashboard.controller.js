@@ -28,17 +28,23 @@ exports.memberStats = async (req, res) => {
        GROUP BY p.status`,
       [userId]
     );
-    const projects = { open: 0, in_progress: 0, completed: 0 };
+    const projects = { total: 0, active: 0, inactive: 0, open: 0, in_progress: 0, completed: 0 };
     for (const row of projectRows) {
       const status = row.status?.toLowerCase().replace(/\s+/g, '_');
+      const count = Number(row.count || 0);
+      projects.total += count;
       if (status === 'open' || status === 'active') {
-        projects.open += row.count;
+        projects.open += count;
+        projects.active += count;
       } else if (status === 'in_progress' || status === 'ongoing') {
-        projects.in_progress += row.count;
-      } else if (status === 'completed' || status === 'done' || status === 'closed') {
-        projects.completed += row.count;
-      } else if (projects.hasOwnProperty(status)) {
-        projects[status] += row.count;
+        projects.in_progress += count;
+        projects.active += count;
+      } else if (status === 'completed' || status === 'done' || status === 'closed' || status === 'inactive') {
+        projects.completed += count;
+        projects.inactive += count;
+      } else {
+        projects.open += count;
+        projects.active += count;
       }
     }
 
@@ -146,9 +152,31 @@ exports.adminStats = async (req, res) => {
     const [projectRows] = await db.query(
       `SELECT status, COUNT(*) AS count FROM projects WHERE deleted = 0 GROUP BY status`
     );
-    const projectStats = { open: 0, in_progress: 0, completed: 0 };
+    const projectStats = {
+      total: 0,
+      active: 0,
+      inactive: 0,
+      open: 0,
+      in_progress: 0,
+      completed: 0
+    };
     for (const row of projectRows) {
-      if (projectStats.hasOwnProperty(row.status)) projectStats[row.status] = row.count;
+      const status = row.status?.toLowerCase().replace(/\s+/g, '_');
+      const count = Number(row.count || 0);
+      projectStats.total += count;
+      if (status === 'active' || status === 'open') {
+        projectStats.active += count;
+        projectStats.open += count;
+      } else if (status === 'in_progress' || status === 'ongoing') {
+        projectStats.active += count;
+        projectStats.in_progress += count;
+      } else if (status === 'inactive' || status === 'completed' || status === 'done' || status === 'closed') {
+        projectStats.inactive += count;
+        projectStats.completed += count;
+      } else {
+        projectStats.active += count;
+        projectStats.open += count;
+      }
     }
 
     // Tickets
