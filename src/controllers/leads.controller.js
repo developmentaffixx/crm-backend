@@ -887,7 +887,17 @@ exports.getFilterOptions = async (req, res) => {
     const [dbStages] = await db.query(
       "SELECT DISTINCT lead_stage FROM leads WHERE deleted = 0 AND lead_stage IS NOT NULL AND lead_stage != '' ORDER BY lead_stage"
     );
-    const [users] = await db.query(
+    // Only users who actually have leads assigned to them (for filter dropdown)
+    const [usersWithLeads] = await db.query(
+      `SELECT DISTINCT u.id, CONCAT(u.first_name, ' ', u.last_name) AS name 
+       FROM users u 
+       JOIN leads l ON l.assigned_to = u.id AND l.deleted = 0 
+       WHERE u.deleted = 0 
+       ORDER BY u.first_name`
+    );
+
+    // All active users (for assigning / bulk reassigning leads)
+    const [allActiveUsers] = await db.query(
       "SELECT id, CONCAT(first_name, ' ', last_name) AS name FROM users WHERE deleted = 0 AND is_active = 1 ORDER BY first_name"
     );
 
@@ -901,7 +911,8 @@ exports.getFilterOptions = async (req, res) => {
       industries: industries.map(r => r.industry),
       statuses: allStatuses,
       stages: allStages,
-      users: users,
+      users: usersWithLeads,
+      all_users: allActiveUsers,
     });
   } catch (err) {
     console.error('Lead filter options error:', err);
