@@ -163,8 +163,8 @@ exports.getOne = async (req, res) => {
       `SELECT pm.id AS membership_id, u.id, u.first_name, u.last_name, u.email, u.is_admin, u.is_active, u.avatar_url
        FROM project_members pm
        JOIN users u ON u.id = pm.user_id
-       WHERE pm.project_id = ? AND u.is_admin = 0
-       ORDER BY u.is_active DESC, u.first_name`,
+       WHERE pm.project_id = ? AND u.is_admin = 0 AND u.is_active = 1 AND u.deleted = 0
+       ORDER BY u.first_name, u.last_name`,
       [project.id]
     );
     project.members = members;

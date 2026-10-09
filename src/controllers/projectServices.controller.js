@@ -640,7 +640,7 @@ exports.listServiceMembers = async (req, res) => {
       `SELECT psm.id AS membership_id, u.id, u.first_name, u.last_name, u.email, u.is_active, u.avatar_url
        FROM project_service_members psm
        JOIN users u ON u.id = psm.user_id
-       WHERE psm.project_service_id = ?
+       WHERE psm.project_service_id = ? AND u.is_active = 1 AND u.deleted = 0
        ORDER BY u.first_name, u.last_name`,
       [serviceId]
     );
