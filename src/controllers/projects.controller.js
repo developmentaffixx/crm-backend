@@ -7,17 +7,36 @@ const { canEditProject, getUserModulePermission } = require('../middleware/auth'
 // ─────────────────────────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
-    const { status, search, client_id } = req.query;
+    const { status, search, client_id, project_type, service_id, member_id } = req.query;
 
     // ── Base conditions (no status filter) — used for summary counts ──
     let baseWhere = 'p.deleted = 0';
     const baseParams = [];
 
-    if (client_id) { baseWhere += ' AND p.client_id = ?'; baseParams.push(client_id); }
+    if (client_id) {
+      baseWhere += ' AND p.client_id = ?';
+      baseParams.push(client_id);
+    }
+    if (project_type && (project_type === 'internal' || project_type === 'external')) {
+      baseWhere += ' AND p.project_type = ?';
+      baseParams.push(project_type);
+    }
+    if (service_id) {
+      baseWhere += ' AND (p.service_id = ? OR EXISTS (SELECT 1 FROM project_services ps WHERE ps.project_id = p.id AND ps.service_id = ?))';
+      baseParams.push(service_id, service_id);
+    }
+    if (member_id) {
+      baseWhere += ` AND (
+        p.created_by = ? 
+        OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = ?)
+        OR EXISTS (SELECT 1 FROM project_service_members psm JOIN project_services ps ON ps.id = psm.project_service_id WHERE ps.project_id = p.id AND psm.user_id = ?)
+      )`;
+      baseParams.push(member_id, member_id, member_id);
+    }
     if (search) {
-      baseWhere += ' AND (p.title LIKE ? OR l.business_name LIKE ?)';
+      baseWhere += ' AND (p.title LIKE ? OR l.business_name LIKE ? OR p.project_id_code LIKE ?)';
       const s = `%${search}%`;
-      baseParams.push(s, s);
+      baseParams.push(s, s, s);
     }
 
     let hasViewAll = false;
