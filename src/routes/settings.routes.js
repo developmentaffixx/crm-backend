@@ -59,6 +59,7 @@ router.post('/users', [
   body('last_name').notEmpty().withMessage('Last name is required'),
 ], ctrl.createUser);
 router.put('/users/:id',                  [param('id').isInt({ min: 1 })], ctrl.updateUser);
+router.get('/users/:id/open-tasks-summary', [param('id').isInt({ min: 1 })], ctrl.getUserOpenTasksSummary);
 router.put('/users/:id/deactivate',       [param('id').isInt({ min: 1 })], ctrl.deactivateUser);
 router.put('/users/:id/reset-password',   [
   param('id').isInt({ min: 1 }),

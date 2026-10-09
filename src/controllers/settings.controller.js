@@ -908,14 +908,67 @@ exports.updateUser = async (req, res) => {
 };
 
 /**
+ * GET /api/settings/users/:id/open-tasks-summary
+ * Returns count of open primary tasks, open collaborator tasks, and suggested reporting manager
+ */
+exports.getUserOpenTasksSummary = async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  try {
+    const [userRows] = await db.query(
+      `SELECT u.id, u.first_name, u.last_name, u.reporting_to,
+              CONCAT(m.first_name, ' ', m.last_name) AS reporting_to_name
+       FROM users u
+       LEFT JOIN users m ON m.id = u.reporting_to AND m.deleted = 0 AND m.is_active = 1
+       WHERE u.id = ? AND u.deleted = 0`,
+      [userId]
+    );
+    if (userRows.length === 0) return res.status(404).json({ message: 'User not found' });
+    const user = userRows[0];
+
+    // Open primary tasks (deleted = 0, is_active != 3)
+    const [primaryRows] = await db.query(
+      `SELECT id, title, status, priority, deadline
+       FROM tasks
+       WHERE assigned_to = ? AND deleted = 0 AND is_active != 3
+       ORDER BY deadline ASC`,
+      [userId]
+    );
+
+    // Open collaborator tasks
+    const [collabRows] = await db.query(
+      `SELECT t.id, t.title, t.status, t.priority, t.deadline
+       FROM task_assignees ta
+       JOIN tasks t ON t.id = ta.task_id
+       WHERE ta.user_id = ? AND ta.role = 'collaborator' AND t.deleted = 0 AND t.is_active != 3
+       ORDER BY t.deadline ASC`,
+      [userId]
+    );
+
+    return res.json({
+      user,
+      primary_count: primaryRows.length,
+      collaborator_count: collabRows.length,
+      primary_tasks: primaryRows,
+      collaborator_tasks: collabRows,
+      suggested_reassign_to: user.reporting_to || null,
+      suggested_reassign_name: user.reporting_to_name || null,
+    });
+  } catch (err) {
+    console.error('getUserOpenTasksSummary error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * PUT /api/settings/users/:id/deactivate
- * Set is_active = 0. Cannot deactivate self.
+ * Set is_active = 0 or 1. If deactivating, reassigns open tasks if requested.
  */
 exports.deactivateUser = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   const userId = parseInt(req.params.id, 10);
+  const { reassign_to, remove_collaborators = true } = req.body || {};
 
   if (userId === req.user.id) {
     return res.status(400).json({ message: 'You cannot deactivate your own account' });
@@ -929,9 +982,81 @@ exports.deactivateUser = async (req, res) => {
     const newStatus = user.is_active === 1 ? 0 : 1;
 
     await db.query('UPDATE users SET is_active = ? WHERE id = ?', [newStatus, userId]);
-    await logAudit(db, req.user.id, newStatus ? 'user_activated' : 'user_deactivated', 'user', userId, {}, req.ip);
 
-    return res.json({ message: newStatus ? 'User activated' : 'User deactivated' });
+    let reassignedCount = 0;
+    let removedCollabCount = 0;
+
+    // If deactivating (newStatus === 0), handle open tasks
+    if (newStatus === 0) {
+      if (reassign_to) {
+        const targetId = parseInt(reassign_to, 10);
+        const [targetUserRows] = await db.query(
+          'SELECT id, first_name, last_name FROM users WHERE id = ? AND deleted = 0 AND is_active = 1',
+          [targetId]
+        );
+        if (targetUserRows.length > 0) {
+          const targetName = `${targetUserRows[0].first_name} ${targetUserRows[0].last_name}`;
+          const [openTasks] = await db.query(
+            'SELECT id, title FROM tasks WHERE assigned_to = ? AND deleted = 0 AND is_active != 3',
+            [userId]
+          );
+
+          if (openTasks.length > 0) {
+            await db.query(
+              'UPDATE tasks SET assigned_to = ? WHERE assigned_to = ? AND deleted = 0 AND is_active != 3',
+              [targetId, userId]
+            );
+
+            for (const t of openTasks) {
+              await db.query(
+                "UPDATE task_assignees SET user_id = ? WHERE task_id = ? AND user_id = ? AND role = 'primary'",
+                [targetId, t.id, userId]
+              );
+              await db.query(
+                `INSERT INTO task_activity_log (task_id, user_id, action, field_name, old_value, new_value, note)
+                 VALUES (?, ?, 'reassign', 'assigned_to', ?, ?, ?)`,
+                [t.id, req.user.id, `${user.first_name} ${user.last_name}`, targetName, 'Reassigned due to employee deactivation']
+              );
+            }
+            reassignedCount = openTasks.length;
+          }
+        }
+      }
+
+      if (remove_collaborators) {
+        const [openCollab] = await db.query(
+          `SELECT ta.task_id FROM task_assignees ta
+           JOIN tasks t ON t.id = ta.task_id
+           WHERE ta.user_id = ? AND ta.role = 'collaborator' AND t.deleted = 0 AND t.is_active != 3`,
+          [userId]
+        );
+        if (openCollab.length > 0) {
+          await db.query(
+            `DELETE ta FROM task_assignees ta
+             JOIN tasks t ON t.id = ta.task_id
+             WHERE ta.user_id = ? AND ta.role = 'collaborator' AND t.deleted = 0 AND t.is_active != 3`,
+            [userId]
+          );
+          removedCollabCount = openCollab.length;
+        }
+      }
+    }
+
+    await logAudit(
+      db,
+      req.user.id,
+      newStatus ? 'user_activated' : 'user_deactivated',
+      'user',
+      userId,
+      { reassigned_tasks: reassignedCount, removed_collaborators: removedCollabCount },
+      req.ip
+    );
+
+    return res.json({
+      message: newStatus ? 'User activated' : 'User deactivated',
+      reassigned_tasks: reassignedCount,
+      removed_collaborators: removedCollabCount,
+    });
   } catch (err) {
     console.error('deactivateUser error:', err);
     return res.status(500).json({ message: 'Server error' });
