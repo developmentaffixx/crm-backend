@@ -1,7 +1,7 @@
 const express = require('express');
 const router  = express.Router();
 const { body, param } = require('express-validator');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requireAdminOrProjectApprove } = require('../middleware/auth');
 const controller = require('../controllers/projectServices.controller');
 
 // All routes require authentication
@@ -41,6 +41,7 @@ router.put(
 // DELETE /api/projects/:projectId/services/:serviceId — remove a service from project
 router.delete(
   '/:projectId/services/:serviceId',
+  requireAdminOrProjectApprove,
   [param('projectId').isInt(), param('serviceId').isInt()],
   controller.remove
 );
@@ -48,6 +49,7 @@ router.delete(
 // POST /api/projects/:projectId/services/:serviceId/pause — pause service
 router.post(
   '/:projectId/services/:serviceId/pause',
+  requireAdminOrProjectApprove,
   [param('projectId').isInt(), param('serviceId').isInt()],
   controller.pauseService
 );
@@ -55,6 +57,7 @@ router.post(
 // POST /api/projects/:projectId/services/:serviceId/resume — resume a paused service
 router.post(
   '/:projectId/services/:serviceId/resume',
+  requireAdminOrProjectApprove,
   [param('projectId').isInt(), param('serviceId').isInt()],
   controller.resumeService
 );
@@ -62,6 +65,7 @@ router.post(
 // POST /api/projects/:projectId/services/:serviceId/complete — complete service
 router.post(
   '/:projectId/services/:serviceId/complete',
+  requireAdminOrProjectApprove,
   [param('projectId').isInt(), param('serviceId').isInt()],
   controller.completeService
 );
@@ -69,6 +73,7 @@ router.post(
 // POST /api/projects/:projectId/services/:serviceId/cancel — cancel service
 router.post(
   '/:projectId/services/:serviceId/cancel',
+  requireAdminOrProjectApprove,
   [param('projectId').isInt(), param('serviceId').isInt()],
   controller.cancelService
 );
@@ -76,6 +81,7 @@ router.post(
 // POST /api/projects/:projectId/services/:serviceId/new-cycle — create new cycle (reactivates)
 router.post(
   '/:projectId/services/:serviceId/new-cycle',
+  requireAdminOrProjectApprove,
   [param('projectId').isInt(), param('serviceId').isInt()],
   controller.createNewCycle
 );
@@ -92,6 +98,7 @@ router.get(
 // POST /api/projects/:projectId/services/:serviceId/members — add member to service
 router.post(
   '/:projectId/services/:serviceId/members',
+  requireAdminOrProjectApprove,
   [
     param('projectId').isInt(),
     param('serviceId').isInt(),
@@ -103,6 +110,7 @@ router.post(
 // DELETE /api/projects/:projectId/services/:serviceId/members/:userId — remove member from service
 router.delete(
   '/:projectId/services/:serviceId/members/:userId',
+  requireAdminOrProjectApprove,
   [param('projectId').isInt(), param('serviceId').isInt(), param('userId').isInt()],
   controller.removeServiceMember
 );

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { param } = require('express-validator');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requireAdminOrProjectApprove } = require('../middleware/auth');
 const cyclesController = require('../controllers/serviceCycles.controller');
 
 // All routes require authentication
@@ -14,16 +14,18 @@ router.get(
   cyclesController.listCycles
 );
 
-// POST /api/projects/:projectId/cycles/generate — generate initial cycles (default 3)
+// POST /api/projects/:projectId/cycles/generate — generate initial cycles (requires project approvals)
 router.post(
   '/:projectId/cycles/generate',
+  requireAdminOrProjectApprove,
   param('projectId').isInt(),
   cyclesController.generateCycles
 );
 
-// POST /api/projects/:projectId/cycles/generate-next — generate next single cycle
+// POST /api/projects/:projectId/cycles/generate-next — generate next single cycle (requires project approvals)
 router.post(
   '/:projectId/cycles/generate-next',
+  requireAdminOrProjectApprove,
   param('projectId').isInt(),
   cyclesController.generateNextCycle
 );
@@ -82,9 +84,10 @@ router.delete(
   cyclesController.deleteApproval
 );
 
-// PUT /api/projects/:projectId/cycles/:cycleId/extend — extend cycle end_date (admin only)
+// PUT /api/projects/:projectId/cycles/:cycleId/extend — extend cycle end_date (admin or approvals)
 router.put(
   '/:projectId/cycles/:cycleId/extend',
+  requireAdminOrProjectApprove,
   [param('projectId').isInt(), param('cycleId').isInt()],
   cyclesController.extendCycle
 );

@@ -231,6 +231,31 @@ async function requireAdminOrAttendanceAccess(req, res, next) {
   }
 }
 
+/**
+ * Checks if user has approval permission for projects (admin or can_approve on projects module).
+ */
+async function canApproveProjects(user) {
+  if (!user) return false;
+  if (user.is_admin) return true;
+
+  const perms = await getUserModulePermission(user.id, 'projects');
+  return !!(perms.can_approve);
+}
+
+/**
+ * Middleware: requires admin or projects can_approve permission.
+ */
+async function requireAdminOrProjectApprove(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+  const allowed = await canApproveProjects(req.user);
+  if (allowed) {
+    return next();
+  }
+  return res.status(403).json({ message: 'Project approval permission required' });
+}
+
 module.exports = {
   authenticate,
   requireAdmin,
@@ -239,7 +264,10 @@ module.exports = {
   getUserModulePermission,
   canEditProject,
   canViewProject,
+  canApproveProjects,
+  requireAdminOrProjectApprove,
   requireAdminOrAttendanceAccess,
 };
+
 
 

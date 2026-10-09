@@ -1,6 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { canEditProject, canViewProject, getUserModulePermission } = require('../middleware/auth');
+const { canEditProject, canViewProject, getUserModulePermission, canApproveProjects } = require('../middleware/auth');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Auto-recalculate project status based on service statuses
@@ -54,7 +54,7 @@ async function hasFullProjectAccess(user, projectId) {
   if (!user) return false;
   if (user.is_admin) return true;
   const perms = await getUserModulePermission(user.id, 'projects');
-  if ((perms.can_view ?? 0) >= 2 || (perms.can_edit ?? 0) >= 2) return true;
+  if ((perms.can_view ?? 0) >= 2 || (perms.can_edit ?? 0) >= 2 || (perms.can_approve ?? 0) >= 1) return true;
 
   if (projectId) {
     const [proj] = await db.query('SELECT created_by FROM projects WHERE id = ?', [projectId]);
@@ -661,10 +661,10 @@ exports.addServiceMember = async (req, res) => {
     const { projectId, serviceId } = req.params;
     const { user_id } = req.body;
 
-    // Admin or users with Edit permission on this project can manage service members
-    const hasEdit = await canEditProject(req.user, projectId);
-    if (!hasEdit) {
-      return res.status(403).json({ message: 'You do not have permission to manage team members for this project' });
+    // Admin or users with project Approvals permission can manage service members
+    const canApprove = await canApproveProjects(req.user);
+    if (!canApprove) {
+      return res.status(403).json({ message: 'Project approval permission required to manage team members' });
     }
 
     // Verify service exists
@@ -708,10 +708,10 @@ exports.removeServiceMember = async (req, res) => {
   try {
     const { projectId, serviceId, userId } = req.params;
 
-    // Admin or users with Edit permission on this project can manage service members
-    const hasEdit = await canEditProject(req.user, projectId);
-    if (!hasEdit) {
-      return res.status(403).json({ message: 'You do not have permission to manage team members for this project' });
+    // Admin or users with project Approvals permission can manage service members
+    const canApprove = await canApproveProjects(req.user);
+    if (!canApprove) {
+      return res.status(403).json({ message: 'Project approval permission required to manage team members' });
     }
 
     // Verify service exists

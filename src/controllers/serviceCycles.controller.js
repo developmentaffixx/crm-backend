@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { canApproveProjects } = require('../middleware/auth');
 
 // Standard sections created for every cycle
 const CYCLE_SECTIONS = [
@@ -376,6 +377,13 @@ exports.updateCycle = async (req, res) => {
     }
 
     if (status !== undefined) {
+      if (status !== currentCycle.status) {
+        const canApprove = await canApproveProjects(req.user);
+        if (!canApprove) {
+          return res.status(403).json({ message: 'Project approval permission required to change cycle status' });
+        }
+      }
+
       // Rule 4: a cycle can only be marked 'completed' when ALL its tasks are Done (is_active = 3)
       if (status === 'completed') {
         const [pendingTasks] = await db.query(
@@ -802,9 +810,10 @@ exports.extendCycle = async (req, res) => {
     const { projectId, cycleId } = req.params;
     const { new_end_date, reason } = req.body;
 
-    // Admin only
-    if (!req.user.is_admin) {
-      return res.status(403).json({ message: 'Only admins can extend a cycle' });
+    // Admin or users with project approvals permission
+    const canApprove = await canApproveProjects(req.user);
+    if (!canApprove) {
+      return res.status(403).json({ message: 'Only admins or users with project approval permission can extend a cycle' });
     }
 
     if (!new_end_date) {
