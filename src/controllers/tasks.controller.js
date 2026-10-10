@@ -667,14 +667,25 @@ exports.update = async (req, res) => {
       }
     }
 
-    // Update collaborators if provided
-    if (req.body.collaborators !== undefined) {
-      const primaryUser = updates.assigned_to || task.assigned_to;
-      const collabIds = Array.isArray(req.body.collaborators) ? req.body.collaborators.map(Number).filter(Boolean) : [];
-      await syncAssignees(task.id, primaryUser, collabIds);
-      await logActivity(task.id, req.user.id, 'assigned', {
-        note: `Collaborators updated: [${collabIds.join(', ')}]`
-      });
+    // Update assignees (primary and/or collaborators)
+    if (req.body.collaborators !== undefined || updates.assigned_to !== undefined) {
+      const primaryUser = updates.assigned_to !== undefined ? updates.assigned_to : task.assigned_to;
+      let collabIds;
+      if (req.body.collaborators !== undefined) {
+        collabIds = Array.isArray(req.body.collaborators) ? req.body.collaborators.map(Number).filter(Boolean) : [];
+      } else {
+        const [existingCollabs] = await db.query(
+          "SELECT user_id FROM task_assignees WHERE task_id = ? AND role = 'collaborator'",
+          [task.id]
+        );
+        collabIds = existingCollabs.map(c => c.user_id);
+      }
+      if (primaryUser) {
+        await syncAssignees(task.id, primaryUser, collabIds);
+        await logActivity(task.id, req.user.id, 'assigned', {
+          note: `Assignees updated: primary=${primaryUser}, collaborators=[${collabIds.join(', ')}]`
+        });
+      }
     }
 
     const [updated] = await db.query('SELECT * FROM tasks WHERE id = ?', [req.params.id]);

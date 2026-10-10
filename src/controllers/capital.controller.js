@@ -234,46 +234,145 @@ exports.remove = async (req, res) => {
 // ─── GET /api/capital/summary/totals — For P&L ───────────────────────────────
 exports.totals = async (req, res) => {
   try {
-    const [capitalRows] = await db.query(
-      `SELECT COALESCE(SUM(amount), 0) AS total_capital FROM capital WHERE deleted = 0`
-    );
-    const [expenseRows] = await db.query(
-      `SELECT COALESCE(SUM(amount), 0) AS total_expenses FROM expenses WHERE deleted = 0`
-    );
-    const [incomeRows] = await db.query(
-      `SELECT COALESCE(SUM(paid_amount), 0) AS total_income FROM invoices WHERE deleted = 0 AND paid_amount > 0`
-    );
-    const [withdrawalRows] = await db.query(
-      `SELECT COALESCE(SUM(amount), 0) AS total_withdrawals FROM withdrawals WHERE deleted = 0`
-    );
+    const { month } = req.query; // 'YYYY-MM' or 'all'
+    const isAll = !month || month === 'all';
 
+    let startOfMonth = '';
+    let endOfMonth = '';
+    if (!isAll) {
+      const [y, m] = month.split('-').map(Number);
+      const lastDay = new Date(y, m, 0).getDate();
+      startOfMonth = `${month}-01`;
+      endOfMonth = `${month}-${String(lastDay).padStart(2, '0')}`;
+    }
+
+    // Capital
+    const capitalSql = isAll
+      ? `SELECT COALESCE(SUM(amount), 0) AS total_capital FROM capital WHERE deleted = 0`
+      : `SELECT COALESCE(SUM(amount), 0) AS total_capital FROM capital WHERE deleted = 0 AND capital_date >= ? AND capital_date <= ?`;
+    const [capitalRows] = await db.query(capitalSql, isAll ? [] : [startOfMonth, endOfMonth]);
+
+    // Expenses
+    const expenseSql = isAll
+      ? `SELECT COALESCE(SUM(amount), 0) AS total_expenses FROM expenses WHERE deleted = 0`
+      : `SELECT COALESCE(SUM(amount), 0) AS total_expenses FROM expenses WHERE deleted = 0 AND expense_date >= ? AND expense_date <= ?`;
+    const [expenseRows] = await db.query(expenseSql, isAll ? [] : [startOfMonth, endOfMonth]);
+
+    // Income (from invoice_payments or invoices fallback)
+    let total_income = 0;
+    if (isAll) {
+      const [incomeRows] = await db.query(
+        `SELECT COALESCE(SUM(paid_amount), 0) AS total_income FROM invoices WHERE deleted = 0 AND paid_amount > 0`
+      );
+      total_income = parseFloat(incomeRows[0].total_income || 0);
+    } else {
+      try {
+        const [incomeRows] = await db.query(
+          `SELECT COALESCE(SUM(amount), 0) AS total_income FROM invoice_payments WHERE deleted = 0 AND payment_date >= ? AND payment_date <= ?`,
+          [startOfMonth, endOfMonth]
+        );
+        total_income = parseFloat(incomeRows[0].total_income || 0);
+      } catch (_) {
+        const [incomeRows] = await db.query(
+          `SELECT COALESCE(SUM(paid_amount), 0) AS total_income FROM invoices WHERE deleted = 0 AND bill_date >= ? AND bill_date <= ?`,
+          [startOfMonth, endOfMonth]
+        );
+        total_income = parseFloat(incomeRows[0].total_income || 0);
+      }
+    }
+
+    // Withdrawals (informational)
+    const withdrawalSql = isAll
+      ? `SELECT COALESCE(SUM(amount), 0) AS total_withdrawals FROM withdrawals WHERE deleted = 0`
+      : `SELECT COALESCE(SUM(amount), 0) AS total_withdrawals FROM withdrawals WHERE deleted = 0 AND withdrawal_date >= ? AND withdrawal_date <= ?`;
+    const [withdrawalRows] = await db.query(withdrawalSql, isAll ? [] : [startOfMonth, endOfMonth]);
+
+    // Loans
     let total_loans = 0;
     try {
-      const [loanRows] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total_loans FROM loans WHERE deleted = 0`);
+      const loanSql = isAll
+        ? `SELECT COALESCE(SUM(amount), 0) AS total_loans FROM loans WHERE deleted = 0`
+        : `SELECT COALESCE(SUM(amount), 0) AS total_loans FROM loans WHERE deleted = 0 AND loan_date >= ? AND loan_date <= ?`;
+      const [loanRows] = await db.query(loanSql, isAll ? [] : [startOfMonth, endOfMonth]);
       total_loans = parseFloat(loanRows[0].total_loans || 0);
     } catch (_) {}
 
+    // Other Credits
     let total_other_credits = 0;
     try {
-      const [creditRows] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total_credits FROM other_credits WHERE deleted = 0`);
+      const credSql = isAll
+        ? `SELECT COALESCE(SUM(amount), 0) AS total_credits FROM other_credits WHERE deleted = 0`
+        : `SELECT COALESCE(SUM(amount), 0) AS total_credits FROM other_credits WHERE deleted = 0 AND credit_date >= ? AND credit_date <= ?`;
+      const [creditRows] = await db.query(credSql, isAll ? [] : [startOfMonth, endOfMonth]);
       total_other_credits = parseFloat(creditRows[0].total_credits || 0);
     } catch (_) {}
 
+    // Withdrawal Returns
     let total_withdrawal_returns = 0;
     try {
-      const [returnsRows] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total_returns FROM withdrawal_returns WHERE deleted = 0`);
+      const retSql = isAll
+        ? `SELECT COALESCE(SUM(amount), 0) AS total_returns FROM withdrawal_returns WHERE deleted = 0`
+        : `SELECT COALESCE(SUM(amount), 0) AS total_returns FROM withdrawal_returns WHERE deleted = 0 AND return_date >= ? AND return_date <= ?`;
+      const [returnsRows] = await db.query(retSql, isAll ? [] : [startOfMonth, endOfMonth]);
       total_withdrawal_returns = parseFloat(returnsRows[0].total_returns || 0);
     } catch (_) {}
 
     const total_capital = parseFloat(capitalRows[0].total_capital);
     const total_expenses = parseFloat(expenseRows[0].total_expenses);
-    const total_income = parseFloat(incomeRows[0].total_income);
     const total_withdrawals = parseFloat(withdrawalRows[0].total_withdrawals);
-    const net_balance = (total_capital + total_income + total_loans + total_other_credits + total_withdrawal_returns) - (total_expenses + total_withdrawals);
 
-    return res.json({ total_capital, total_income, total_loans, total_other_credits, total_withdrawal_returns, total_expenses, total_withdrawals, net_balance });
+    // Month's Net (inflows minus expenses for this specific month)
+    const month_net = (total_capital + total_income + total_loans + total_other_credits + total_withdrawal_returns) - total_expenses;
+
+    // Cumulative closing balance up to this month-end (or all-time)
+    let net_balance = month_net;
+    if (isAll) {
+      net_balance = month_net;
+    } else {
+      const [cumCap] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM capital WHERE deleted = 0 AND capital_date <= ?`, [endOfMonth]);
+      const [cumExp] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE deleted = 0 AND expense_date <= ?`, [endOfMonth]);
+      let cumIncAmt = 0;
+      try {
+        const [cumInc] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM invoice_payments WHERE deleted = 0 AND payment_date <= ?`, [endOfMonth]);
+        cumIncAmt = parseFloat(cumInc[0].total || 0);
+      } catch (_) {
+        const [cumInc] = await db.query(`SELECT COALESCE(SUM(paid_amount), 0) AS total FROM invoices WHERE deleted = 0 AND bill_date <= ?`, [endOfMonth]);
+        cumIncAmt = parseFloat(cumInc[0].total || 0);
+      }
+      let cumLoanAmt = 0;
+      try {
+        const [cumLoan] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM loans WHERE deleted = 0 AND loan_date <= ?`, [endOfMonth]);
+        cumLoanAmt = parseFloat(cumLoan[0].total || 0);
+      } catch (_) {}
+      let cumCredAmt = 0;
+      try {
+        const [cumCred] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM other_credits WHERE deleted = 0 AND credit_date <= ?`, [endOfMonth]);
+        cumCredAmt = parseFloat(cumCred[0].total || 0);
+      } catch (_) {}
+      let cumRetAmt = 0;
+      try {
+        const [cumRet] = await db.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM withdrawal_returns WHERE deleted = 0 AND return_date <= ?`, [endOfMonth]);
+        cumRetAmt = parseFloat(cumRet[0].total || 0);
+      } catch (_) {}
+
+      net_balance = (parseFloat(cumCap[0].total) + cumIncAmt + cumLoanAmt + cumCredAmt + cumRetAmt) - parseFloat(cumExp[0].total);
+    }
+
+    return res.json({
+      selected_month: month || 'all',
+      total_capital,
+      total_income,
+      total_loans,
+      total_other_credits,
+      total_withdrawal_returns,
+      total_expenses,
+      total_withdrawals,
+      month_net,
+      net_balance
+    });
   } catch (err) {
     console.error('Capital totals error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
