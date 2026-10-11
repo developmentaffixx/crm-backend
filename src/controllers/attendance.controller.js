@@ -379,6 +379,265 @@ exports.clockOut = async (req, res) => {
   }
 };
 
+function formatDurationHM(seconds) {
+  const totalMins = Math.round((seconds || 0) / 60);
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+
+function toLocalDateStr(d) {
+  const dateObj = (d instanceof Date) ? d : new Date(d);
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Core Helper: Calculate user's rolling productivity target and deficit status.
+ * - Monday - Friday: 8 hours
+ * - Saturday: 5 hours (or schedule setting)
+ * - Sunday, Company Holidays, Approved Leaves: 0 hours
+ * - Shortfall carries forward to the NEXT WORKING DAY (skipping Sundays/Holidays/Leaves).
+ * - Refreshes to 0 on the 1st of every month.
+ * - At month-end, flags that remaining deficit is deducted from salary on new month start.
+ */
+async function calculateProductivityTargetStatus(userId, inputDate = null) {
+  let today = inputDate;
+  let curDateObj;
+  if (!today) {
+    const [todayRow] = await db.query('SELECT CURDATE() AS curdate');
+    curDateObj = todayRow[0]?.curdate ? new Date(todayRow[0].curdate) : new Date();
+    today = toLocalDateStr(curDateObj);
+  } else {
+    curDateObj = new Date(today);
+  }
+
+  const curYear = curDateObj.getFullYear();
+  const curMonth = curDateObj.getMonth(); // 0-indexed
+
+  // Month start: 1st day of the current month
+  const monthStart = `${curYear}-${String(curMonth + 1).padStart(2, '0')}-01`;
+
+  // Yesterday date
+  const yesterdayObj = new Date(curDateObj);
+  yesterdayObj.setDate(yesterdayObj.getDate() - 1);
+  const yesterday = toLocalDateStr(yesterdayObj);
+
+  const isFirstDayOfMonth = (today === monthStart);
+
+  // 1. Calculate previous net deficit / surplus up to yesterday (within current month only)
+  let prevExpectedSeconds = 0;
+  let prevCompletedSeconds = 0;
+  let prevDeficitSeconds = 0;
+  let prevSurplusSeconds = 0;
+
+  if (!isFirstDayOfMonth && yesterday >= monthStart) {
+    const { totalExpected: prevExpectedHours } = await getExpectedHoursForRange(monthStart, yesterday, userId);
+    prevExpectedSeconds = Math.round((prevExpectedHours || 0) * 3600);
+
+    const [prevTask] = await db.query(
+      `SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0`,
+      [userId, monthStart, yesterday]
+    );
+    const [prevTicket] = await db.query(
+      `SELECT COALESCE(SUM(minutes), 0) AS total FROM ticket_time_logs
+       WHERE user_id = ? AND DATE(created_at) BETWEEN ? AND ?`,
+      [userId, monthStart, yesterday]
+    );
+    const [prevMeeting] = await db.query(
+      `SELECT COALESCE(SUM(duration), 0) AS total FROM meeting_time_logs
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0`,
+      [userId, monthStart, yesterday]
+    );
+
+    const prevTaskSec = parseInt(prevTask[0].total) || 0;
+    const prevTicketSec = (parseInt(prevTicket[0].total) || 0) * 60;
+    const prevMeetingSec = parseInt(prevMeeting[0].total) || 0;
+    prevCompletedSeconds = prevTaskSec + prevTicketSec + prevMeetingSec;
+
+    if (prevCompletedSeconds < prevExpectedSeconds) {
+      prevDeficitSeconds = prevExpectedSeconds - prevCompletedSeconds;
+    } else {
+      prevSurplusSeconds = prevCompletedSeconds - prevExpectedSeconds;
+    }
+  }
+
+  // 2. Today's Base Target & Type
+  const { totalExpected: todayBaseHours, dailyBreakdown: todayBd } = await getExpectedHoursForRange(today, today, userId);
+  const todayBaseSeconds = Math.round((todayBaseHours || 0) * 3600);
+  const todayType = todayBd[0]?.type || 'working';
+  const isTodayWorkingDay = todayBaseSeconds > 0;
+
+  // 3. Today's Effective Target (Base + Deficit, or minus Surplus)
+  let todayEffectiveTargetSeconds = 0;
+  if (isTodayWorkingDay) {
+    if (prevDeficitSeconds > 0) {
+      todayEffectiveTargetSeconds = todayBaseSeconds + prevDeficitSeconds;
+    } else if (prevSurplusSeconds > 0) {
+      todayEffectiveTargetSeconds = Math.max(0, todayBaseSeconds - prevSurplusSeconds);
+    } else {
+      todayEffectiveTargetSeconds = todayBaseSeconds;
+    }
+  } else {
+    // Sunday, Holiday, or Approved Leave -> Base is 0h
+    todayEffectiveTargetSeconds = 0;
+  }
+
+  // 4. Today's Productive Work (completed logs + live timers)
+  const [taskToday] = await db.query(
+    'SELECT COALESCE(SUM(duration), 0) AS total FROM task_time_logs WHERE user_id = ? AND DATE(started_at) = ? AND ended_at IS NOT NULL AND duration > 0',
+    [userId, today]
+  );
+  const [activeTask] = await db.query(
+    'SELECT COALESCE(TIMESTAMPDIFF(SECOND, started_at, NOW()), 0) AS elapsed FROM task_active_timers WHERE user_id = ? AND DATE(started_at) = ? ORDER BY started_at DESC LIMIT 1',
+    [userId, today]
+  );
+  const taskTodaySec = (parseInt(taskToday[0].total) || 0) + (parseInt(activeTask[0]?.elapsed) || 0);
+
+  const [ticketToday] = await db.query(
+    'SELECT COALESCE(SUM(minutes), 0) AS total FROM ticket_time_logs WHERE user_id = ? AND DATE(created_at) = ?',
+    [userId, today]
+  );
+  const ticketTodaySec = (parseInt(ticketToday[0].total) || 0) * 60;
+
+  const [meetingToday] = await db.query(
+    'SELECT COALESCE(SUM(duration), 0) AS total FROM meeting_time_logs WHERE user_id = ? AND DATE(started_at) = ? AND ended_at IS NOT NULL AND duration > 0',
+    [userId, today]
+  );
+  const [activeMeeting] = await db.query(
+    'SELECT COALESCE(TIMESTAMPDIFF(SECOND, started_at, NOW()), 0) AS elapsed FROM meeting_active_timers WHERE user_id = ? AND DATE(started_at) = ? ORDER BY started_at DESC LIMIT 1',
+    [userId, today]
+  );
+  const meetingTodaySec = (parseInt(meetingToday[0].total) || 0) + (parseInt(activeMeeting[0]?.elapsed) || 0);
+
+  const todayProductiveSeconds = taskTodaySec + ticketTodaySec + meetingTodaySec;
+
+  // 5. Shortfall / Surplus calculation
+  const todayShortfallSeconds = Math.max(0, todayEffectiveTargetSeconds - todayProductiveSeconds);
+  const todaySurplusSeconds = Math.max(0, todayProductiveSeconds - todayEffectiveTargetSeconds);
+  const isTargetAchieved = isTodayWorkingDay ? (todayShortfallSeconds === 0) : true;
+
+  // 6. Next Working Day Detection (search next 14 days)
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const lastDayOfMonthObj = new Date(curYear, curMonth + 1, 0);
+  const lastDayOfMonthStr = toLocalDateStr(lastDayOfMonthObj);
+
+  let nextWorkingDay = null;
+  const skippedDays = [];
+
+  for (let i = 1; i <= 14; i++) {
+    const checkDate = new Date(curDateObj);
+    checkDate.setDate(checkDate.getDate() + i);
+    const checkDateStr = toLocalDateStr(checkDate);
+    const checkDayName = dayNames[checkDate.getDay()];
+
+    const { totalExpected: checkHours, dailyBreakdown: checkBd } = await getExpectedHoursForRange(checkDateStr, checkDateStr, userId);
+
+    if ((checkHours || 0) > 0) {
+      nextWorkingDay = {
+        date: checkDateStr,
+        dayName: checkDayName,
+        baseHours: checkHours,
+        baseSeconds: Math.round(checkHours * 3600),
+        isNextMonth: checkDate.getMonth() !== curMonth,
+        isTomorrow: (i === 1),
+      };
+      break;
+    } else {
+      const type = checkBd[0]?.type || 'off';
+      let reason = 'Weekly Off';
+      if (type === 'holiday' || type === 'half_day_holiday') reason = 'Company Holiday';
+      else if (type === 'on_leave' || type === 'half_leave') reason = 'Approved Leave';
+      skippedDays.push({
+        date: checkDateStr,
+        dayName: checkDayName,
+        reason,
+        isTomorrow: (i === 1),
+      });
+    }
+  }
+
+  // 7. Month-End Determination
+  const isCalendarMonthEnd = (today === lastDayOfMonthStr);
+  const isNextWorkingInNextMonth = nextWorkingDay ? nextWorkingDay.isNextMonth : true;
+  const isMonthEnd = isCalendarMonthEnd || isNextWorkingInNextMonth;
+
+  let nextWorkingTargetSeconds = 0;
+  if (nextWorkingDay && !isMonthEnd) {
+    nextWorkingTargetSeconds = nextWorkingDay.baseSeconds + todayShortfallSeconds;
+  }
+
+  // 8. Human-friendly Messages
+  let clockInMessage = '';
+  if (isFirstDayOfMonth) {
+    clockInMessage = '✨ Welcome to the new month! Your monthly balance starts fresh with 0h deficit.';
+  } else if (!isTodayWorkingDay) {
+    clockInMessage = `Today is ${todayType.replace('_', ' ')}. No mandatory productive hours required.`;
+  } else if (prevDeficitSeconds > 0) {
+    clockInMessage = `Includes ${formatDurationHM(prevDeficitSeconds)} pending deficit from previous working days.`;
+  } else if (prevSurplusSeconds > 0) {
+    clockInMessage = `You have ${formatDurationHM(prevSurplusSeconds)} surplus buffer!`;
+  } else {
+    clockInMessage = 'You are on track! Complete your standard target today.';
+  }
+
+  let clockOutMessage = '';
+  if (isTargetAchieved) {
+    clockOutMessage = `🎉 Today's target achieved! Great work today.`;
+  } else if (isMonthEnd) {
+    clockOutMessage = `Tomorrow is a new month! Your monthly balance will refresh to 0. The remaining ${formatDurationHM(todayShortfallSeconds)} deficit will be deducted from your salary.`;
+  } else if (skippedDays.length > 0 && nextWorkingDay) {
+    const tomorrowSkip = skippedDays.find((s) => s.isTomorrow);
+    const skipDesc = tomorrowSkip ? `Tomorrow (${tomorrowSkip.dayName}) is ${tomorrowSkip.reason}.` : '';
+    clockOutMessage = `${skipDesc ? skipDesc + ' ' : ''}Your ${formatDurationHM(todayShortfallSeconds)} shortfall carries forward to ${nextWorkingDay.dayName} (${nextWorkingDay.date}). ${nextWorkingDay.dayName}'s target will be ${formatDurationHM(nextWorkingTargetSeconds)}.`;
+  } else if (nextWorkingDay) {
+    clockOutMessage = `Your ${formatDurationHM(todayShortfallSeconds)} shortfall carries forward to Tomorrow (${nextWorkingDay.dayName}). Tomorrow's target will be ${formatDurationHM(nextWorkingTargetSeconds)}.`;
+  }
+
+  return {
+    date: today,
+    is_first_day_of_month: isFirstDayOfMonth,
+    today_base_seconds: todayBaseSeconds,
+    today_base_hours: todayBaseHours,
+    today_type: todayType,
+    is_today_working_day: isTodayWorkingDay,
+    prev_deficit_seconds: prevDeficitSeconds,
+    prev_surplus_seconds: prevSurplusSeconds,
+    today_effective_target_seconds: todayEffectiveTargetSeconds,
+    today_productive_seconds: todayProductiveSeconds,
+    today_shortfall_seconds: todayShortfallSeconds,
+    today_surplus_seconds: todaySurplusSeconds,
+    is_target_achieved: isTargetAchieved,
+    is_month_end: isMonthEnd,
+    next_working_day: nextWorkingDay ? {
+      ...nextWorkingDay,
+      target_seconds: nextWorkingTargetSeconds,
+    } : null,
+    skipped_days: skippedDays,
+    clock_in_message: clockInMessage,
+    clock_out_message: clockOutMessage,
+  };
+}
+
+exports.calculateProductivityTargetStatus = calculateProductivityTargetStatus;
+
+exports.getProductivityTargetStatus = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { date } = req.query;
+    const status = await calculateProductivityTargetStatus(userId, date || null);
+    return res.json(status);
+  } catch (err) {
+    console.error('Get productivity target status error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 exports.getToday = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -457,6 +716,9 @@ exports.getToday = async (req, res) => {
     );
     const isFirstDay = priorCount[0].cnt === 0 || userFlagRows[0]?.is_rejoining === 1;
 
+    // Rolling daily productivity target status (with deficit carryover & month-end checks)
+    const productivityStatus = await calculateProductivityTargetStatus(userId, today);
+
     return res.json({
       attendance: attendance[0] || null,
       plans,
@@ -466,6 +728,7 @@ exports.getToday = async (req, res) => {
       total_meeting_seconds: totalMeetingSecondsToday,
       today_schedule: todaySchedule,
       is_first_day: isFirstDay,
+      productivity_status: productivityStatus,
     });
   } catch (err) {
     console.error('Get today error:', err);

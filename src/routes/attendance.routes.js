@@ -11,6 +11,7 @@ router.post('/clock-in', ctrl.clockIn);
 router.post('/clock-out', ctrl.clockOut);
 router.post('/force-clock-out', ctrl.forceClockOut);
 router.get('/today', ctrl.getToday);
+router.get('/productivity-target-status', ctrl.getProductivityTargetStatus);
 router.get('/history', ctrl.getHistory);
 router.get('/check-running-timers', ctrl.checkRunningTimers);
 router.get('/check-overdue-tasks', ctrl.checkOverdueTasks);
