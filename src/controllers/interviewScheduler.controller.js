@@ -2,6 +2,15 @@ const db   = require('../config/db');
 const https = require('https');
 const http  = require('http');
 
+// Normalise a boolean-ish value to 0/1 for tinyint columns.
+// The joinus form forwards these as the STRINGS "0" / "1"; a plain
+// truthiness check (`"0" ? 1 : 0`) wrongly yields 1 because "0" is truthy.
+function toTinyInt(v) {
+  if (v === true || v === 1 || v === '1') return 1;
+  if (v === 'yes' || v === 'true') return 1;
+  return 0;
+}
+
 // ── GET /api/interview-scheduler/candidates ───────────────────────────────────
 exports.listCandidates = async (req, res) => {
   try {
@@ -150,8 +159,8 @@ exports.submitApplication = async (req, res) => {
         d.employment_from || null,
         d.employment_to || null,
         d.reason_for_leaving || null,
-        d.comfortable_relocating ? 1 : 0,
-        d.has_medical_condition ? 1 : 0,
+        toTinyInt(d.comfortable_relocating),
+        toTinyInt(d.has_medical_condition),
         d.medical_condition_note || null,
         referralsJson,
         d.source || 'joinus_form',

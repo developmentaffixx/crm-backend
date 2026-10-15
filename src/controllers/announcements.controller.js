@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { canManageAnnouncements } = require('../middleware/auth');
 
 /**
  * GET /api/announcements
@@ -21,10 +22,11 @@ exports.list = async (req, res) => {
 
     const ids = rows.map(r => r.id);
 
-    // Fetch read counts per announcement (for admin "seen by" indicator)
+    // Fetch read counts per announcement (for admin / full access "seen by" indicator)
     let readCountMap = {};
     let totalActiveUsers = 0;
-    if (req.user.is_admin) {
+    const canManage = req.user.is_admin || await canManageAnnouncements(req.user);
+    if (canManage) {
       const [userCount] = await db.query(
         `SELECT COUNT(*) AS count FROM users WHERE is_active = 1 AND deleted = 0`
       );
@@ -67,7 +69,7 @@ exports.list = async (req, res) => {
       ...a,
       reactions: reactionMap[a.id] || [],
       my_reaction: myReactionMap[a.id] || null,
-      ...(req.user.is_admin ? {
+      ...(canManage ? {
         read_count: readCountMap[a.id] || 0,
         total_users: totalActiveUsers,
       } : {}),

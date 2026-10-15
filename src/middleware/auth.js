@@ -256,6 +256,38 @@ async function requireAdminOrProjectApprove(req, res, next) {
   return res.status(403).json({ message: 'Project approval permission required' });
 }
 
+/**
+ * Checks if user has permission to manage announcements (admin or announcements module permission).
+ */
+async function canManageAnnouncements(user) {
+  if (!user) return false;
+  if (user.is_admin) return true;
+  const perms = await getUserModulePermission(user.id, 'announcements');
+  return perms.can_view >= 1 || perms.can_create >= 1 || perms.can_edit >= 1 || perms.can_delete >= 1;
+}
+
+/**
+ * Allows admins or users with announcement module full access.
+ */
+async function requireAdminOrAnnouncementAccess(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+  if (req.user.is_admin) {
+    return next();
+  }
+  try {
+    const allowed = await canManageAnnouncements(req.user);
+    if (allowed) {
+      return next();
+    }
+    return res.status(403).json({ message: 'Announcement management access required' });
+  } catch (err) {
+    console.error('requireAdminOrAnnouncementAccess error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+}
+
 module.exports = {
   authenticate,
   requireAdmin,
@@ -267,7 +299,6 @@ module.exports = {
   canApproveProjects,
   requireAdminOrProjectApprove,
   requireAdminOrAttendanceAccess,
+  canManageAnnouncements,
+  requireAdminOrAnnouncementAccess,
 };
-
-
-

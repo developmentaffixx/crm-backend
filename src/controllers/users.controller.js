@@ -150,7 +150,7 @@ exports.changePassword = async (req, res) => {
 exports.myPermissions = async (req, res) => {
   try {
     if (req.user.is_admin) {
-      const modules = ['dashboard','projects','tasks','tickets','meetings','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings','ai_labs'];
+      const modules = ['dashboard','projects','tasks','tickets','attendance','announcements','meetings','creative_hub','people_ops','clients','revenue','finance','playbook','reports','settings','ai_labs'];
       const perms = modules.reduce((acc, m) => {
         acc[m] = { can_view: 2, can_create: 1, can_edit: 2, can_delete: 1, can_approve: m === 'tasks' ? 1 : 0 };
         return acc;
