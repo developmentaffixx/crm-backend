@@ -689,13 +689,37 @@ exports.chartsLeadsPipeline = async (req, res) => {
 /**
  * GET /api/dashboard/birthdays
  * Returns upcoming birthdays (next 7 days) excluding the requesting user.
- * Also returns whether today is the requesting user's own birthday.
+ * Only returns upcoming birthdays list for Admin and HR Executive.
+ * Also returns whether today is the requesting user's own birthday for their wish popup.
  */
 exports.getBirthdays = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Check if today is the current user's birthday
+    // Check if current user is Admin or HR Executive
+    const [currentUserRows] = await db.query(
+      `SELECT u.is_admin, u.designation, u.department, r.name AS role_name
+       FROM users u
+       LEFT JOIN roles r ON r.id = u.role_id
+       WHERE u.id = ?`,
+      [userId]
+    );
+    const currentUser = currentUserRows[0] || {};
+    const isAdmin = req.user.is_admin || currentUser.is_admin === 1;
+    const roleName = (currentUser.role_name || '').toLowerCase().trim();
+    const designation = (currentUser.designation || '').toLowerCase().trim();
+    const department = (currentUser.department || '').toLowerCase().trim();
+
+    // Check for HR Executive role or designation
+    const isHrExecutive = roleName.includes('hr executive') || 
+                          designation.includes('hr executive') ||
+                          roleName === 'hr' || 
+                          designation === 'hr' ||
+                          (department.includes('hr') && designation.includes('executive'));
+
+    const canViewUpcoming = isAdmin || isHrExecutive;
+
+    // Check if today is the current user's birthday (for their personal celebration popup)
     const [selfRows] = await db.query(
       `SELECT first_name, last_name, date_of_birth FROM users
        WHERE id = ? AND deleted = 0 AND date_of_birth IS NOT NULL
@@ -705,37 +729,41 @@ exports.getBirthdays = async (req, res) => {
     const isMyBirthday = selfRows.length > 0;
     const myName = isMyBirthday ? `${selfRows[0].first_name} ${selfRows[0].last_name}` : null;
 
-    // Get upcoming birthdays in the next 7 days (excluding the requesting user)
-    // Use MONTH/DAY comparison to handle year-end wrapping properly
-    const [upcomingRows] = await db.query(
-      `SELECT id, first_name, last_name, date_of_birth, avatar_url,
-              DATEDIFF(
-                CASE 
-                  WHEN DATE_FORMAT(date_of_birth, '%m-%d') >= DATE_FORMAT(CURDATE(), '%m-%d')
-                  THEN STR_TO_DATE(CONCAT(YEAR(CURDATE()), '-', MONTH(date_of_birth), '-', DAY(date_of_birth)), '%Y-%m-%d')
-                  ELSE STR_TO_DATE(CONCAT(YEAR(CURDATE()) + 1, '-', MONTH(date_of_birth), '-', DAY(date_of_birth)), '%Y-%m-%d')
-                END,
-                CURDATE()
-              ) AS days_until
-       FROM users
-       WHERE deleted = 0 AND is_active = 1 AND date_of_birth IS NOT NULL AND id != ?
-       HAVING days_until BETWEEN 0 AND 7
-       ORDER BY days_until ASC`,
-      [userId]
-    );
+    let upcoming = [];
+    if (canViewUpcoming) {
+      // Get upcoming birthdays in the next 7 days (excluding the requesting user)
+      // Use MONTH/DAY comparison to handle year-end wrapping properly
+      const [upcomingRows] = await db.query(
+        `SELECT id, first_name, last_name, date_of_birth, avatar_url,
+                DATEDIFF(
+                  CASE 
+                    WHEN DATE_FORMAT(date_of_birth, '%m-%d') >= DATE_FORMAT(CURDATE(), '%m-%d')
+                    THEN STR_TO_DATE(CONCAT(YEAR(CURDATE()), '-', MONTH(date_of_birth), '-', DAY(date_of_birth)), '%Y-%m-%d')
+                    ELSE STR_TO_DATE(CONCAT(YEAR(CURDATE()) + 1, '-', MONTH(date_of_birth), '-', DAY(date_of_birth)), '%Y-%m-%d')
+                  END,
+                  CURDATE()
+                ) AS days_until
+         FROM users
+         WHERE deleted = 0 AND is_active = 1 AND date_of_birth IS NOT NULL AND id != ?
+         HAVING days_until BETWEEN 0 AND 7
+         ORDER BY days_until ASC`,
+        [userId]
+      );
 
-    console.log('Birthday API - userId:', userId, 'isMyBirthday:', isMyBirthday, 'upcoming:', upcomingRows.length);
-
-    return res.json({
-      is_my_birthday: isMyBirthday,
-      my_name: myName,
-      upcoming: upcomingRows.map(row => ({
+      upcoming = upcomingRows.map(row => ({
         id: row.id,
         name: `${row.first_name} ${row.last_name}`,
         date_of_birth: row.date_of_birth,
         avatar_url: row.avatar_url,
         days_until: row.days_until,
-      })),
+      }));
+    }
+
+    return res.json({
+      is_my_birthday: isMyBirthday,
+      my_name: myName,
+      can_view_upcoming: canViewUpcoming,
+      upcoming,
     });
   } catch (err) {
     console.error('Get birthdays error:', err);

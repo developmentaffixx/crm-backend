@@ -60,6 +60,8 @@ exports.login = async (req, res) => {
         is_admin:   user.is_admin === 1,
         role_id:    user.role_id,
         role_name:  roleName,
+        designation: user.designation || null,
+        department:  user.department || null,
         avatar_url: user.avatar_url || null,
       },
     });
