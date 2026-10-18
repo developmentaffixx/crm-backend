@@ -2,33 +2,48 @@ const db = require('../config/db');
 
 /**
  * Helper: returns true if the user is an admin OR has been granted
- * "All" submenu access on the leaves page (can_access >= 2).
+ * "All" submenu access on the leaves page (can_access >= 2) OR can_approve on people_ops.
  * Checks user-level overrides first, then role-level baseline.
  */
 async function hasLeavesAllAccess(user) {
   if (user.is_admin) return true;
   try {
-    // 1. User-level override wins
+    // 1. User-level override for leaves submenu wins
     const [userOverride] = await db.query(
       'SELECT can_access FROM user_submenu_permissions WHERE user_id = ? AND module = ? AND submenu = ?',
       [user.id, 'people_ops', 'leaves']
     );
-    if (userOverride.length > 0) return userOverride[0].can_access >= 2;
+    if (userOverride.length > 0 && userOverride[0].can_access >= 2) return true;
 
-    // 2. Role-level baseline
+    // 2. User-level module permission for people_ops (can_approve or can_edit)
+    const [userPerm] = await db.query(
+      'SELECT can_approve, can_edit FROM user_permissions WHERE user_id = ? AND module = ?',
+      [user.id, 'people_ops']
+    );
+    if (userPerm.length > 0 && (userPerm[0].can_approve === 1 || userPerm[0].can_edit === 1)) return true;
+
+    // 3. Role-level baseline
     const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [user.id]);
     if (userRole.length > 0 && userRole[0].role_id) {
       const [rolePerms] = await db.query(
         'SELECT can_access FROM role_submenu_permissions WHERE role_id = ? AND module = ? AND submenu = ?',
         [userRole[0].role_id, 'people_ops', 'leaves']
       );
-      if (rolePerms.length > 0) return rolePerms[0].can_access >= 2;
+      if (rolePerms.length > 0 && rolePerms[0].can_access >= 2) return true;
+
+      const [roleModPerm] = await db.query(
+        'SELECT can_approve, can_edit FROM role_permissions WHERE role_id = ? AND module = ?',
+        [userRole[0].role_id, 'people_ops']
+      );
+      if (roleModPerm.length > 0 && (roleModPerm[0].can_approve === 1 || roleModPerm[0].can_edit === 1)) return true;
     }
   } catch (err) {
     console.error('hasLeavesAllAccess error:', err);
   }
   return false;
 }
+
+exports.hasLeavesAllAccess = hasLeavesAllAccess;
 
 /**
  * GET /api/leaves

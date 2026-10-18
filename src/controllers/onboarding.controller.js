@@ -5,6 +5,65 @@ const { sendRawEmail } = require('../services/email.service');
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /**
+ * Helper: checks if user has access to onboarding operations.
+ * Allows Admin, or users with People Ops submenu "on_boarding" All access (>= 2),
+ * or users with module-level permissions for people_ops (can_create, can_edit, can_approve).
+ */
+async function hasOnboardingAccess(user, action = 'view') {
+  if (user.is_admin) return true;
+  try {
+    // 1. User-level submenu override for on_boarding
+    const [userSub] = await db.query(
+      'SELECT can_access FROM user_submenu_permissions WHERE user_id = ? AND module = ? AND submenu = ?',
+      [user.id, 'people_ops', 'on_boarding']
+    );
+    if (userSub.length > 0 && userSub[0].can_access >= 2) return true;
+
+    // 2. User-level module permissions
+    const [userMod] = await db.query(
+      'SELECT can_view, can_create, can_edit, can_approve, can_delete FROM user_permissions WHERE user_id = ? AND module = ?',
+      [user.id, 'people_ops']
+    );
+    if (userMod.length > 0) {
+      const p = userMod[0];
+      if (action === 'approve' && (p.can_approve === 1 || p.can_edit === 1)) return true;
+      if (action === 'create' && (p.can_create === 1 || p.can_approve === 1)) return true;
+      if (action === 'edit' && (p.can_edit === 1 || p.can_approve === 1)) return true;
+      if (action === 'delete' && p.can_delete === 1) return true;
+      if (action === 'view' && p.can_view >= 1) return true;
+    }
+
+    // 3. Role-level baseline
+    const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [user.id]);
+    if (userRole.length > 0 && userRole[0].role_id) {
+      const [roleSub] = await db.query(
+        'SELECT can_access FROM role_submenu_permissions WHERE role_id = ? AND module = ? AND submenu = ?',
+        [userRole[0].role_id, 'people_ops', 'on_boarding']
+      );
+      if (roleSub.length > 0 && roleSub[0].can_access >= 2) return true;
+
+      const [roleMod] = await db.query(
+        'SELECT can_view, can_create, can_edit, can_approve, can_delete FROM role_permissions WHERE role_id = ? AND module = ?',
+        [userRole[0].role_id, 'people_ops']
+      );
+      if (roleMod.length > 0) {
+        const p = roleMod[0];
+        if (action === 'approve' && (p.can_approve === 1 || p.can_edit === 1)) return true;
+        if (action === 'create' && (p.can_create === 1 || p.can_approve === 1)) return true;
+        if (action === 'edit' && (p.can_edit === 1 || p.can_approve === 1)) return true;
+        if (action === 'delete' && p.can_delete === 1) return true;
+        if (action === 'view' && p.can_view >= 1) return true;
+      }
+    }
+  } catch (err) {
+    console.error('hasOnboardingAccess error:', err);
+  }
+  return false;
+}
+
+exports.hasOnboardingAccess = hasOnboardingAccess;
+
+/**
  * Generate next AFID by reading the highest existing one from the shared DB.
  * Format: AFID-0001, AFID-0002, …
  */
