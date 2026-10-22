@@ -54,7 +54,7 @@ exports.createService = async (req, res) => {
   try {
     const [result] = await db.query(
       'INSERT INTO proposal_services (name, icon, created_by) VALUES (?, ?, ?)',
-      [name.trim(), icon || '🌐', req.user.id]
+      [name.trim(), icon || '', req.user.id]
     );
     const [rows] = await db.query('SELECT * FROM proposal_services WHERE id = ?', [result.insertId]);
     rows[0].plans = [];
@@ -74,7 +74,7 @@ exports.createService = async (req, res) => {
 exports.updateService = async (req, res) => {
   const { name, icon } = req.body;
   try {
-    await db.query('UPDATE proposal_services SET name = ?, icon = ? WHERE id = ?', [name, icon || '🌐', req.params.id]);
+    await db.query('UPDATE proposal_services SET name = ?, icon = ? WHERE id = ?', [name, icon || '', req.params.id]);
     return res.json({ message: 'Updated' });
   } catch (err) {
     console.error('Update proposal service error:', err);

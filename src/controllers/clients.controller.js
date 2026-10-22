@@ -773,7 +773,7 @@ exports.getActivity = async (req, res) => {
       [clientId, limit]
     );
     followUps.forEach(r => activities.push({
-      type: 'follow_up', icon: '📞', color: 'blue',
+      type: 'follow_up', icon: '', color: 'blue',
       title: `Follow-up logged — ${r.type || 'Note'}`,
       description: r.description, user: r.user_name, date: r.created_at
     }));
@@ -791,7 +791,7 @@ exports.getActivity = async (req, res) => {
       [clientId, limit]
     );
     tasks.forEach(r => activities.push({
-      type: 'task', icon: '📋', color: 'yellow',
+      type: 'task', icon: '', color: 'yellow',
       title: `Task created — ${r.title}`,
       description: `Status: ${r.status}`, user: r.user_name, date: r.created_at
     }));
@@ -807,7 +807,7 @@ exports.getActivity = async (req, res) => {
       [clientId, limit]
     );
     tickets.forEach(r => activities.push({
-      type: 'ticket', icon: '🎫', color: 'purple',
+      type: 'ticket', icon: '', color: 'purple',
       title: `Ticket — ${r.title}`,
       description: `Status: ${r.status}`, user: r.user_name, date: r.created_at
     }));
@@ -823,7 +823,7 @@ exports.getActivity = async (req, res) => {
       [clientId, limit]
     );
     shoots.forEach(r => activities.push({
-      type: 'shoot', icon: '📸', color: 'pink',
+      type: 'shoot', icon: '', color: 'pink',
       title: `Shoot — ${r.project_campaign_name}`,
       description: `Status: ${r.status?.replace(/_/g, ' ')}`, user: r.user_name, date: r.created_at
     }));
@@ -837,7 +837,7 @@ exports.getActivity = async (req, res) => {
       [clientId, limit]
     );
     invoices.forEach(r => activities.push({
-      type: 'invoice', icon: '💰', color: 'green',
+      type: 'invoice', icon: '', color: 'green',
       title: `Invoice ${r.invoice_number} — ₹${Number(r.total_amount).toLocaleString()}`,
       description: `Status: ${r.status}`, user: null, date: r.created_at
     }));
@@ -853,7 +853,7 @@ exports.getActivity = async (req, res) => {
       [clientId, limit]
     );
     expenses.forEach(r => activities.push({
-      type: 'expense', icon: '💸', color: 'red',
+      type: 'expense', icon: '', color: 'red',
       title: `Expense — ${r.title} (₹${Number(r.amount).toLocaleString()})`,
       description: null, user: r.user_name, date: r.created_at
     }));
@@ -869,7 +869,7 @@ exports.getActivity = async (req, res) => {
       [clientId, limit]
     );
     files.forEach(r => activities.push({
-      type: 'file', icon: '📁', color: 'indigo',
+      type: 'file', icon: '', color: 'indigo',
       title: `File uploaded — ${r.file_name}`,
       description: null, user: r.user_name, date: r.created_at
     }));
@@ -885,7 +885,7 @@ exports.getActivity = async (req, res) => {
       [clientId, limit]
     );
     notes.forEach(r => activities.push({
-      type: 'note', icon: '📝', color: 'amber',
+      type: 'note', icon: '', color: 'amber',
       title: `Note added${r.title ? ' — ' + r.title : ''}`,
       description: r.content?.substring(0, 100), user: r.user_name, date: r.created_at
     }));
@@ -900,7 +900,7 @@ exports.getActivity = async (req, res) => {
       [clientId]
     );
     drs.forEach(r => activities.push({
-      type: 'drs', icon: '✅', color: 'green',
+      type: 'drs', icon: '', color: 'green',
       title: `DRS completed — ${r.section?.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}`,
       description: null, user: r.user_name, date: r.created_at
     }));

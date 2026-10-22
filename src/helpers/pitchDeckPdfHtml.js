@@ -42,7 +42,7 @@ module.exports = function buildPdfHtml({ deck, painPoints, gaps, opps, goals, pl
             ${painPoints.map(p => `<p style="font-family:'Karla',sans-serif;font-size:10px;color:#5c4033;margin-bottom:6px;line-height:1.4;display:flex;align-items:flex-start;gap:6px"><span style="width:6px;height:6px;border-radius:50%;background:#8b4513;margin-top:4px;flex-shrink:0"></span>${p.content}</p>`).join('')}
           </div>
           <div style="flex:1;background:#fff;border-radius:16px;padding:12px;border:1px solid #e5e7eb">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><div style="width:24px;height:24px;border-radius:8px;background:#a0522d;display:flex;align-items:center;justify-content:center"><span style="color:#fff;font-size:10px;font-weight:700">⚡</span></div><span style="font-family:'Poppins',sans-serif;font-size:10px;font-weight:700;color:#3b2314;text-transform:uppercase;letter-spacing:.5px">Identified Gaps</span></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><div style="width:24px;height:24px;border-radius:8px;background:#a0522d;display:flex;align-items:center;justify-content:center"><span style="color:#fff;font-size:10px;font-weight:700"></span></div><span style="font-family:'Poppins',sans-serif;font-size:10px;font-weight:700;color:#3b2314;text-transform:uppercase;letter-spacing:.5px">Identified Gaps</span></div>
             ${gaps.map(g => `<p style="font-family:'Karla',sans-serif;font-size:10px;color:#5c4033;margin-bottom:6px;line-height:1.4;display:flex;align-items:flex-start;gap:6px"><span style="width:6px;height:6px;border-radius:50%;background:#a0522d;margin-top:4px;flex-shrink:0"></span>${g.content}</p>`).join('')}
           </div>
           <div style="flex:1;background:#fff;border-radius:16px;padding:12px;border:1px solid #e5e7eb">
@@ -101,7 +101,7 @@ module.exports = function buildPdfHtml({ deck, painPoints, gaps, opps, goals, pl
           ${plans.map(p => `<div style="flex:1;background:#fff;border-radius:16px;padding:12px;border:${p.is_popular ? '2px solid #3b2314' : '1px solid #e5e7eb'}">
             <h3 style="font-family:'Poppins',sans-serif;font-size:11px;font-weight:700;color:#3b2314;margin-bottom:2px">${p.name}</h3>
             <p style="font-family:'Karla',sans-serif;font-size:9px;color:#9c8070;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">${p.service_name}</p>
-            ${(p.features||[]).slice(0,5).map(f => `<p style="font-family:'Karla',sans-serif;font-size:9px;color:#5c4033;margin-bottom:4px"><span style="color:#8b4513">✓</span> ${f.feature}</p>`).join('')}
+            ${(p.features||[]).slice(0,5).map(f => `<p style="font-family:'Karla',sans-serif;font-size:9px;color:#5c4033;margin-bottom:4px"><span style="color:#8b4513"></span> ${f.feature}</p>`).join('')}
             ${parseFloat(p.price)>0 ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #e5e7eb"><p style="font-family:'Poppins',sans-serif;font-size:18px;font-weight:700;color:#3b2314">₹${parseFloat(p.price).toLocaleString()} <span style="font-size:9px;font-weight:400;color:#9c8070">/${p.duration}</span></p></div>` : ''}
           </div>`).join('')}
         </div>
@@ -118,7 +118,7 @@ module.exports = function buildPdfHtml({ deck, painPoints, gaps, opps, goals, pl
         <h2 style="font-family:'Poppins',sans-serif;font-size:24px;font-weight:700;color:#3b2314;text-transform:uppercase;letter-spacing:.5px;margin-bottom:16px">Why Partner With Us</h2>
         <div style="display:flex;flex-wrap:wrap;gap:12px">
           ${whyUs.map(u => `<div style="width:${w};background:#fff;border-radius:12px;padding:12px;border:1px solid #e5e7eb">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:20px;height:20px;border-radius:50%;background:#3b2314;display:flex;align-items:center;justify-content:center"><span style="color:#fff;font-size:9px">✓</span></div><span style="font-family:'Poppins',sans-serif;font-size:10px;font-weight:700;color:#3b2314">${u.title}</span></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:20px;height:20px;border-radius:50%;background:#3b2314;display:flex;align-items:center;justify-content:center"><span style="color:#fff;font-size:9px"></span></div><span style="font-family:'Poppins',sans-serif;font-size:10px;font-weight:700;color:#3b2314">${u.title}</span></div>
             <p style="font-family:'Karla',sans-serif;font-size:9px;color:#5c4033;line-height:1.5;padding-left:28px">${u.description}</p>
           </div>`).join('')}
         </div>

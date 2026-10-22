@@ -532,10 +532,10 @@ exports.getDashboard = async (req, res) => {
 
     // Build activity feed
     const statusIcons = {
-      completed: '✅', done: '✅', approved: '✅', paid: '✅',
-      in_progress: '🔄', active: '🔄', ongoing: '🔄', to_do: '📋',
-      pending: '⏳', scheduled: '📅', sent: '📩',
-      cancelled: '❌', overdue: '⚠️',
+      completed: '', done: '', approved: '', paid: '',
+      in_progress: '', active: '', ongoing: '', to_do: '',
+      pending: '', scheduled: '', sent: '',
+      cancelled: '', overdue: '',
     };
     const sourceLabels = { task: 'Task', ticket: 'Ticket', shoot: 'Shoot' };
 
@@ -546,7 +546,7 @@ exports.getDashboard = async (req, res) => {
         id: `${a.source}_${a.id}`,
         title: a.title,
         description: `${sourceLabels[a.source]} — ${a.status?.replace(/_/g, ' ') || 'updated'}`,
-        icon: statusIcons[a.status] || '⚡',
+        icon: statusIcons[a.status] || '',
         created_at: a.created_at,
       }));
 
@@ -950,7 +950,7 @@ exports.addWin = async (req, res) => {
   try {
     await db.query(
       'INSERT INTO client_portal_wins (client_id, title, icon, month) VALUES (?, ?, ?, ?)',
-      [client_id, title, icon || '🏆', month || null]
+      [client_id, title, icon || '', month || null]
     );
     return res.json({ message: 'Win added' });
   } catch (err) {

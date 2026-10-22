@@ -659,7 +659,7 @@ exports.approveSlot = async (req, res) => {
         type: 'slot_approved',
         slot_type: item_type,
         slot_id: item_id,
-        title: `Your ${item_type} slot was approved! 🎉`,
+        title: `Your ${item_type} slot was approved!`,
         message: `Your content is now live on the calendar.`,
         link: getPageLink(item_type),
       });
@@ -879,7 +879,7 @@ exports.completeSlot = async (req, res) => {
         type: 'slot_completed',
         slot_type: item_type,
         slot_id: item_id,
-        title: `${item_type} slot marked as completed ✅`,
+        title: `${item_type} slot marked as completed`,
         message: `The assigned ${item_type} has been posted/executed.`,
         link: '/social/content-calendar',
       });
@@ -945,7 +945,7 @@ exports.bulkApprove = async (req, res) => {
           type: 'slot_approved',
           slot_type: item_type,
           slot_id: item_id,
-          title: `Your ${item_type} slot was approved! 🎉`,
+          title: `Your ${item_type} slot was approved!`,
           message: `Your content is now live.`,
           link: getPageLink(item_type),
         });

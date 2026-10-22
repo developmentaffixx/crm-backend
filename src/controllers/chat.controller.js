@@ -145,9 +145,9 @@ exports.uploadMiddleware = upload.single('file');
     `);
     // Alter message_type to include 'poll'
     try { await db.query("ALTER TABLE messages MODIFY COLUMN message_type ENUM('text', 'image', 'file', 'system', 'poll') NOT NULL DEFAULT 'text'"); } catch(e) {}
-    console.log('✅ Chat tables ready (v3)');
+    console.log('Chat tables ready (v3)');
   } catch (err) {
-    console.error('⚠️  Chat table migration error:', err.message);
+    console.error(' Chat table migration error:', err.message);
   }
 })();
 

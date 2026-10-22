@@ -505,7 +505,7 @@ exports.exportPdf = async (req, res) => {
       let y = title('Recommendations for Next Month');
       y += 10;
       report.recommendations.filter(r => r).forEach((rec) => {
-        doc.font('Helvetica-Bold').fontSize(16).fillColor(B.accent).text('✓', 70, y);
+        doc.font('Helvetica-Bold').fontSize(16).fillColor(B.accent).text('', 70, y);
         doc.font('Helvetica').fontSize(16).fillColor(B.text).text(rec, 100, y, { width: 1100 });
         y += 40;
       });
@@ -757,7 +757,7 @@ exports.exportPptx = async (req, res) => {
 
       let ry = 1.4;
       recs.filter(r => r).forEach((rec) => {
-        slide.addText('✓', { x: 0.6, y: ry, w: 0.4, h: 0.4, fontSize: 16, color: brandAccent, fontFace: 'Arial' });
+        slide.addText('', { x: 0.6, y: ry, w: 0.4, h: 0.4, fontSize: 16, color: brandAccent, fontFace: 'Arial' });
         slide.addText(rec, { x: 1.1, y: ry, w: 11.5, h: 0.4, fontSize: 15, color: textColor, fontFace: 'Arial' });
         ry += 0.55;
       });

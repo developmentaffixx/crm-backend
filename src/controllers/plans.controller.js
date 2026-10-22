@@ -70,7 +70,7 @@ exports.createService = async (req, res) => {
   try {
     const [result] = await db.query(
       `INSERT INTO services (name, description, hsn_code, icon, service_type, created_by) VALUES (?, ?, ?, ?, ?, ?)`,
-      [name, description || null, hsn_code || '', icon || '🌐', service_type || 'recurring', req.user.id]
+      [name, description || null, hsn_code || '', icon || '', service_type || 'recurring', req.user.id]
     );
 
     const [rows] = await db.query('SELECT * FROM services WHERE id = ?', [result.insertId]);

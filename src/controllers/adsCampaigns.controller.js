@@ -326,7 +326,7 @@ exports.update = async (req, res) => {
           if (campaign.created_by) {
             await db.query(
               `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-               VALUES (?, ?, 'slot_approved', 'ad', ?, 'Your ad slot was approved! 🎉', 'Campaign is now live.', '/social/ads-planning')`,
+               VALUES (?, ?, 'slot_approved', 'ad', ?, 'Your ad slot was approved!', 'Campaign is now live.', '/social/ads-planning')`,
               [campaign.created_by, req.user.id, slotId]
             );
             res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_approved' });

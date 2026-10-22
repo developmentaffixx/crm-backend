@@ -292,7 +292,7 @@ exports.getUnifiedNotifications = async (req, res) => {
           priority: r.announce_priority === 'urgent' ? 'high' : r.announce_priority === 'important' ? 'medium' : 'low',
           title: r.title,
           subtitle: 'Company Announcement',
-          message: r.announce_priority === 'urgent' ? '🔴 Urgent' : r.announce_priority === 'important' ? '🟡 Important' : 'New announcement',
+          message: r.announce_priority === 'urgent' ? 'Urgent' : r.announce_priority === 'important' ? 'Important' : 'New announcement',
           link: `/announcements`,
           date: r.created_at,
           days_overdue: 0,

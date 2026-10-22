@@ -240,7 +240,7 @@ exports.addUpsell = async (req, res) => {
   try {
     await db.query(
       'INSERT INTO client_portal_upsell (client_id, service_name, tagline, description, icon) VALUES (?, ?, ?, ?, ?)',
-      [client_id, service_name, tagline || null, description || null, icon || '🔒']
+      [client_id, service_name, tagline || null, description || null, icon || '']
     );
     return res.json({ message: 'Upsell added' });
   } catch (err) {
@@ -259,11 +259,11 @@ exports.addMilestone = async (req, res) => {
   try {
     await db.query(
       'INSERT INTO client_portal_milestones (client_id, title, description, icon, milestone_date) VALUES (?, ?, ?, ?, ?)',
-      [client_id, title, description || null, icon || '🎉', milestone_date || null]
+      [client_id, title, description || null, icon || '', milestone_date || null]
     );
     await db.query(
       "INSERT INTO client_portal_notifications (client_id, title, type) VALUES (?, ?, 'info')",
-      [client_id, `🎉 New milestone: ${title}`]
+      [client_id, `New milestone: ${title}`]
     );
     return res.json({ message: 'Milestone added' });
   } catch (err) {

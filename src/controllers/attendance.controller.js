@@ -575,7 +575,7 @@ async function calculateProductivityTargetStatus(userId, inputDate = null) {
   // 8. Human-friendly Messages
   let clockInMessage = '';
   if (isFirstDayOfMonth) {
-    clockInMessage = '✨ Welcome to the new month! Your monthly balance starts fresh with 0h deficit.';
+    clockInMessage = 'Welcome to the new month! Your monthly balance starts fresh with 0h deficit.';
   } else if (!isTodayWorkingDay) {
     clockInMessage = `Today is ${todayType.replace('_', ' ')}. No mandatory productive hours required.`;
   } else if (prevDeficitSeconds > 0) {
@@ -588,7 +588,7 @@ async function calculateProductivityTargetStatus(userId, inputDate = null) {
 
   let clockOutMessage = '';
   if (isTargetAchieved) {
-    clockOutMessage = `🎉 Today's target achieved! Great work today.`;
+    clockOutMessage = `Today's target achieved! Great work today.`;
   } else if (isMonthEnd) {
     clockOutMessage = `Tomorrow is a new month! Your monthly balance will refresh to 0. The remaining ${formatDurationHM(todayShortfallSeconds)} deficit will be deducted from your salary.`;
   } else if (skippedDays.length > 0 && nextWorkingDay) {

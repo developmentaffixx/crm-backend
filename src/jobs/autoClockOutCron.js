@@ -38,7 +38,7 @@ async function sendAutoClockOutEmail(user, clockOutTime) {
           <p style="color: #4b5563;">You forgot to clock out today. We've automatically clocked you out at <strong>${timeStr}</strong>.</p>
           <p style="color: #4b5563;">When you log in tomorrow, you'll be prompted to enter your actual clock-out time if it was different.</p>
           <div style="margin-top: 20px; padding: 12px; background: #fef3c7; border-radius: 8px;">
-            <p style="color: #92400e; margin: 0; font-size: 14px;">⚠️ Please remember to clock out before leaving.</p>
+            <p style="color: #92400e; margin: 0; font-size: 14px;">Please remember to clock out before leaving.</p>
           </div>
           <p style="color: #9ca3af; font-size: 12px; margin-top: 20px;">This is an automated message.</p>
         </div>
@@ -210,7 +210,7 @@ async function autoClockOut(isCatchUp = false) {
  */
 function startAutoClockOutCron() {
   // Run catch-up on startup: handle any missed auto-clock-outs (e.g., server was down)
-  console.log('⏰  Running auto clock-out catch-up on startup...');
+  console.log(' Running auto clock-out catch-up on startup...');
   autoClockOut(true);
 
   // Schedule: 13:30 UTC = 7:00 PM IST, every day
@@ -220,7 +220,7 @@ function startAutoClockOutCron() {
     timezone: 'UTC'
   });
 
-  console.log('⏰  Auto clock-out cron scheduled for 7:00 PM IST (13:30 UTC) daily');
+  console.log(' Auto clock-out cron scheduled for 7:00 PM IST (13:30 UTC) daily');
 }
 
 module.exports = { autoClockOut, startAutoClockOutCron };

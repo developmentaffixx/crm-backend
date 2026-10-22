@@ -512,7 +512,7 @@ exports.approve = async (req, res) => {
           if (shoot.created_by) {
             await db.query(
               `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-               VALUES (?, ?, 'slot_approved', 'shoot', ?, 'Your shoot slot was approved! 🎉', 'Shoot is now live on the calendar.', '/social/shoots')`,
+               VALUES (?, ?, 'slot_approved', 'shoot', ?, 'Your shoot slot was approved!', 'Shoot is now live on the calendar.', '/social/shoots')`,
               [shoot.created_by, req.user.id, shoot.calendar_slot_id]
             );
             res.emitSocket('smm:notification', { user_id: shoot.created_by, type: 'slot_approved' });

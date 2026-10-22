@@ -92,7 +92,7 @@ exports.sendTestEmail = async (req, res) => {
       subject: 'CRM — Test Email',
       html: `
         <div style="font-family:Arial,sans-serif;max-width:500px;margin:40px auto;padding:32px;background:#fff;border-radius:12px;border:1px solid #e2e8f0;">
-          <h2 style="color:#2563eb;margin:0 0 16px;">✅ Test Email</h2>
+          <h2 style="color:#2563eb;margin:0 0 16px;">Test Email</h2>
           <p style="color:#475569;margin:0 0 8px;">This is a test email from your CRM system.</p>
           <p style="color:#475569;margin:0;">If you received this, your SMTP configuration is working correctly.</p>
         </div>
