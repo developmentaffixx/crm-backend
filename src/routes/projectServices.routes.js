@@ -3,6 +3,7 @@ const router  = express.Router();
 const { body, param } = require('express-validator');
 const { authenticate, requireAdminOrProjectApprove } = require('../middleware/auth');
 const controller = require('../controllers/projectServices.controller');
+const credentialsController = require('../controllers/serviceCredentials.controller');
 
 // All routes require authentication
 router.use(authenticate);
@@ -113,6 +114,35 @@ router.delete(
   requireAdminOrProjectApprove,
   [param('projectId').isInt(), param('serviceId').isInt(), param('userId').isInt()],
   controller.removeServiceMember
+);
+
+// ─── Service Credentials Vault ───────────────────────────────────────────────
+// GET /api/projects/:projectId/services/:serviceId/credentials — list
+router.get(
+  '/:projectId/services/:serviceId/credentials',
+  [param('projectId').isInt(), param('serviceId').isInt()],
+  credentialsController.list
+);
+
+// POST /api/projects/:projectId/services/:serviceId/credentials — add
+router.post(
+  '/:projectId/services/:serviceId/credentials',
+  [param('projectId').isInt(), param('serviceId').isInt()],
+  credentialsController.create
+);
+
+// PUT /api/projects/:projectId/services/:serviceId/credentials/:credId — update
+router.put(
+  '/:projectId/services/:serviceId/credentials/:credId',
+  [param('projectId').isInt(), param('serviceId').isInt(), param('credId').isInt()],
+  credentialsController.update
+);
+
+// DELETE /api/projects/:projectId/services/:serviceId/credentials/:credId — delete
+router.delete(
+  '/:projectId/services/:serviceId/credentials/:credId',
+  [param('projectId').isInt(), param('serviceId').isInt(), param('credId').isInt()],
+  credentialsController.remove
 );
 
 module.exports = router;
