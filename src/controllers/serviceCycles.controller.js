@@ -884,3 +884,158 @@ exports.extendCycle = async (req, res) => {
     return res.status(500).json({ message: 'Server error', detail: err.message });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/projects/:projectId/cycles/:cycleId/hours
+// Hours Tracking: per-user total hours for this cycle, with a breakdown of the
+// Tasks, Tickets and Meetings that make up those hours (title + duration).
+//
+// Scoping:
+//   - Tasks:    linked via cycle_tasks (authoritative). task_time_logs.duration is in SECONDS.
+//   - Tickets:  tickets.project_id + due_date/created_at within cycle date range.
+//               ticket_time_logs stores MINUTES (legacy) and/or duration SECONDS (timer).
+//   - Meetings: meeting_date within cycle date range AND same client as the project
+//               (meetings have no project/cycle FK). meeting_time_logs.duration is SECONDS.
+//
+// All durations are normalised to SECONDS internally and returned as `seconds`.
+// Visible to anyone who can view the cycle (no extra permission gate).
+// ─────────────────────────────────────────────────────────────────────────────
+exports.getCycleHours = async (req, res) => {
+  try {
+    const { projectId, cycleId } = req.params;
+
+    // Resolve cycle + its date range + the project's client
+    const [cycles] = await db.query(
+      `SELECT sc.id, sc.project_id, sc.start_date, sc.end_date, p.client_id
+       FROM service_cycles sc
+       JOIN projects p ON p.id = sc.project_id
+       WHERE sc.id = ? AND sc.project_id = ?`,
+      [cycleId, projectId]
+    );
+    if (cycles.length === 0) {
+      return res.status(404).json({ message: 'Cycle not found' });
+    }
+    const cycle = cycles[0];
+    const startDate = cycle.start_date;
+    const endDate = cycle.end_date;
+    const clientId = cycle.client_id;
+
+    // ── TASKS: per-user time logs for tasks linked to this cycle ────────────────
+    const [taskLogs] = await db.query(
+      `SELECT tl.user_id,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name,
+              t.id   AS entity_id,
+              t.title AS title,
+              SUM(tl.duration) AS seconds
+       FROM cycle_tasks ct
+       JOIN tasks t ON t.id = ct.task_id AND t.deleted = 0
+       JOIN task_time_logs tl ON tl.task_id = t.id
+       JOIN users u ON u.id = tl.user_id
+       WHERE ct.cycle_id = ? AND tl.duration > 0
+       GROUP BY tl.user_id, t.id
+       ORDER BY seconds DESC`,
+      [cycleId]
+    );
+
+    // ── TICKETS: per-user time logs for tickets within the cycle period ─────────
+    // ticket_time_logs may carry `minutes` (legacy manual entry) and/or `duration`
+    // seconds (timer). Normalise to seconds: prefer duration when present, else minutes*60.
+    const [ticketLogs] = await db.query(
+      `SELECT tl.user_id,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name,
+              tk.id    AS entity_id,
+              tk.title AS title,
+              SUM(
+                CASE
+                  WHEN tl.duration IS NOT NULL AND tl.duration > 0 THEN tl.duration
+                  ELSE COALESCE(tl.minutes, 0) * 60
+                END
+              ) AS seconds
+       FROM tickets tk
+       JOIN ticket_time_logs tl ON tl.ticket_id = tk.id
+       JOIN users u ON u.id = tl.user_id
+       WHERE tk.project_id = ? AND tk.deleted = 0
+         AND (
+           (tk.due_date >= ? AND tk.due_date <= ?)
+           OR (tk.due_date IS NULL AND tk.created_at >= ? AND tk.created_at <= ?)
+         )
+       GROUP BY tl.user_id, tk.id
+       HAVING seconds > 0
+       ORDER BY seconds DESC`,
+      [projectId, startDate, endDate, startDate, endDate + ' 23:59:59']
+    );
+
+    // ── MEETINGS: per-user time logs for meetings in this cycle period ──────────
+    // Precise match: meetings explicitly linked to this project (project_id) whose
+    // meeting_date falls within the cycle window.
+    // Fallback: meetings with NO project_id, matched by same client + date range
+    // (legacy meetings created before the project link existed).
+    let meetingLogs = [];
+    if (clientId) {
+      const [rows] = await db.query(
+        `SELECT tl.user_id,
+                CONCAT(u.first_name, ' ', u.last_name) AS user_name,
+                m.id    AS entity_id,
+                m.title AS title,
+                SUM(tl.duration) AS seconds
+         FROM meetings m
+         JOIN meeting_time_logs tl ON tl.meeting_id = m.id
+         JOIN users u ON u.id = tl.user_id
+         WHERE m.deleted = 0
+           AND m.meeting_date >= ? AND m.meeting_date <= ?
+           AND tl.duration > 0
+           AND (
+             m.project_id = ?
+             OR (m.project_id IS NULL AND m.client_id = ?)
+           )
+         GROUP BY tl.user_id, m.id
+         ORDER BY seconds DESC`,
+        [startDate, endDate, projectId, clientId]
+      );
+      meetingLogs = rows;
+    }
+
+    // ── Assemble per-user structure ─────────────────────────────────────────────
+    const usersMap = new Map();
+
+    const ensureUser = (userId, userName) => {
+      if (!usersMap.has(userId)) {
+        usersMap.set(userId, {
+          user_id: userId,
+          user_name: userName || 'Unknown',
+          total_seconds: 0,
+          tasks: [],
+          tickets: [],
+          meetings: [],
+        });
+      }
+      return usersMap.get(userId);
+    };
+
+    const absorb = (rows, bucket) => {
+      for (const r of rows) {
+        const seconds = parseInt(r.seconds || 0, 10);
+        if (seconds <= 0) continue;
+        const u = ensureUser(r.user_id, r.user_name);
+        u[bucket].push({ id: r.entity_id, title: r.title || 'Untitled', seconds });
+        u.total_seconds += seconds;
+      }
+    };
+
+    absorb(taskLogs, 'tasks');
+    absorb(ticketLogs, 'tickets');
+    absorb(meetingLogs, 'meetings');
+
+    const users = Array.from(usersMap.values()).sort((a, b) => b.total_seconds - a.total_seconds);
+    const totalSeconds = users.reduce((sum, u) => sum + u.total_seconds, 0);
+
+    return res.json({
+      cycle_id: Number(cycleId),
+      total_seconds: totalSeconds,
+      users,
+    });
+  } catch (err) {
+    console.error('Get cycle hours error:', err);
+    return res.status(500).json({ message: 'Server error', detail: err.message });
+  }
+};

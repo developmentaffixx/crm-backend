@@ -199,7 +199,7 @@ exports.getOne = async (req, res) => {
 exports.create = async (req, res) => {
   try {
     const {
-      title, description, meeting_type, client_id,
+      title, description, meeting_type, client_id, project_id,
       meeting_date, start_time, end_time,
       location_type, meeting_link, mom, member_ids, status
     } = req.body;
@@ -208,14 +208,18 @@ exports.create = async (req, res) => {
       return res.status(400).json({ message: 'Title, date, start time, and end time are required' });
     }
 
+    // project_id only applies to client meetings
+    const resolvedProjectId = meeting_type === 'client' ? (project_id || null) : null;
+
     const [result] = await db.query(
-      `INSERT INTO meetings (title, description, meeting_type, client_id, meeting_date, start_time, end_time, location_type, meeting_link, status, mom, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO meetings (title, description, meeting_type, client_id, project_id, meeting_date, start_time, end_time, location_type, meeting_link, status, mom, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         title,
         description || null,
         meeting_type || 'office',
         meeting_type === 'client' ? (client_id || null) : null,
+        resolvedProjectId,
         meeting_date,
         start_time,
         end_time,
@@ -256,7 +260,7 @@ exports.update = async (req, res) => {
   try {
     const { id } = req.params;
     const {
-      title, description, meeting_type, client_id,
+      title, description, meeting_type, client_id, project_id,
       meeting_date, start_time, end_time,
       location_type, meeting_link, mom, member_ids, status
     } = req.body;
@@ -272,9 +276,11 @@ exports.update = async (req, res) => {
       return res.status(403).json({ message: 'Only the meeting creator or admin can edit this meeting' });
     }
 
+    const resolvedProjectId = meeting_type === 'client' ? (project_id || null) : null;
+
     await db.query(
       `UPDATE meetings SET
-        title = ?, description = ?, meeting_type = ?, client_id = ?,
+        title = ?, description = ?, meeting_type = ?, client_id = ?, project_id = ?,
         meeting_date = ?, start_time = ?, end_time = ?,
         location_type = ?, meeting_link = ?, status = ?, mom = ?,
         updated_at = NOW()
@@ -284,6 +290,7 @@ exports.update = async (req, res) => {
         description || null,
         meeting_type || 'office',
         meeting_type === 'client' ? (client_id || null) : null,
+        resolvedProjectId,
         meeting_date,
         start_time,
         end_time,

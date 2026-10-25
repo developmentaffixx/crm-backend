@@ -130,4 +130,11 @@ router.delete(
   feedbackController.remove
 );
 
+// ── Hours Tracking (per-user hours for a cycle, open to anyone who can view) ──
+router.get(
+  '/:projectId/cycles/:cycleId/hours',
+  [param('projectId').isInt(), param('cycleId').isInt()],
+  cyclesController.getCycleHours
+);
+
 module.exports = router;
