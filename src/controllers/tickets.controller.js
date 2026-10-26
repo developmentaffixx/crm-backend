@@ -936,40 +936,17 @@ exports.markDone = async (req, res) => {
       return res.status(400).json({ message: 'Ticket must be open, in progress, or on hold to mark as done' });
     }
 
-    // Respect the Ticket Settings "require approval on completion" toggle.
-    // When OFF, mark-done resolves the ticket directly (no pending_done step).
-    let requireApproval = true;
-    try {
-      const [settingsRows] = await db.query('SELECT require_approval_completion FROM ticket_settings WHERE id = 1');
-      if (settingsRows.length > 0) {
-        requireApproval = !!settingsRows[0].require_approval_completion;
-      }
-    } catch (e) {
-      // ticket_settings table may not exist yet — default to requiring approval
-    }
+    await db.query(
+      "UPDATE tickets SET status = 'pending_done', marked_done_by = ?, marked_done_at = NOW() WHERE id = ?",
+      [req.user.id, ticket.id]
+    );
 
-    // Admins always resolve directly (their mark-done is implicitly approved)
-    if (!requireApproval || req.user.is_admin) {
-      await db.query(
-        "UPDATE tickets SET status = 'resolved', resolved_at = NOW(), marked_done_by = ?, marked_done_at = NOW() WHERE id = ?",
-        [req.user.id, ticket.id]
-      );
-      await db.query(
-        `INSERT INTO ticket_activity_log (ticket_id, user_id, action, old_value, new_value, comment)
-         VALUES (?, ?, 'status_change', ?, 'resolved', 'Marked as done')`,
-        [ticket.id, req.user.id, ticket.status]
-      );
-    } else {
-      await db.query(
-        "UPDATE tickets SET status = 'pending_done', marked_done_by = ?, marked_done_at = NOW() WHERE id = ?",
-        [req.user.id, ticket.id]
-      );
-      await db.query(
-        `INSERT INTO ticket_activity_log (ticket_id, user_id, action, old_value, new_value, comment)
-         VALUES (?, ?, 'status_change', ?, 'pending_done', 'Marked as done — awaiting approval')`,
-        [ticket.id, req.user.id, ticket.status]
-      );
-    }
+    // Log activity
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, old_value, new_value, comment)
+       VALUES (?, ?, 'status_change', ?, 'pending_done', 'Marked as done — awaiting approval')`,
+      [ticket.id, req.user.id, ticket.status]
+    );
 
     const [updated] = await db.query('SELECT * FROM tickets WHERE id = ?', [ticket.id]);
     res.emitSocket('tickets:updated', updated[0]);
@@ -1097,42 +1074,17 @@ exports.createExtensionRequest = async (req, res) => {
       return res.status(409).json({ message: 'A pending extension request already exists for this ticket' });
     }
 
-    // Respect the Ticket Settings "require approval on extension" toggle.
-    // When OFF (or requester can approve), the extension applies immediately.
-    let requireExtApproval = true;
-    try {
-      const [settingsRows] = await db.query('SELECT require_approval_extension FROM ticket_settings WHERE id = 1');
-      if (settingsRows.length > 0) {
-        requireExtApproval = !!settingsRows[0].require_approval_extension;
-      }
-    } catch (e) {
-      // ticket_settings table may not exist yet — default to requiring approval
-    }
-
-    const autoApprove = !requireExtApproval || req.user.is_admin;
-    const initialStatus = autoApprove ? 'approved' : 'pending';
-
     const [result] = await db.query(
-      'INSERT INTO ticket_deadline_extension_requests (ticket_id, requested_by, requested_deadline, reason, status, actioned_by) VALUES (?, ?, ?, ?, ?, ?)',
-      [ticket.id, req.user.id, requested_deadline, reason, initialStatus, autoApprove ? req.user.id : null]
+      'INSERT INTO ticket_deadline_extension_requests (ticket_id, requested_by, requested_deadline, reason) VALUES (?, ?, ?, ?)',
+      [ticket.id, req.user.id, requested_deadline, reason]
     );
 
-    if (autoApprove) {
-      // Apply the new deadline directly
-      await db.query('UPDATE tickets SET due_date = ? WHERE id = ?', [requested_deadline, ticket.id]);
-      await db.query(
-        `INSERT INTO ticket_activity_log (ticket_id, user_id, action, new_value, comment)
-         VALUES (?, ?, 'extension_approved', ?, ?)`,
-        [ticket.id, req.user.id, requested_deadline, `Deadline updated to ${requested_deadline} — Reason: ${reason}`]
-      );
-    } else {
-      // Log activity (pending)
-      await db.query(
-        `INSERT INTO ticket_activity_log (ticket_id, user_id, action, new_value, comment)
-         VALUES (?, ?, 'extension_requested', ?, ?)`,
-        [ticket.id, req.user.id, requested_deadline, `Requested new deadline: ${reason}`]
-      );
-    }
+    // Log activity
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, new_value, comment)
+       VALUES (?, ?, 'extension_requested', ?, ?)`,
+      [ticket.id, req.user.id, requested_deadline, `Requested new deadline: ${reason}`]
+    );
 
     const [ext] = await db.query(
       `SELECT er.*, t.title AS ticket_title,

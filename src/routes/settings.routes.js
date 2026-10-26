@@ -73,10 +73,6 @@ router.post('/users/:id/impersonate',    [param('id').isInt({ min: 1 })], ctrl.i
 router.get('/task-settings', ctrl.getTaskSettings);
 router.put('/task-settings', ctrl.updateTaskSettings);
 
-// ─── Ticket Settings ──────────────────────────────────────────────────────────
-router.get('/ticket-settings', ctrl.getTicketSettings);
-router.put('/ticket-settings', ctrl.updateTicketSettings);
-
 // ─── Daily Targets Settings ───────────────────────────────────────────────────
 router.get('/daily-targets', ctrl.getDailyTargets);
 router.put('/daily-targets', ctrl.updateDailyTargets);
