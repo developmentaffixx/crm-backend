@@ -3,8 +3,24 @@ const router  = express.Router();
 const { body, param } = require('express-validator');
 const multer  = require('multer');
 const path    = require('path');
-const { authenticate, requireAdmin, requireAdminOrTicketApprove } = require('../middleware/auth');
+const {
+  authenticate, requireAdmin, requireAdminOrTicketApprove,
+  canApproveTickets, approveOrTeamHeadGuard,
+} = require('../middleware/auth');
+const db = require('../config/db');
 const ticketsController = require('../controllers/tickets.controller');
+
+// Owner resolver for a ticket: assignee + reporter. A team head of either may
+// approve/reject the ticket.
+async function ticketOwnerIds(req) {
+  const [rows] = await db.query(
+    'SELECT assigned_to, reported_by FROM tickets WHERE id = ? AND deleted = 0',
+    [req.params.id]
+  );
+  if (rows.length === 0) return [];
+  return [rows[0].assigned_to, rows[0].reported_by].filter(Boolean);
+}
+const ticketApproveGuard = approveOrTeamHeadGuard(canApproveTickets, ticketOwnerIds);
 
 // Multer config for ticket attachments
 const storage = multer.diskStorage({
@@ -128,10 +144,10 @@ router.delete(
 router.post('/:id/mark-done', param('id').isInt(), ticketsController.markDone);
 
 // POST /api/tickets/:id/approve-done  — admin or ticket approver approves completion
-router.post('/:id/approve-done', param('id').isInt(), requireAdminOrTicketApprove, ticketsController.approveDone);
+router.post('/:id/approve-done', param('id').isInt(), ticketApproveGuard, ticketsController.approveDone);
 
 // POST /api/tickets/:id/reject-done   — admin or ticket approver rejects completion
-router.post('/:id/reject-done', param('id').isInt(), requireAdminOrTicketApprove, ticketsController.rejectDone);
+router.post('/:id/reject-done', param('id').isInt(), ticketApproveGuard, ticketsController.rejectDone);
 
 // ── Deadline Extension Requests ──────────────────────────────────────────────
 
@@ -153,7 +169,7 @@ router.post(
 router.post(
   '/:id/extension-request/:extId/approve',
   [param('id').isInt(), param('extId').isInt()],
-  requireAdminOrTicketApprove,
+  ticketApproveGuard,
   ticketsController.approveExtensionRequest
 );
 
@@ -161,7 +177,7 @@ router.post(
 router.post(
   '/:id/extension-request/:extId/reject',
   [param('id').isInt(), param('extId').isInt()],
-  requireAdminOrTicketApprove,
+  ticketApproveGuard,
   ticketsController.rejectExtensionRequest
 );
 

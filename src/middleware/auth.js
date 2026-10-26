@@ -345,6 +345,105 @@ async function requireAdminOrAnnouncementAccess(req, res, next) {
   }
 }
 
+/**
+ * Returns the set of teams the given user is a HEAD of, and the member
+ * user IDs they supervise across those teams.
+ *
+ * A "head" sees & approves tasks/tickets for every member of their team
+ * (the head is counted as a member too, so their own id is included).
+ *
+ * @returns {Promise<{ isHead: boolean, teamIds: number[], memberIds: number[] }>}
+ *   - isHead: true if the user leads at least one team
+ *   - teamIds: ids of teams the user heads
+ *   - memberIds: distinct user ids of every member of those teams (incl. the head)
+ */
+async function getTeamScopeForHead(userId) {
+  const empty = { isHead: false, teamIds: [], memberIds: [] };
+  if (!userId) return empty;
+
+  try {
+    // Which teams (not deleted) does this user head?
+    const [headRows] = await db.query(
+      `SELECT tm.team_id
+         FROM team_members tm
+         JOIN teams t ON t.id = tm.team_id AND t.deleted = 0
+        WHERE tm.user_id = ? AND tm.role = 'head'`,
+      [userId]
+    );
+    if (headRows.length === 0) return empty;
+
+    const teamIds = headRows.map(r => r.team_id);
+
+    // All members (any role) of those teams — this includes the head(s).
+    const [memberRows] = await db.query(
+      `SELECT DISTINCT tm.user_id
+         FROM team_members tm
+        WHERE tm.team_id IN (?)`,
+      [teamIds]
+    );
+    const memberIds = memberRows.map(r => r.user_id);
+
+    return { isHead: true, teamIds, memberIds };
+  } catch (err) {
+    console.error('getTeamScopeForHead error:', err);
+    return empty;
+  }
+}
+
+/**
+ * True if `headUserId` heads a team that contains `targetUserId`.
+ * Used to let a team head approve/act on items owned by their members.
+ */
+async function isHeadOfUser(headUserId, targetUserId) {
+  if (!headUserId || !targetUserId) return false;
+  try {
+    const [rows] = await db.query(
+      `SELECT 1
+         FROM team_members head
+         JOIN teams t          ON t.id = head.team_id AND t.deleted = 0
+         JOIN team_members mem ON mem.team_id = head.team_id
+        WHERE head.user_id = ? AND head.role = 'head'
+          AND mem.user_id = ?
+        LIMIT 1`,
+      [headUserId, targetUserId]
+    );
+    return rows.length > 0;
+  } catch (err) {
+    console.error('isHeadOfUser error:', err);
+    return false;
+  }
+}
+
+/**
+ * Factory for an approval guard that allows:
+ *   - admins and global approvers (via `canApproveFn`), OR
+ *   - a team head, but only when the record being actioned belongs to one of
+ *     their team members.
+ *
+ * @param {(user)=>Promise<boolean>} canApproveFn  e.g. canApproveTasks / canApproveTickets
+ * @param {(req)=>Promise<number[]>} ownerIdsFn    resolves the user id(s) that own the targeted record
+ */
+function approveOrTeamHeadGuard(canApproveFn, ownerIdsFn) {
+  return async function (req, res, next) {
+    if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+    try {
+      if (req.user.is_admin || (await canApproveFn(req.user))) return next();
+
+      // Not a global approver — allow only if a head of the record's owner(s).
+      const ownerIds = await ownerIdsFn(req);
+      if (ownerIds && ownerIds.length > 0) {
+        for (const ownerId of ownerIds) {
+          if (await isHeadOfUser(req.user.id, ownerId)) return next();
+        }
+      }
+      return res.status(403).json({ message: 'Approval permission required' });
+    } catch (err) {
+      console.error('approveOrTeamHeadGuard error:', err);
+      return res.status(500).json({ message: 'Server error' });
+    }
+  };
+}
+
 module.exports = {
   authenticate,
   requireAdmin,
@@ -353,6 +452,9 @@ module.exports = {
   canApproveTickets,
   requireAdminOrTicketApprove,
   getUserModulePermission,
+  getTeamScopeForHead,
+  isHeadOfUser,
+  approveOrTeamHeadGuard,
   canEditProject,
   canViewProject,
   canApproveProjects,

@@ -1,10 +1,46 @@
 const express = require('express');
 const router  = express.Router();
 const { body, param } = require('express-validator');
-const { authenticate, requireAdmin, requireAdminOrTaskApprove } = require('../middleware/auth');
+const {
+  authenticate, requireAdmin, requireAdminOrTaskApprove,
+  canApproveTasks, approveOrTeamHeadGuard,
+} = require('../middleware/auth');
+const db = require('../config/db');
 const approvalsController = require('../controllers/approvals.controller');
 
 router.use(authenticate);
+
+// Owner resolver for a deadline-extension request: the task's assignee/creator
+// and the requester. A team head of any of these may approve/reject.
+async function extensionOwnerIds(req) {
+  const [rows] = await db.query(
+    `SELECT er.requested_by, t.assigned_to, t.created_by
+       FROM task_deadline_extension_requests er
+       LEFT JOIN tasks t ON t.id = er.task_id
+      WHERE er.id = ? AND er.deleted = 0`,
+    [req.params.id]
+  );
+  if (rows.length === 0) return [];
+  const r = rows[0];
+  return [r.requested_by, r.assigned_to, r.created_by].filter(Boolean);
+}
+
+// Owner resolver for a close request.
+async function closeOwnerIds(req) {
+  const [rows] = await db.query(
+    `SELECT cr.requested_by, t.assigned_to, t.created_by
+       FROM task_close_requests cr
+       LEFT JOIN tasks t ON t.id = cr.task_id
+      WHERE cr.id = ? AND cr.deleted = 0`,
+    [req.params.id]
+  );
+  if (rows.length === 0) return [];
+  const r = rows[0];
+  return [r.requested_by, r.assigned_to, r.created_by].filter(Boolean);
+}
+
+const extensionGuard = approveOrTeamHeadGuard(canApproveTasks, extensionOwnerIds);
+const closeGuard     = approveOrTeamHeadGuard(canApproveTasks, closeOwnerIds);
 
 // ── Extension Requests ──────────────────────────────────────────────────────
 
@@ -28,11 +64,11 @@ router.post(
   approvalsController.createExtension
 );
 
-// POST /api/approvals/extensions/:id/approve  (admin or task approver)
-router.post('/extensions/:id/approve', param('id').isInt(), requireAdminOrTaskApprove, approvalsController.approveExtension);
+// POST /api/approvals/extensions/:id/approve  (admin, task approver, or team head)
+router.post('/extensions/:id/approve', param('id').isInt(), extensionGuard, approvalsController.approveExtension);
 
-// POST /api/approvals/extensions/:id/reject   (admin or task approver)
-router.post('/extensions/:id/reject', param('id').isInt(), requireAdminOrTaskApprove, approvalsController.rejectExtension);
+// POST /api/approvals/extensions/:id/reject   (admin, task approver, or team head)
+router.post('/extensions/:id/reject', param('id').isInt(), extensionGuard, approvalsController.rejectExtension);
 
 // DELETE /api/approvals/extensions/:id/cancel (team member cancels own pending)
 router.delete('/extensions/:id/cancel', param('id').isInt(), approvalsController.cancelExtension);
@@ -70,11 +106,11 @@ router.post(
   approvalsController.createCloseRequest
 );
 
-// POST /api/approvals/closes/:id/approve  (admin or task approver)
-router.post('/closes/:id/approve', param('id').isInt(), requireAdminOrTaskApprove, approvalsController.approveCloseRequest);
+// POST /api/approvals/closes/:id/approve  (admin, task approver, or team head)
+router.post('/closes/:id/approve', param('id').isInt(), closeGuard, approvalsController.approveCloseRequest);
 
-// POST /api/approvals/closes/:id/reject   (admin or task approver)
-router.post('/closes/:id/reject', param('id').isInt(), requireAdminOrTaskApprove, approvalsController.rejectCloseRequest);
+// POST /api/approvals/closes/:id/reject   (admin, task approver, or team head)
+router.post('/closes/:id/reject', param('id').isInt(), closeGuard, approvalsController.rejectCloseRequest);
 
 // DELETE /api/approvals/closes/:id/cancel (team member cancels own pending)
 router.delete('/closes/:id/cancel', param('id').isInt(), approvalsController.cancelCloseRequest);

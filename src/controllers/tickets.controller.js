@@ -1,5 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
+const { getTeamScopeForHead } = require('../middleware/auth');
 
 /**
  * GET /api/tickets
@@ -41,10 +42,19 @@ exports.list = async (req, res) => {
       baseParams.push(s, s);
     }
 
-    // Non-admin: only see tickets assigned to or reported by them
+    // Non-admin: only see tickets assigned to or reported by them.
+    // Team heads additionally see tickets of every member of their team(s).
     if (!req.user.is_admin) {
-      baseWhere += ' AND (t.assigned_to = ? OR t.reported_by = ?)';
-      baseParams.push(req.user.id, req.user.id);
+      const teamScope = await getTeamScopeForHead(req.user.id);
+      if (teamScope.isHead && teamScope.memberIds.length > 0) {
+        const ph = teamScope.memberIds.map(() => '?').join(',');
+        baseWhere += ` AND (t.assigned_to = ? OR t.reported_by = ?
+                        OR t.assigned_to IN (${ph}) OR t.reported_by IN (${ph}))`;
+        baseParams.push(req.user.id, req.user.id, ...teamScope.memberIds, ...teamScope.memberIds);
+      } else {
+        baseWhere += ' AND (t.assigned_to = ? OR t.reported_by = ?)';
+        baseParams.push(req.user.id, req.user.id);
+      }
     }
 
     // Cycle filter (paused/skipped/completed cycles hidden from the list)

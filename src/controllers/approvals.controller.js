@@ -1,6 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { canApproveTasks, canApproveTickets } = require('../middleware/auth');
+const { canApproveTasks, canApproveTickets, getTeamScopeForHead } = require('../middleware/auth');
 
 // Helper: Log to task_activity_log
 async function logActivity(taskId, userId, action, { field_name, old_value, new_value, note } = {}) {
@@ -556,20 +556,28 @@ exports.getApprovalsPage = async (req, res) => {
     const canApprove = isAdmin || (await canApproveTasks(req.user));
     const userId  = req.user.id;
 
+    // Team heads (who are not global approvers) see pending items for every
+    // member of their team(s), in addition to their own.
+    const teamScope = (!canApprove) ? await getTeamScopeForHead(userId) : { isHead: false, memberIds: [] };
+    const scopeIds = (teamScope.isHead && teamScope.memberIds.length > 0)
+      ? teamScope.memberIds
+      : [userId];
+    const ph = scopeIds.map(() => '?').join(',');
+
     let pendingTasksWhere = "t.deleted = 0 AND t.is_active IN (0, 2)";
     let extWhere          = "er.deleted = 0";
     let fwdWhere          = "fr.deleted = 0 AND fr.status = 'pending'";
     let clsWhere          = "cr.deleted = 0 AND cr.status = 'pending'";
 
     if (!canApprove) {
-      pendingTasksWhere += ' AND (t.created_by = ? OR t.assigned_to = ?)';
-      extWhere += ' AND er.requested_by = ?';
-      fwdWhere += ' AND (fr.forwarded_by = ? OR fr.forwarded_to = ?)';
-      clsWhere += ' AND cr.requested_by = ?';
+      pendingTasksWhere += ` AND (t.created_by IN (${ph}) OR t.assigned_to IN (${ph}))`;
+      extWhere += ` AND er.requested_by IN (${ph})`;
+      fwdWhere += ` AND (fr.forwarded_by IN (${ph}) OR fr.forwarded_to IN (${ph}))`;
+      clsWhere += ` AND cr.requested_by IN (${ph})`;
     }
 
-    const scopeParams2 = canApprove ? [] : [userId, userId];
-    const scopeParams1 = canApprove ? [] : [userId];
+    const scopeParams2 = canApprove ? [] : [...scopeIds, ...scopeIds];
+    const scopeParams1 = canApprove ? [] : [...scopeIds];
 
     const [pendingTasks] = await db.query(
       `SELECT t.id, t.task_id_code, t.title, t.is_active, t.deadline, t.priority,
@@ -620,11 +628,16 @@ exports.getApprovalsPage = async (req, res) => {
       scopeParams1
     );
 
-    // Ticket approval scope is independent of task approval
+    // Ticket approval scope is independent of task approval.
+    // A team head (non-approver) also sees their team members' ticket items.
     const canApproveTicket = isAdmin || (await canApproveTickets(req.user));
+    const ticketScope = (!canApproveTicket && teamScope.isHead && teamScope.memberIds.length > 0)
+      ? teamScope.memberIds
+      : [userId];
+    const tph = ticketScope.map(() => '?').join(',');
 
     let pendingTicketsWhere = "tk.deleted = 0 AND tk.status = 'pending_done'";
-    if (!canApproveTicket) pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
+    if (!canApproveTicket) pendingTicketsWhere += ` AND (tk.assigned_to IN (${tph}) OR tk.reported_by IN (${tph}))`;
     const [pendingTickets] = await db.query(
       `SELECT tk.id, tk.title, tk.status, tk.due_date, tk.priority, tk.mode,
               CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
@@ -634,11 +647,11 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u2 ON u2.id = tk.marked_done_by
        WHERE ${pendingTicketsWhere}
        ORDER BY tk.marked_done_at DESC`,
-      canApproveTicket ? [] : [userId, userId]
+      canApproveTicket ? [] : [...ticketScope, ...ticketScope]
     );
 
     let ticketExtWhere = "ter.deleted = 0 AND ter.status = 'pending'";
-    if (!canApproveTicket) ticketExtWhere += ' AND ter.requested_by = ?';
+    if (!canApproveTicket) ticketExtWhere += ` AND ter.requested_by IN (${tph})`;
     const [ticketExtensions] = await db.query(
       `SELECT ter.*, tk.title AS ticket_title,
               CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
@@ -647,7 +660,7 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u ON u.id = ter.requested_by
        WHERE ${ticketExtWhere}
        ORDER BY ter.created_at DESC`,
-      canApproveTicket ? [] : [userId]
+      canApproveTicket ? [] : [...ticketScope]
     );
 
     return res.json({
@@ -681,6 +694,17 @@ exports.getBadgeCount = async (req, res) => {
     const canApproveTicket = isAdmin || (await canApproveTickets(req.user));
     const userId  = req.user.id;
 
+    // Team head scope — mirrors getApprovalsPage so the badge count matches.
+    const teamScope = (!canApprove || !canApproveTicket)
+      ? await getTeamScopeForHead(userId)
+      : { isHead: false, memberIds: [] };
+    const taskScopeIds = (!canApprove && teamScope.isHead && teamScope.memberIds.length > 0)
+      ? teamScope.memberIds : [userId];
+    const ticketScopeIds = (!canApproveTicket && teamScope.isHead && teamScope.memberIds.length > 0)
+      ? teamScope.memberIds : [userId];
+    const tp = taskScopeIds.map(() => '?').join(',');
+    const kp = ticketScopeIds.map(() => '?').join(',');
+
     let taskCount = 0;
     let ticketCount = 0;
 
@@ -701,20 +725,20 @@ exports.getBadgeCount = async (req, res) => {
       taskCount += task_count + ext_count + fwd_count + cls_count;
     } else {
       const [[{ task_count }]] = await db.query(
-        "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND (created_by = ? OR assigned_to = ?)",
-        [userId, userId]
+        `SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND (created_by IN (${tp}) OR assigned_to IN (${tp}))`,
+        [...taskScopeIds, ...taskScopeIds]
       );
       const [[{ ext_count }]] = await db.query(
-        "SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
-        [userId]
+        `SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by IN (${tp})`,
+        [...taskScopeIds]
       );
       const [[{ fwd_count }]] = await db.query(
-        "SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending' AND (forwarded_by = ? OR forwarded_to = ?)",
-        [userId, userId]
+        `SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending' AND (forwarded_by IN (${tp}) OR forwarded_to IN (${tp}))`,
+        [...taskScopeIds, ...taskScopeIds]
       );
       const [[{ cls_count }]] = await db.query(
-        "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
-        [userId]
+        `SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending' AND requested_by IN (${tp})`,
+        [...taskScopeIds]
       );
       taskCount += task_count + ext_count + fwd_count + cls_count;
     }
@@ -723,14 +747,14 @@ exports.getBadgeCount = async (req, res) => {
     const [[{ ticket_pending_count }]] = await db.query(
       canApproveTicket
         ? "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done'"
-        : "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)",
-      canApproveTicket ? [] : [userId, userId]
+        : `SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to IN (${kp}) OR reported_by IN (${kp}))`,
+      canApproveTicket ? [] : [...ticketScopeIds, ...ticketScopeIds]
     );
     const [[{ ticket_ext_count }]] = await db.query(
       canApproveTicket
         ? "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'"
-        : "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
-      canApproveTicket ? [] : [userId]
+        : `SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by IN (${kp})`,
+      canApproveTicket ? [] : [...ticketScopeIds]
     );
     ticketCount += ticket_pending_count + ticket_ext_count;
 

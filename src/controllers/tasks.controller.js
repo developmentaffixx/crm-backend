@@ -1,6 +1,19 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { canApproveTasks } = require('../middleware/auth');
+const { canApproveTasks, getTeamScopeForHead } = require('../middleware/auth');
+
+// Build a SQL fragment + params that match tasks assigned to (or created by)
+// any user in `memberIds`. Returns { sql, params } or null when empty.
+function teamTaskScopeFragment(memberIds) {
+  if (!memberIds || memberIds.length === 0) return null;
+  const placeholders = memberIds.map(() => '?').join(',');
+  return {
+    sql: `(t.assigned_to IN (${placeholders}) OR t.created_by IN (${placeholders}) OR EXISTS (
+            SELECT 1 FROM task_assignees ta_team WHERE ta_team.task_id = t.id AND ta_team.user_id IN (${placeholders})
+          ))`,
+    params: [...memberIds, ...memberIds, ...memberIds],
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Log activity
@@ -52,9 +65,13 @@ exports.list = async (req, res) => {
   try {
     const {
       status, is_active, priority, search, exclude_done, assigned_to, project_id,
+      team_id,
       page = 1, limit = 25,
       sort_by = 'deadline', sort_order = 'ASC'
     } = req.query;
+
+    // Team scope: if this user heads a team, they supervise its members.
+    const teamScope = await getTeamScopeForHead(req.user.id);
 
     const pageNum  = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
@@ -101,16 +118,24 @@ exports.list = async (req, res) => {
 
       if (canView >= 2) {
         // View = All: see every task (same as admin, no extra filter)
-      } else if (canView === 1) {
-        // View = Own: tasks assigned to, created by, or collaborated on
-        where += ` AND (
-          (t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
+      } else if (canView === 1 || teamScope.isHead) {
+        // View = Own: tasks assigned to, created by, or collaborated on.
+        // Team heads additionally see tasks of every member of their team(s).
+        const ownClause = `(t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
             SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
           )))
           OR
-          (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
-        )`;
-        params.push(req.user.id, req.user.id, req.user.id, req.user.id);
+          (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)`;
+        const ownParams = [req.user.id, req.user.id, req.user.id, req.user.id];
+
+        const teamFrag = teamTaskScopeFragment(teamScope.memberIds);
+        if (teamFrag) {
+          where += ` AND ((${ownClause}) OR ${teamFrag.sql})`;
+          params.push(...ownParams, ...teamFrag.params);
+        } else {
+          where += ` AND (${ownClause})`;
+          params.push(...ownParams);
+        }
       } else {
         // View = None: see nothing
         where += ' AND 1 = 0';
@@ -143,6 +168,23 @@ exports.list = async (req, res) => {
     if (project_id) {
       where += ' AND EXISTS (SELECT 1 FROM project_tasks pt_f WHERE pt_f.task_id = t.id AND pt_f.project_id = ?)';
       params.push(project_id);
+    }
+
+    // Team filter: narrow to tasks belonging to members of a specific team.
+    // Available to admins (any team) and heads (their own teams only).
+    if (team_id) {
+      const tid = parseInt(team_id, 10);
+      const allowedTeam = req.user.is_admin || teamScope.teamIds.includes(tid);
+      if (allowedTeam && tid) {
+        where += ` AND (
+          t.assigned_to IN (SELECT tm.user_id FROM team_members tm WHERE tm.team_id = ?)
+          OR t.created_by IN (SELECT tm.user_id FROM team_members tm WHERE tm.team_id = ?)
+          OR EXISTS (SELECT 1 FROM task_assignees ta_tf
+                     JOIN team_members tm2 ON tm2.user_id = ta_tf.user_id
+                     WHERE ta_tf.task_id = t.id AND tm2.team_id = ?)
+        )`;
+        params.push(tid, tid, tid);
+      }
     }
 
     // Search by title or description
@@ -223,15 +265,22 @@ exports.list = async (req, res) => {
     if (!req.user.is_admin) {
       if (canView >= 2 || canApprove) {
         // Full visibility / Approver: see counts across all tasks just like admin
-      } else if (canView === 1) {
-        summaryWhere += ` AND (
-          (t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
+      } else if (canView === 1 || teamScope.isHead) {
+        const ownClause = `(t.is_active >= 1 AND (t.assigned_to = ? OR t.created_by = ? OR EXISTS (
             SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?
           )))
           OR
-          (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)
-        )`;
-        summaryParams.push(req.user.id, req.user.id, req.user.id, req.user.id);
+          (t.is_active = 4 AND t.created_by = ? AND t.rejected_at IS NOT NULL AND t.rejected_at >= NOW() - INTERVAL 8 HOUR)`;
+        const ownParams = [req.user.id, req.user.id, req.user.id, req.user.id];
+
+        const teamFrag = teamTaskScopeFragment(teamScope.memberIds);
+        if (teamFrag) {
+          summaryWhere += ` AND ((${ownClause}) OR ${teamFrag.sql})`;
+          summaryParams.push(...ownParams, ...teamFrag.params);
+        } else {
+          summaryWhere += ` AND (${ownClause})`;
+          summaryParams.push(...ownParams);
+        }
       } else {
         summaryWhere += ' AND 1 = 0';
       }
@@ -250,6 +299,22 @@ exports.list = async (req, res) => {
         SELECT 1 FROM task_assignees ta_s WHERE ta_s.task_id = t.id AND ta_s.user_id = ?
       ))`;
       summaryParams.push(assigned_to, assigned_to);
+    }
+
+    // Mirror the team_id filter so tab counts match the filtered table.
+    if (team_id) {
+      const tid = parseInt(team_id, 10);
+      const allowedTeam = req.user.is_admin || teamScope.teamIds.includes(tid);
+      if (allowedTeam && tid) {
+        summaryWhere += ` AND (
+          t.assigned_to IN (SELECT tm.user_id FROM team_members tm WHERE tm.team_id = ?)
+          OR t.created_by IN (SELECT tm.user_id FROM team_members tm WHERE tm.team_id = ?)
+          OR EXISTS (SELECT 1 FROM task_assignees ta_tfs
+                     JOIN team_members tm3 ON tm3.user_id = ta_tfs.user_id
+                     WHERE ta_tfs.task_id = t.id AND tm3.team_id = ?)
+        )`;
+        summaryParams.push(tid, tid, tid);
+      }
     }
 
     const [allRows] = await db.query(

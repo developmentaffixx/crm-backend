@@ -1,11 +1,27 @@
 const express = require('express');
 const router  = express.Router();
 const { body, param } = require('express-validator');
-const { authenticate, requireAdmin, requireAdminOrTaskApprove } = require('../middleware/auth');
+const {
+  authenticate, requireAdmin, requireAdminOrTaskApprove,
+  canApproveTasks, approveOrTeamHeadGuard,
+} = require('../middleware/auth');
+const db = require('../config/db');
 const tasksController = require('../controllers/tasks.controller');
 
 // All task routes require authentication
 router.use(authenticate);
+
+// Owner resolver for a task: assignee + creator. A team head of either may
+// approve/reject the task.
+async function taskOwnerIds(req) {
+  const [rows] = await db.query(
+    'SELECT assigned_to, created_by FROM tasks WHERE id = ? AND deleted = 0',
+    [req.params.id]
+  );
+  if (rows.length === 0) return [];
+  return [rows[0].assigned_to, rows[0].created_by].filter(Boolean);
+}
+const taskApproveGuard = approveOrTeamHeadGuard(canApproveTasks, taskOwnerIds);
 
 // GET  /api/tasks          — list tasks (filtered by role, paginated, searchable, sortable)
 router.get('/', tasksController.list);
@@ -66,10 +82,10 @@ router.put('/:id', param('id').isInt(), tasksController.update);
 router.post('/:id/mark-done', param('id').isInt(), tasksController.markDone);
 
 // POST /api/tasks/:id/approve    — admin or task approver approves (0→1 or 2→3)
-router.post('/:id/approve', param('id').isInt(), requireAdminOrTaskApprove, tasksController.approve);
+router.post('/:id/approve', param('id').isInt(), taskApproveGuard, tasksController.approve);
 
 // POST /api/tasks/:id/reject     — admin or task approver rejects (0→4 or 2→1)
-router.post('/:id/reject', param('id').isInt(), requireAdminOrTaskApprove, tasksController.reject);
+router.post('/:id/reject', param('id').isInt(), taskApproveGuard, tasksController.reject);
 
 // POST /api/tasks/:id/resubmit   — creator resubmits rejected task (4→0)
 router.post('/:id/resubmit', param('id').isInt(), tasksController.resubmit);
