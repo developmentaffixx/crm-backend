@@ -3,7 +3,7 @@ const router  = express.Router();
 const { body, param } = require('express-validator');
 const multer  = require('multer');
 const path    = require('path');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireAdminOrTicketApprove } = require('../middleware/auth');
 const ticketsController = require('../controllers/tickets.controller');
 
 // Multer config for ticket attachments
@@ -127,11 +127,11 @@ router.delete(
 // POST /api/tickets/:id/mark-done  — assigned user or reporter marks ticket done (pending approval)
 router.post('/:id/mark-done', param('id').isInt(), ticketsController.markDone);
 
-// POST /api/tickets/:id/approve-done  — admin approves completion
-router.post('/:id/approve-done', param('id').isInt(), requireAdmin, ticketsController.approveDone);
+// POST /api/tickets/:id/approve-done  — admin or ticket approver approves completion
+router.post('/:id/approve-done', param('id').isInt(), requireAdminOrTicketApprove, ticketsController.approveDone);
 
-// POST /api/tickets/:id/reject-done   — admin rejects completion
-router.post('/:id/reject-done', param('id').isInt(), requireAdmin, ticketsController.rejectDone);
+// POST /api/tickets/:id/reject-done   — admin or ticket approver rejects completion
+router.post('/:id/reject-done', param('id').isInt(), requireAdminOrTicketApprove, ticketsController.rejectDone);
 
 // ── Deadline Extension Requests ──────────────────────────────────────────────
 
@@ -149,19 +149,19 @@ router.post(
   ticketsController.createExtensionRequest
 );
 
-// POST /api/tickets/:id/extension-request/:extId/approve  (admin)
+// POST /api/tickets/:id/extension-request/:extId/approve  (admin or ticket approver)
 router.post(
   '/:id/extension-request/:extId/approve',
   [param('id').isInt(), param('extId').isInt()],
-  requireAdmin,
+  requireAdminOrTicketApprove,
   ticketsController.approveExtensionRequest
 );
 
-// POST /api/tickets/:id/extension-request/:extId/reject   (admin)
+// POST /api/tickets/:id/extension-request/:extId/reject   (admin or ticket approver)
 router.post(
   '/:id/extension-request/:extId/reject',
   [param('id').isInt(), param('extId').isInt()],
-  requireAdmin,
+  requireAdminOrTicketApprove,
   ticketsController.rejectExtensionRequest
 );
 

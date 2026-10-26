@@ -1338,6 +1338,61 @@ exports.updateTaskSettings = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/settings/ticket-settings
+ */
+exports.getTicketSettings = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM ticket_settings WHERE id = 1');
+    if (rows.length === 0) {
+      // Fall back to defaults if the row is missing (table may be freshly migrated)
+      return res.json({ id: 1, require_approval_completion: 1, require_approval_extension: 1 });
+    }
+    return res.json(rows[0]);
+  } catch (err) {
+    console.error('getTicketSettings error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/settings/ticket-settings
+ */
+exports.updateTicketSettings = async (req, res) => {
+  const { require_approval_completion, require_approval_extension } = req.body;
+
+  try {
+    const [existing] = await db.query('SELECT * FROM ticket_settings WHERE id = 1');
+    const current = existing[0] || {};
+
+    const newSettings = {
+      require_approval_completion: require_approval_completion !== undefined
+        ? (require_approval_completion ? 1 : 0)
+        : (current.require_approval_completion ?? 1),
+      require_approval_extension: require_approval_extension !== undefined
+        ? (require_approval_extension ? 1 : 0)
+        : (current.require_approval_extension ?? 1),
+    };
+
+    // Upsert the single config row
+    await db.query(
+      `INSERT INTO ticket_settings (id, require_approval_completion, require_approval_extension)
+       VALUES (1, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         require_approval_completion = VALUES(require_approval_completion),
+         require_approval_extension  = VALUES(require_approval_extension)`,
+      [newSettings.require_approval_completion, newSettings.require_approval_extension]
+    );
+
+    await logAudit(db, req.user.id, 'ticket_settings_updated', 'ticket_settings', 1, newSettings, req.ip);
+
+    return res.json({ message: 'Ticket settings updated', settings: newSettings });
+  } catch (err) {
+    console.error('updateTicketSettings error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── DAILY TARGETS SETTINGS ───────────────────────────────────────────────────
 
 /**

@@ -1,6 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { canApproveTasks } = require('../middleware/auth');
+const { canApproveTasks, canApproveTickets } = require('../middleware/auth');
 
 // Helper: Log to task_activity_log
 async function logActivity(taskId, userId, action, { field_name, old_value, new_value, note } = {}) {
@@ -620,8 +620,11 @@ exports.getApprovalsPage = async (req, res) => {
       scopeParams1
     );
 
+    // Ticket approval scope is independent of task approval
+    const canApproveTicket = isAdmin || (await canApproveTickets(req.user));
+
     let pendingTicketsWhere = "tk.deleted = 0 AND tk.status = 'pending_done'";
-    if (!isAdmin) pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
+    if (!canApproveTicket) pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
     const [pendingTickets] = await db.query(
       `SELECT tk.id, tk.title, tk.status, tk.due_date, tk.priority, tk.mode,
               CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
@@ -631,11 +634,11 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u2 ON u2.id = tk.marked_done_by
        WHERE ${pendingTicketsWhere}
        ORDER BY tk.marked_done_at DESC`,
-      isAdmin ? [] : [userId, userId]
+      canApproveTicket ? [] : [userId, userId]
     );
 
-    let ticketExtWhere = "ter.deleted = 0";
-    if (!isAdmin) ticketExtWhere += ' AND ter.requested_by = ?';
+    let ticketExtWhere = "ter.deleted = 0 AND ter.status = 'pending'";
+    if (!canApproveTicket) ticketExtWhere += ' AND ter.requested_by = ?';
     const [ticketExtensions] = await db.query(
       `SELECT ter.*, tk.title AS ticket_title,
               CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
@@ -644,7 +647,7 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u ON u.id = ter.requested_by
        WHERE ${ticketExtWhere}
        ORDER BY ter.created_at DESC`,
-      isAdmin ? [] : [userId]
+      canApproveTicket ? [] : [userId]
     );
 
     return res.json({
@@ -654,6 +657,7 @@ exports.getApprovalsPage = async (req, res) => {
       close_requests: closeRequests,
       pending_tickets: pendingTickets,
       ticket_extension_requests: ticketExtensions,
+      can_approve_tickets: canApproveTicket,
     });
   } catch (err) {
     console.error('Approvals page error:', err);
@@ -674,10 +678,12 @@ exports.getBadgeCount = async (req, res) => {
   try {
     const isAdmin = req.user.is_admin;
     const canApprove = isAdmin || (await canApproveTasks(req.user));
+    const canApproveTicket = isAdmin || (await canApproveTickets(req.user));
     const userId  = req.user.id;
 
     let count = 0;
 
+    // ── Task-related items (scoped by task approval permission) ──
     if (canApprove) {
       const [[{ task_count }]] = await db.query(
         "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2)"
@@ -691,19 +697,7 @@ exports.getBadgeCount = async (req, res) => {
       const [[{ cls_count }]] = await db.query(
         "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending'"
       );
-      const [[{ ticket_pending_count }]] = await db.query(
-        isAdmin
-          ? "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done'"
-          : "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)",
-        isAdmin ? [] : [userId, userId]
-      );
-      const [[{ ticket_ext_count }]] = await db.query(
-        isAdmin
-          ? "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'"
-          : "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
-        isAdmin ? [] : [userId]
-      );
-      count = task_count + ext_count + fwd_count + cls_count + ticket_pending_count + ticket_ext_count;
+      count += task_count + ext_count + fwd_count + cls_count;
     } else {
       const [[{ task_count }]] = await db.query(
         "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND (created_by = ? OR assigned_to = ?)",
@@ -721,16 +715,23 @@ exports.getBadgeCount = async (req, res) => {
         "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
         [userId]
       );
-      const [[{ ticket_pending_count }]] = await db.query(
-        "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)",
-        [userId, userId]
-      );
-      const [[{ ticket_ext_count }]] = await db.query(
-        "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
-        [userId]
-      );
-      count = task_count + ext_count + fwd_count + cls_count + ticket_pending_count + ticket_ext_count;
+      count += task_count + ext_count + fwd_count + cls_count;
     }
+
+    // ── Ticket-related items (scoped by ticket approval permission) ──
+    const [[{ ticket_pending_count }]] = await db.query(
+      canApproveTicket
+        ? "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done'"
+        : "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)",
+      canApproveTicket ? [] : [userId, userId]
+    );
+    const [[{ ticket_ext_count }]] = await db.query(
+      canApproveTicket
+        ? "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'"
+        : "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
+      canApproveTicket ? [] : [userId]
+    );
+    count += ticket_pending_count + ticket_ext_count;
 
     return res.json({ count });
   } catch (err) {

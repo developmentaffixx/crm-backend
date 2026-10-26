@@ -110,6 +110,63 @@ async function requireAdminOrTaskApprove(req, res, next) {
 }
 
 /**
+ * Checks if user has ticket approval permission (admin or can_approve on tickets module).
+ */
+async function canApproveTickets(user) {
+  if (!user) return false;
+  if (user.is_admin) return true;
+
+  try {
+    // User-level override wins over role
+    const [userPerms] = await db.query(
+      'SELECT can_approve FROM user_permissions WHERE user_id = ? AND module = ?',
+      [user.id, 'tickets']
+    );
+    if (userPerms.length > 0) {
+      return !!userPerms[0].can_approve;
+    }
+
+    // Role-level baseline
+    const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [user.id]);
+    if (userRole.length > 0 && userRole[0].role_id) {
+      const [rolePerms] = await db.query(
+        'SELECT can_approve FROM role_permissions WHERE role_id = ? AND module = ?',
+        [userRole[0].role_id, 'tickets']
+      );
+      if (rolePerms.length > 0) {
+        return !!rolePerms[0].can_approve;
+      }
+    }
+  } catch (err) {
+    console.error('canApproveTickets check error:', err);
+  }
+
+  return false;
+}
+
+/**
+ * Allows admins or users with tickets can_approve permission.
+ */
+async function requireAdminOrTicketApprove(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+  if (req.user.is_admin) {
+    return next();
+  }
+  try {
+    const allowed = await canApproveTickets(req.user);
+    if (!allowed) {
+      return res.status(403).json({ message: 'Ticket approvals access required' });
+    }
+    next();
+  } catch (err) {
+    console.error('requireAdminOrTicketApprove error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+}
+
+/**
  * Fetch effective permissions for a user on a given module,
  * taking user-level overrides into account with fallback to role permissions.
  */
@@ -293,6 +350,8 @@ module.exports = {
   requireAdmin,
   canApproveTasks,
   requireAdminOrTaskApprove,
+  canApproveTickets,
+  requireAdminOrTicketApprove,
   getUserModulePermission,
   canEditProject,
   canViewProject,
