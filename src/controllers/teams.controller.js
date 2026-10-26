@@ -1,5 +1,11 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
+const ensureTeamTables = require('../config/ensureTeamTables');
+
+// True when an error is "table does not exist" (MySQL ER_NO_SUCH_TABLE).
+function isMissingTable(err) {
+  return err && (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146);
+}
 
 /**
  * Attach the member list (with role + display info) to each team row.
@@ -54,8 +60,13 @@ exports.list = async (req, res) => {
     const withMembers = await attachMembers(teams);
     return res.json({ teams: withMembers });
   } catch (err) {
-    console.error('Teams list error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    // Self-heal: tables missing on first run — create them and return empty.
+    if (isMissingTable(err)) {
+      await ensureTeamTables();
+      return res.json({ teams: [] });
+    }
+    console.error('Teams list error:', err.message);
+    return res.status(500).json({ message: 'Server error: ' + err.message });
   }
 };
 
@@ -261,9 +272,9 @@ exports.remove = async (req, res) => {
  * Optional query ?team_id= to also include members already in that team.
  */
 exports.availableUsers = async (req, res) => {
-  try {
+  const runQuery = () => {
     const teamId = req.query.team_id ? parseInt(req.query.team_id, 10) : null;
-    const [rows] = await db.query(
+    return db.query(
       `SELECT u.id, CONCAT(u.first_name, ' ', u.last_name) AS name,
               u.avatar_url AS avatar, u.designation, u.department,
               tm.team_id AS current_team_id, tm.role AS current_role
@@ -274,9 +285,24 @@ exports.availableUsers = async (req, res) => {
         ORDER BY u.first_name, u.last_name`,
       teamId ? [teamId] : []
     );
+  };
+
+  try {
+    const [rows] = await runQuery();
     return res.json(rows);
   } catch (err) {
-    console.error('Available users error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    // Self-heal: if the team tables are missing, create them and retry once.
+    if (isMissingTable(err)) {
+      try {
+        await ensureTeamTables();
+        const [rows] = await runQuery();
+        return res.json(rows);
+      } catch (retryErr) {
+        console.error('Available users error (after ensure):', retryErr.message);
+        return res.status(500).json({ message: 'Team tables could not be created: ' + retryErr.message });
+      }
+    }
+    console.error('Available users error:', err.message);
+    return res.status(500).json({ message: 'Server error: ' + err.message });
   }
 };

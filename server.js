@@ -215,6 +215,9 @@ server.listen(PORT, () => {
   console.log(`✅  CRM Task API running on http://localhost:${PORT}`);
   console.log(`🔌  Socket.IO ready for real-time connections`);
 
+  // ── Ensure Team Management tables exist (auto-migrate on startup) ──────────
+  require('./src/config/ensureTeamTables')();
+
   // ── One-time: Ensure bank_account_name column exists in company_settings ───
   const db = require('./src/config/db');
   db.query("ALTER TABLE company_settings ADD COLUMN IF NOT EXISTS bank_account_name VARCHAR(255) NOT NULL DEFAULT 'SCALEFORGE PRIVATE LIMITED' AFTER social_facebook")
