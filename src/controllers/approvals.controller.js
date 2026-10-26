@@ -556,28 +556,51 @@ exports.getApprovalsPage = async (req, res) => {
     const canApprove = isAdmin || (await canApproveTasks(req.user));
     const userId  = req.user.id;
 
-    // Team heads (who are not global approvers) see pending items for every
-    // member of their team(s), in addition to their own.
+    // Team heads (who are not global approvers) see pending items whose
+    // related task is ASSIGNED TO a member of their team(s). A plain user sees
+    // only their own items. The two are different axes, so build the WHERE
+    // fragments and params for each case separately.
     const teamScope = (!canApprove) ? await getTeamScopeForHead(userId) : { isHead: false, memberIds: [] };
-    const scopeIds = (teamScope.isHead && teamScope.memberIds.length > 0)
-      ? teamScope.memberIds
-      : [userId];
-    const ph = scopeIds.map(() => '?').join(',');
+    const isHeadScope = teamScope.isHead && teamScope.memberIds.length > 0;
 
     let pendingTasksWhere = "t.deleted = 0 AND t.is_active IN (0, 2)";
     let extWhere          = "er.deleted = 0";
     let fwdWhere          = "fr.deleted = 0 AND fr.status = 'pending'";
     let clsWhere          = "cr.deleted = 0 AND cr.status = 'pending'";
 
+    // Params in declaration order for each query below.
+    let pendingTasksParams = [];
+    let extParams = [];
+    let fwdParams = [];
+    let clsParams = [];
+
     if (!canApprove) {
-      pendingTasksWhere += ` AND (t.created_by IN (${ph}) OR t.assigned_to IN (${ph}))`;
-      extWhere += ` AND er.requested_by IN (${ph})`;
-      fwdWhere += ` AND (fr.forwarded_by IN (${ph}) OR fr.forwarded_to IN (${ph}))`;
-      clsWhere += ` AND cr.requested_by IN (${ph})`;
+      if (isHeadScope) {
+        // Head: scope by the task's assignee being a team member.
+        const mp = teamScope.memberIds.map(() => '?').join(',');
+        pendingTasksWhere += ` AND t.assigned_to IN (${mp})`;
+        pendingTasksParams = [...teamScope.memberIds];
+        extWhere += ` AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND te.assigned_to IN (${mp}))`;
+        extParams = [...teamScope.memberIds];
+        fwdWhere += ` AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND tf.assigned_to IN (${mp}))`;
+        fwdParams = [...teamScope.memberIds];
+        clsWhere += ` AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${mp}))`;
+        clsParams = [...teamScope.memberIds];
+      } else {
+        // Plain user: only their own items.
+        pendingTasksWhere += ' AND (t.created_by = ? OR t.assigned_to = ?)';
+        pendingTasksParams = [userId, userId];
+        extWhere += ' AND er.requested_by = ?';
+        extParams = [userId];
+        fwdWhere += ' AND (fr.forwarded_by = ? OR fr.forwarded_to = ?)';
+        fwdParams = [userId, userId];
+        clsWhere += ' AND cr.requested_by = ?';
+        clsParams = [userId];
+      }
     }
 
-    const scopeParams2 = canApprove ? [] : [...scopeIds, ...scopeIds];
-    const scopeParams1 = canApprove ? [] : [...scopeIds];
+    const scopeParams2 = pendingTasksParams;
+    const scopeParams1 = extParams;
 
     const [pendingTasks] = await db.query(
       `SELECT t.id, t.task_id_code, t.title, t.is_active, t.deadline, t.priority,
@@ -613,7 +636,7 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u2 ON u2.id = fr.forwarded_to
        WHERE ${fwdWhere}
        ORDER BY fr.created_at DESC`,
-      scopeParams2
+      fwdParams
     );
 
     const [closeRequests] = await db.query(
@@ -625,19 +648,27 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u ON u.id = cr.requested_by
        WHERE ${clsWhere}
        ORDER BY cr.created_at DESC`,
-      scopeParams1
+      clsParams
     );
 
     // Ticket approval scope is independent of task approval.
-    // A team head (non-approver) also sees their team members' ticket items.
+    // A team head (non-approver) sees ticket items ASSIGNED TO a team member;
+    // a plain user sees only their own (assigned-to or reported-by them).
     const canApproveTicket = isAdmin || (await canApproveTickets(req.user));
-    const ticketScope = (!canApproveTicket && teamScope.isHead && teamScope.memberIds.length > 0)
-      ? teamScope.memberIds
-      : [userId];
-    const tph = ticketScope.map(() => '?').join(',');
+    const ticketHeadScope = !canApproveTicket && teamScope.isHead && teamScope.memberIds.length > 0;
+    const tmp = ticketHeadScope ? teamScope.memberIds.map(() => '?').join(',') : '';
 
     let pendingTicketsWhere = "tk.deleted = 0 AND tk.status = 'pending_done'";
-    if (!canApproveTicket) pendingTicketsWhere += ` AND (tk.assigned_to IN (${tph}) OR tk.reported_by IN (${tph}))`;
+    let pendingTicketsParams = [];
+    if (!canApproveTicket) {
+      if (ticketHeadScope) {
+        pendingTicketsWhere += ` AND tk.assigned_to IN (${tmp})`;
+        pendingTicketsParams = [...teamScope.memberIds];
+      } else {
+        pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
+        pendingTicketsParams = [userId, userId];
+      }
+    }
     const [pendingTickets] = await db.query(
       `SELECT tk.id, tk.title, tk.status, tk.due_date, tk.priority, tk.mode,
               CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
@@ -647,11 +678,20 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u2 ON u2.id = tk.marked_done_by
        WHERE ${pendingTicketsWhere}
        ORDER BY tk.marked_done_at DESC`,
-      canApproveTicket ? [] : [...ticketScope, ...ticketScope]
+      pendingTicketsParams
     );
 
     let ticketExtWhere = "ter.deleted = 0 AND ter.status = 'pending'";
-    if (!canApproveTicket) ticketExtWhere += ` AND ter.requested_by IN (${tph})`;
+    let ticketExtParams = [];
+    if (!canApproveTicket) {
+      if (ticketHeadScope) {
+        ticketExtWhere += ` AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${tmp}))`;
+        ticketExtParams = [...teamScope.memberIds];
+      } else {
+        ticketExtWhere += ' AND ter.requested_by = ?';
+        ticketExtParams = [userId];
+      }
+    }
     const [ticketExtensions] = await db.query(
       `SELECT ter.*, tk.title AS ticket_title,
               CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
@@ -660,7 +700,7 @@ exports.getApprovalsPage = async (req, res) => {
        LEFT JOIN users u ON u.id = ter.requested_by
        WHERE ${ticketExtWhere}
        ORDER BY ter.created_at DESC`,
-      canApproveTicket ? [] : [...ticketScope]
+      ticketExtParams
     );
 
     return res.json({
@@ -698,12 +738,9 @@ exports.getBadgeCount = async (req, res) => {
     const teamScope = (!canApprove || !canApproveTicket)
       ? await getTeamScopeForHead(userId)
       : { isHead: false, memberIds: [] };
-    const taskScopeIds = (!canApprove && teamScope.isHead && teamScope.memberIds.length > 0)
-      ? teamScope.memberIds : [userId];
-    const ticketScopeIds = (!canApproveTicket && teamScope.isHead && teamScope.memberIds.length > 0)
-      ? teamScope.memberIds : [userId];
-    const tp = taskScopeIds.map(() => '?').join(',');
-    const kp = ticketScopeIds.map(() => '?').join(',');
+    const taskHeadScope   = !canApprove && teamScope.isHead && teamScope.memberIds.length > 0;
+    const ticketHeadScope = !canApproveTicket && teamScope.isHead && teamScope.memberIds.length > 0;
+    const mp = teamScope.memberIds.length ? teamScope.memberIds.map(() => '?').join(',') : '';
 
     let taskCount = 0;
     let ticketCount = 0;
@@ -723,39 +760,67 @@ exports.getBadgeCount = async (req, res) => {
         "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending'"
       );
       taskCount += task_count + ext_count + fwd_count + cls_count;
-    } else {
+    } else if (taskHeadScope) {
+      // Head: scope by the task's assignee being a team member.
+      const ids = teamScope.memberIds;
       const [[{ task_count }]] = await db.query(
-        `SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND (created_by IN (${tp}) OR assigned_to IN (${tp}))`,
-        [...taskScopeIds, ...taskScopeIds]
+        `SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND assigned_to IN (${mp})`,
+        [...ids]
       );
       const [[{ ext_count }]] = await db.query(
-        `SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by IN (${tp})`,
-        [...taskScopeIds]
+        `SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests er WHERE er.deleted = 0 AND er.status = 'pending' AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND te.assigned_to IN (${mp}))`,
+        [...ids]
       );
       const [[{ fwd_count }]] = await db.query(
-        `SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending' AND (forwarded_by IN (${tp}) OR forwarded_to IN (${tp}))`,
-        [...taskScopeIds, ...taskScopeIds]
+        `SELECT COUNT(*) AS fwd_count FROM task_forward_requests fr WHERE fr.deleted = 0 AND fr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND tf.assigned_to IN (${mp}))`,
+        [...ids]
       );
       const [[{ cls_count }]] = await db.query(
-        `SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending' AND requested_by IN (${tp})`,
-        [...taskScopeIds]
+        `SELECT COUNT(*) AS cls_count FROM task_close_requests cr WHERE cr.deleted = 0 AND cr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${mp}))`,
+        [...ids]
+      );
+      taskCount += task_count + ext_count + fwd_count + cls_count;
+    } else {
+      // Plain user: only their own items.
+      const [[{ task_count }]] = await db.query(
+        "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND (created_by = ? OR assigned_to = ?)",
+        [userId, userId]
+      );
+      const [[{ ext_count }]] = await db.query(
+        "SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
+        [userId]
+      );
+      const [[{ fwd_count }]] = await db.query(
+        "SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending' AND (forwarded_by = ? OR forwarded_to = ?)",
+        [userId, userId]
+      );
+      const [[{ cls_count }]] = await db.query(
+        "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
+        [userId]
       );
       taskCount += task_count + ext_count + fwd_count + cls_count;
     }
 
     // ── Ticket-related items (scoped by ticket approval permission) ──
-    const [[{ ticket_pending_count }]] = await db.query(
-      canApproveTicket
-        ? "SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done'"
-        : `SELECT COUNT(*) AS ticket_pending_count FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to IN (${kp}) OR reported_by IN (${kp}))`,
-      canApproveTicket ? [] : [...ticketScopeIds, ...ticketScopeIds]
-    );
-    const [[{ ticket_ext_count }]] = await db.query(
-      canApproveTicket
-        ? "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'"
-        : `SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by IN (${kp})`,
-      canApproveTicket ? [] : [...ticketScopeIds]
-    );
+    let ticketPendingSql, ticketPendingParams, ticketExtSql, ticketExtParams;
+    if (canApproveTicket) {
+      ticketPendingSql = "SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done'";
+      ticketPendingParams = [];
+      ticketExtSql = "SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'";
+      ticketExtParams = [];
+    } else if (ticketHeadScope) {
+      ticketPendingSql = `SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND assigned_to IN (${mp})`;
+      ticketPendingParams = [...teamScope.memberIds];
+      ticketExtSql = `SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests ter WHERE ter.deleted = 0 AND ter.status = 'pending' AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${mp}))`;
+      ticketExtParams = [...teamScope.memberIds];
+    } else {
+      ticketPendingSql = "SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)";
+      ticketPendingParams = [userId, userId];
+      ticketExtSql = "SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?";
+      ticketExtParams = [userId];
+    }
+    const [[{ c: ticket_pending_count }]] = await db.query(ticketPendingSql, ticketPendingParams);
+    const [[{ c: ticket_ext_count }]] = await db.query(ticketExtSql, ticketExtParams);
     ticketCount += ticket_pending_count + ticket_ext_count;
 
     // `count` kept for backward compatibility; task/ticket split lets the

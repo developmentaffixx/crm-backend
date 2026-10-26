@@ -4,14 +4,18 @@ const { canApproveTasks, getTeamScopeForHead } = require('../middleware/auth');
 
 // Build a SQL fragment + params that match tasks assigned to (or created by)
 // any user in `memberIds`. Returns { sql, params } or null when empty.
+// A task belongs to a Head's team only when its ASSIGNEE (primary or a
+// collaborator) is a team member. Creator is intentionally NOT considered —
+// a member may create a task for someone outside the team, and that task is
+// not the team's to see.
 function teamTaskScopeFragment(memberIds) {
   if (!memberIds || memberIds.length === 0) return null;
   const placeholders = memberIds.map(() => '?').join(',');
   return {
-    sql: `(t.assigned_to IN (${placeholders}) OR t.created_by IN (${placeholders}) OR EXISTS (
+    sql: `(t.assigned_to IN (${placeholders}) OR EXISTS (
             SELECT 1 FROM task_assignees ta_team WHERE ta_team.task_id = t.id AND ta_team.user_id IN (${placeholders})
           ))`,
-    params: [...memberIds, ...memberIds, ...memberIds],
+    params: [...memberIds, ...memberIds],
   };
 }
 

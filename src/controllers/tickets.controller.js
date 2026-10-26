@@ -43,14 +43,15 @@ exports.list = async (req, res) => {
     }
 
     // Non-admin: only see tickets assigned to or reported by them.
-    // Team heads additionally see tickets of every member of their team(s).
+    // Team heads additionally see tickets ASSIGNED TO any member of their
+    // team(s). Reporter is not used for the team scope — a member may report a
+    // ticket for someone outside the team, which is not the team's to see.
     if (!req.user.is_admin) {
       const teamScope = await getTeamScopeForHead(req.user.id);
       if (teamScope.isHead && teamScope.memberIds.length > 0) {
         const ph = teamScope.memberIds.map(() => '?').join(',');
-        baseWhere += ` AND (t.assigned_to = ? OR t.reported_by = ?
-                        OR t.assigned_to IN (${ph}) OR t.reported_by IN (${ph}))`;
-        baseParams.push(req.user.id, req.user.id, ...teamScope.memberIds, ...teamScope.memberIds);
+        baseWhere += ` AND (t.assigned_to = ? OR t.reported_by = ? OR t.assigned_to IN (${ph}))`;
+        baseParams.push(req.user.id, req.user.id, ...teamScope.memberIds);
       } else {
         baseWhere += ' AND (t.assigned_to = ? OR t.reported_by = ?)';
         baseParams.push(req.user.id, req.user.id);
