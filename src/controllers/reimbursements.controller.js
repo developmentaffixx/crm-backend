@@ -43,6 +43,10 @@ async function hasReimbursementsAllAccess(user) {
   return false;
 }
 
+// Exported so the routes layer can gate approve/reject/edit/mark-paid/stats
+// on "All" access (can_access >= 2), matching the list endpoint's behavior.
+exports.hasReimbursementsAllAccess = hasReimbursementsAllAccess;
+
 function normalizeGroupMembers(input) {
   if (!input) return null;
   let parsed = input;
