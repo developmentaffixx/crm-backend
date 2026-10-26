@@ -7,6 +7,11 @@ const db = require('./db');
  */
 async function ensureTeamTables() {
   try {
+    // NOTE: tables are created WITHOUT foreign-key constraints on purpose.
+    // Production schemas can differ (e.g. users.id signedness), and a strict
+    // FK would make CREATE TABLE fail with errno 150. All relational rules
+    // (one team per user, valid users, cascade cleanup) are enforced in the
+    // application layer, so the DB-level FKs are not required for correctness.
     await db.query(`
       CREATE TABLE IF NOT EXISTS teams (
         id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -28,37 +33,15 @@ async function ensureTeamTables() {
         role       ENUM('head', 'member') NOT NULL DEFAULT 'member',
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY uq_team_member_user (user_id),
-        CONSTRAINT fk_team_members_team FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
-        CONSTRAINT fk_team_members_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         INDEX idx_team_members_team (team_id),
         INDEX idx_team_members_role (role)
       ) ENGINE=InnoDB
     `);
 
-    // Add the created_by FK separately so a pre-existing `teams` table (created
-    // without it) is tolerated, and a missing users table doesn't abort startup.
-    try {
-      const [fk] = await db.query(
-        `SELECT 1 FROM information_schema.TABLE_CONSTRAINTS
-          WHERE CONSTRAINT_SCHEMA = DATABASE()
-            AND TABLE_NAME = 'teams'
-            AND CONSTRAINT_NAME = 'fk_teams_created_by'`
-      );
-      if (fk.length === 0) {
-        await db.query(
-          `ALTER TABLE teams
-             ADD CONSTRAINT fk_teams_created_by
-             FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL`
-        );
-      }
-    } catch (fkErr) {
-      // Non-fatal: the feature works without this FK.
-      console.warn('ensureTeamTables: created_by FK not added —', fkErr.message);
-    }
-
     console.log('[teams] tables verified/created');
   } catch (err) {
-    console.error('[teams] ensureTeamTables failed:', err.message);
+    console.error('[teams] ensureTeamTables failed:', err.code, err.errno, err.message);
+    throw err;
   }
 }
 

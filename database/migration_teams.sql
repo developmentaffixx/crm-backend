@@ -17,6 +17,9 @@ USE crm_task_module;
 -- ------------------------------------------------------------
 -- 1. Teams
 -- ------------------------------------------------------------
+-- NOTE: no foreign-key constraints — production schemas may differ
+-- (e.g. users.id signedness) and strict FKs can fail with errno 150.
+-- All relational rules are enforced in the application layer.
 CREATE TABLE IF NOT EXISTS teams (
   id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   name        VARCHAR(150) NOT NULL,
@@ -25,7 +28,6 @@ CREATE TABLE IF NOT EXISTS teams (
   created_by  INT UNSIGNED,
   created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  CONSTRAINT fk_teams_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
   INDEX idx_teams_deleted (deleted)
 ) ENGINE=InnoDB;
 
@@ -41,8 +43,6 @@ CREATE TABLE IF NOT EXISTS team_members (
   role       ENUM('head', 'member') NOT NULL DEFAULT 'member',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_team_member_user (user_id),
-  CONSTRAINT fk_team_members_team FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
-  CONSTRAINT fk_team_members_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   INDEX idx_team_members_team (team_id),
   INDEX idx_team_members_role (role)
 ) ENGINE=InnoDB;

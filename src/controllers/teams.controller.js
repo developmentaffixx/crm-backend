@@ -274,10 +274,12 @@ exports.remove = async (req, res) => {
 exports.availableUsers = async (req, res) => {
   const runQuery = () => {
     const teamId = req.query.team_id ? parseInt(req.query.team_id, 10) : null;
+    // NOTE: `current_role` is a reserved keyword in MariaDB — alias as
+    // `current_team_role` to avoid a SQL syntax error.
     return db.query(
       `SELECT u.id, CONCAT(u.first_name, ' ', u.last_name) AS name,
               u.avatar_url AS avatar, u.designation, u.department,
-              tm.team_id AS current_team_id, tm.role AS current_role
+              tm.team_id AS current_team_id, tm.role AS current_team_role
          FROM users u
          LEFT JOIN team_members tm ON tm.user_id = u.id
         WHERE u.deleted = 0 AND u.is_active = 1
