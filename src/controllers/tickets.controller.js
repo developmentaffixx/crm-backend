@@ -7,31 +7,48 @@ const db = require('../config/db');
 exports.list = async (req, res) => {
   try {
     const { mode, status, priority, ticket_type, related_to_type, search } = req.query;
-    let where = 't.deleted = 0';
-    const params = [];
 
-    if (mode) { where += ' AND t.mode = ?'; params.push(mode); }
-    if (status) { where += ' AND t.status = ?'; params.push(status); }
-    if (priority) { where += ' AND t.priority = ?'; params.push(priority); }
-    if (ticket_type) { where += ' AND t.ticket_type = ?'; params.push(ticket_type); }
-    if (related_to_type) { where += ' AND t.related_to_type = ?'; params.push(related_to_type); }
+    // ── Pagination ──
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const offset = (page - 1) * limit;
+
+    // ── Sorting (whitelist columns to avoid SQL injection) ──
+    const SORT_COLUMNS = {
+      created_at: 't.created_at',
+      due_date: 't.due_date',
+      priority: "FIELD(t.priority, 'low', 'medium', 'high', 'critical')",
+      status: 't.status',
+      title: 't.title',
+      ticket_id_code: 't.ticket_id_code',
+    };
+    const sortBy = SORT_COLUMNS[req.query.sort_by] || SORT_COLUMNS.created_at;
+    const sortOrder = String(req.query.sort_order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    // ── Base filters shared by the list, count, and summary ──
+    // `baseWhere` excludes the status filter so the summary reflects every
+    // status; `where` adds the status filter for the paged rows + count.
+    let baseWhere = 't.deleted = 0';
+    const baseParams = [];
+
+    if (mode) { baseWhere += ' AND t.mode = ?'; baseParams.push(mode); }
+    if (priority) { baseWhere += ' AND t.priority = ?'; baseParams.push(priority); }
+    if (ticket_type) { baseWhere += ' AND t.ticket_type = ?'; baseParams.push(ticket_type); }
+    if (related_to_type) { baseWhere += ' AND t.related_to_type = ?'; baseParams.push(related_to_type); }
     if (search) {
-      where += ' AND (t.title LIKE ? OR t.description LIKE ?)';
+      baseWhere += ' AND (t.title LIKE ? OR t.description LIKE ?)';
       const s = `%${search}%`;
-      params.push(s, s);
+      baseParams.push(s, s);
     }
 
     // Non-admin: only see tickets assigned to or reported by them
     if (!req.user.is_admin) {
-      where += ' AND (t.assigned_to = ? OR t.reported_by = ?)';
-      params.push(req.user.id, req.user.id);
+      baseWhere += ' AND (t.assigned_to = ? OR t.reported_by = ?)';
+      baseParams.push(req.user.id, req.user.id);
     }
 
-    // Tickets list cycle filter:
-    // - Non-admins: hide tickets from paused, skipped, or completed cycles
-    // - Admins: hide tickets from paused/skipped cycles on this list page (visible via cycle detail)
-    //           completed cycle tickets also hidden to keep the list focused on active work
-    where += ` AND NOT (
+    // Cycle filter (paused/skipped/completed cycles hidden from the list)
+    baseWhere += ` AND NOT (
       t.project_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM service_cycles sc_pause
         WHERE sc_pause.project_id = t.project_id AND sc_pause.status IN ('paused', 'skipped', 'completed')
@@ -40,6 +57,18 @@ exports.list = async (req, res) => {
       )
     )`;
 
+    // Status filter applies only to the returned rows / page count
+    let where = baseWhere;
+    const params = [...baseParams];
+    if (status) {
+      where += ' AND t.status = ?';
+      params.push(status);
+    } else if (req.query.exclude_closed) {
+      // Default list view hides closed tickets
+      where += " AND t.status != 'closed'";
+    }
+
+    // ── Paged rows ──
     const [rows] = await db.query(
       `SELECT t.*,
               CONCAT(u_assigned.first_name, ' ', u_assigned.last_name) AS assigned_to_name,
@@ -52,22 +81,49 @@ exports.list = async (req, res) => {
        LEFT JOIN projects p ON p.id = t.project_id
        LEFT JOIN leads cl ON cl.id = t.related_to_id AND t.related_to_type = 'client'
        WHERE ${where}
-       ORDER BY t.created_at DESC`,
+       ORDER BY ${sortBy} ${sortOrder}, t.id DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+
+    // ── Total count for the active status filter (drives pagination) ──
+    const [[{ total_count }]] = await db.query(
+      `SELECT COUNT(*) AS total_count FROM tickets t WHERE ${where}`,
       params
     );
 
-    // Summary counts
+    // ── Summary counts over the full filtered set (ignores status filter) ──
+    const [[summaryRow]] = await db.query(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN t.status = 'open' THEN 1 ELSE 0 END) AS open,
+         SUM(CASE WHEN t.status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress,
+         SUM(CASE WHEN t.status = 'hold' THEN 1 ELSE 0 END) AS hold,
+         SUM(CASE WHEN t.status = 'pending_done' THEN 1 ELSE 0 END) AS pending_done,
+         SUM(CASE WHEN t.status = 'resolved' THEN 1 ELSE 0 END) AS resolved,
+         SUM(CASE WHEN t.status = 'closed' THEN 1 ELSE 0 END) AS closed
+       FROM tickets t WHERE ${baseWhere}`,
+      baseParams
+    );
+
     const summary = {
-      total: rows.length,
-      open: rows.filter(r => r.status === 'open').length,
-      in_progress: rows.filter(r => r.status === 'in_progress').length,
-      hold: rows.filter(r => r.status === 'hold').length,
-      pending_done: rows.filter(r => r.status === 'pending_done').length,
-      resolved: rows.filter(r => r.status === 'resolved').length,
-      closed: rows.filter(r => r.status === 'closed').length,
+      total: Number(summaryRow.total) || 0,
+      open: Number(summaryRow.open) || 0,
+      in_progress: Number(summaryRow.in_progress) || 0,
+      hold: Number(summaryRow.hold) || 0,
+      pending_done: Number(summaryRow.pending_done) || 0,
+      resolved: Number(summaryRow.resolved) || 0,
+      closed: Number(summaryRow.closed) || 0,
     };
 
-    return res.json({ tickets: rows, summary });
+    const total = Number(total_count) || 0;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    return res.json({
+      tickets: rows,
+      summary,
+      pagination: { page, limit, total, total_pages: totalPages },
+    });
   } catch (err) {
     console.error('Tickets list error:', err);
     return res.status(500).json({ message: 'Server error' });

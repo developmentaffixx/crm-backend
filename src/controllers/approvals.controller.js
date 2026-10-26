@@ -681,7 +681,8 @@ exports.getBadgeCount = async (req, res) => {
     const canApproveTicket = isAdmin || (await canApproveTickets(req.user));
     const userId  = req.user.id;
 
-    let count = 0;
+    let taskCount = 0;
+    let ticketCount = 0;
 
     // ── Task-related items (scoped by task approval permission) ──
     if (canApprove) {
@@ -697,7 +698,7 @@ exports.getBadgeCount = async (req, res) => {
       const [[{ cls_count }]] = await db.query(
         "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending'"
       );
-      count += task_count + ext_count + fwd_count + cls_count;
+      taskCount += task_count + ext_count + fwd_count + cls_count;
     } else {
       const [[{ task_count }]] = await db.query(
         "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND (created_by = ? OR assigned_to = ?)",
@@ -715,7 +716,7 @@ exports.getBadgeCount = async (req, res) => {
         "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
         [userId]
       );
-      count += task_count + ext_count + fwd_count + cls_count;
+      taskCount += task_count + ext_count + fwd_count + cls_count;
     }
 
     // ── Ticket-related items (scoped by ticket approval permission) ──
@@ -731,9 +732,15 @@ exports.getBadgeCount = async (req, res) => {
         : "SELECT COUNT(*) AS ticket_ext_count FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?",
       canApproveTicket ? [] : [userId]
     );
-    count += ticket_pending_count + ticket_ext_count;
+    ticketCount += ticket_pending_count + ticket_ext_count;
 
-    return res.json({ count });
+    // `count` kept for backward compatibility; task/ticket split lets the
+    // Tasks nav show task-only and the Tickets nav show ticket-only badges.
+    return res.json({
+      count: taskCount + ticketCount,
+      task_count: taskCount,
+      ticket_count: ticketCount,
+    });
   } catch (err) {
     console.error('Badge count error:', err);
     return res.status(500).json({ message: 'Server error' });
