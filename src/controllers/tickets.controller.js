@@ -250,9 +250,17 @@ exports.getOne = async (req, res) => {
 
     const ticket = rows[0];
 
-    // Non-admin access check
+    // Non-admin access check. Allow the assignee, the reporter, or a team head
+    // whose member the ticket is assigned to (consistent with the list view).
     if (!req.user.is_admin && ticket.assigned_to !== req.user.id && ticket.reported_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+      let allowed = false;
+      const teamScope = await getTeamScopeForHead(req.user.id);
+      if (teamScope.isHead && teamScope.memberIds.includes(ticket.assigned_to)) {
+        allowed = true;
+      }
+      if (!allowed) {
+        return res.status(403).json({ message: 'Access denied' });
+      }
     }
 
     // If ticket belongs to a paused or skipped cycle, non-admin users cannot view it

@@ -488,14 +488,35 @@ exports.getOne = async (req, res) => {
 
       if (canView < 2) {
         // Own or None — check assignment/collaboration
-        if (task.assigned_to !== req.user.id && task.created_by !== req.user.id) {
+        let allowed = (task.assigned_to === req.user.id || task.created_by === req.user.id);
+
+        if (!allowed) {
           const [collab] = await db.query(
             'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?',
             [task.id, req.user.id]
           );
-          if (collab.length === 0) {
-            return res.status(403).json({ message: 'Access denied' });
+          allowed = collab.length > 0;
+        }
+
+        // Team heads may open a task whose assignee (primary or collaborator)
+        // is a member of a team they head — consistent with the list view.
+        if (!allowed) {
+          const teamScope = await getTeamScopeForHead(req.user.id);
+          if (teamScope.isHead && teamScope.memberIds.length > 0) {
+            if (teamScope.memberIds.includes(task.assigned_to)) {
+              allowed = true;
+            } else {
+              const [teamCollab] = await db.query(
+                'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id IN (?) LIMIT 1',
+                [task.id, teamScope.memberIds]
+              );
+              allowed = teamCollab.length > 0;
+            }
           }
+        }
+
+        if (!allowed) {
+          return res.status(403).json({ message: 'Access denied' });
         }
       }
       // canView >= 2: All — no restriction, fall through
