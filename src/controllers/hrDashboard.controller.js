@@ -20,7 +20,7 @@ exports.getOverview = async (req, res) => {
     let headcountByDept = [];
     try {
       const [[totalRow]] = await db.query(
-        `SELECT COUNT(*) AS total FROM users WHERE deleted = 0 AND is_active = 1`
+        `SELECT COUNT(*) AS total FROM users WHERE deleted = 0 AND is_active = 1 AND is_admin = 0`
       );
       totalEmployees = totalRow?.total || 0;
 
@@ -28,7 +28,7 @@ exports.getOverview = async (req, res) => {
         SELECT COALESCE(NULLIF(u.department, ''), 'Unassigned') AS department,
                COUNT(*) AS count
         FROM users u
-        WHERE u.deleted = 0 AND u.is_active = 1
+        WHERE u.deleted = 0 AND u.is_active = 1 AND u.is_admin = 0
         GROUP BY COALESCE(NULLIF(u.department, ''), 'Unassigned')
         ORDER BY count DESC
       `);
@@ -252,34 +252,6 @@ exports.getOverview = async (req, res) => {
       console.error('HR Dashboard holidays query error:', err.message);
     }
 
-    // ── F. MONTHLY TOP PERFORMERS ──────────────────────────────────────────
-    let topPerformers = [];
-    try {
-      const [[monthRow]] = await db.query(`
-        SELECT eval_month FROM monthly_evaluations
-        ORDER BY eval_month DESC LIMIT 1
-      `);
-      const latestMonth = monthRow?.eval_month || null;
-
-      if (latestMonth) {
-        const [perfRows] = await db.query(`
-          SELECT me.user_id,
-                 CONCAT(u.first_name, ' ', u.last_name) AS name,
-                 u.avatar_url AS avatar,
-                 COALESCE(NULLIF(u.department, ''), 'Unassigned') AS department,
-                 me.overall_score
-          FROM monthly_evaluations me
-          JOIN users u ON u.id = me.user_id AND u.deleted = 0
-          WHERE me.eval_month = ?
-          ORDER BY me.overall_score DESC
-          LIMIT 5
-        `, [latestMonth]);
-        topPerformers = perfRows.map((p, idx) => ({ ...p, rank: idx + 1, eval_month: latestMonth }));
-      }
-    } catch (err) {
-      console.error('HR Dashboard performers query error:', err.message);
-    }
-
     // ── KPI AGGREGATION ────────────────────────────────────────────────────
     const kpis = {
       total_employees: totalEmployees,
@@ -307,7 +279,6 @@ exports.getOverview = async (req, res) => {
       birthdays,
       // F. People insights
       headcount_by_department: headcountByDept,
-      top_performers: topPerformers,
       upcoming_holidays: upcomingHolidays,
     });
   } catch (err) {
