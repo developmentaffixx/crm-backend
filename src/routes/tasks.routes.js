@@ -26,6 +26,9 @@ const taskApproveGuard = approveOrTeamHeadGuard(canApproveTasks, taskOwnerIds);
 // GET  /api/tasks          — list tasks (filtered by role, paginated, searchable, sortable)
 router.get('/', tasksController.list);
 
+// GET  /api/tasks/filter-users   — users the viewer may filter by (team-aware)
+router.get('/filter-users', tasksController.filterUsers);
+
 // GET  /api/tasks/pinned          — get current user's pinned tasks
 router.get('/pinned', tasksController.getPinnedTasks);
 

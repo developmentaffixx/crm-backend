@@ -61,6 +61,77 @@ async function syncAssignees(taskId, primaryUserId, collaboratorIds = []) {
 }
 
 /**
+ * GET /api/tasks/filter-users
+ * Returns the users the current viewer may filter the task list by:
+ *   - Admin / View=All / approver  -> all active users
+ *   - Team head (without full view) -> only their team member(s)
+ *   - Otherwise                     -> just themselves
+ * Keeps the "Assigned To" dropdown consistent with what the list actually shows.
+ */
+exports.filterUsers = async (req, res) => {
+  try {
+    const allActive = () =>
+      db.query(
+        `SELECT id, first_name, last_name, avatar_url
+           FROM users
+          WHERE deleted = 0 AND is_active = 1
+          ORDER BY first_name, last_name`
+      ).then(([rows]) => rows);
+
+    if (req.user.is_admin) {
+      return res.json(await allActive());
+    }
+
+    // Resolve effective can_view / can_approve for tasks.
+    let canView = 0, canApprove = 0;
+    const [ov] = await db.query(
+      'SELECT can_view, can_approve FROM user_permissions WHERE user_id = ? AND module = ?',
+      [req.user.id, 'tasks']
+    );
+    if (ov.length > 0) {
+      canView = ov[0].can_view; canApprove = ov[0].can_approve;
+    } else {
+      const [ur] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+      if (ur.length > 0 && ur[0].role_id) {
+        const [rp] = await db.query(
+          'SELECT can_view, can_approve FROM role_permissions WHERE role_id = ? AND module = ?',
+          [ur[0].role_id, 'tasks']
+        );
+        if (rp.length > 0) { canView = rp[0].can_view; canApprove = rp[0].can_approve; }
+      }
+    }
+
+    // Full-visibility users filter across everyone.
+    if (canView >= 2 || canApprove) {
+      return res.json(await allActive());
+    }
+
+    // Team heads filter by their team members only.
+    const teamScope = await getTeamScopeForHead(req.user.id);
+    if (teamScope.isHead && teamScope.memberIds.length > 0) {
+      const [rows] = await db.query(
+        `SELECT id, first_name, last_name, avatar_url
+           FROM users
+          WHERE id IN (?) AND deleted = 0
+          ORDER BY first_name, last_name`,
+        [teamScope.memberIds]
+      );
+      return res.json(rows);
+    }
+
+    // Everyone else: just themselves.
+    const [self] = await db.query(
+      'SELECT id, first_name, last_name, avatar_url FROM users WHERE id = ?',
+      [req.user.id]
+    );
+    return res.json(self);
+  } catch (err) {
+    console.error('Task filter-users error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * GET /api/tasks
  * Supports: pagination, search, sorting, filtering
  * Query params: page, limit, search, sort_by, sort_order, status, is_active, priority
