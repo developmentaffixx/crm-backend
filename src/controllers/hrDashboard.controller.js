@@ -241,7 +241,12 @@ exports.getOverview = async (req, res) => {
     let upcomingHolidays = [];
     try {
       const [holRows] = await db.query(`
-        SELECT id, date, name, type
+        SELECT id,
+               date,
+               title AS name,
+               category AS type,
+               holiday_type,
+               half_day_session
         FROM company_holidays
         WHERE date >= CURDATE()
         ORDER BY date ASC
