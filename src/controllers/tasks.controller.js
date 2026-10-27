@@ -1,6 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { canApproveTasks, getTeamScopeForHead } = require('../middleware/auth');
+const { canApproveTasks, getTeamScopeForHead, isTaskInHeadScope } = require('../middleware/auth');
 
 // Build a SQL fragment + params that match tasks assigned to (or created by)
 // any user in `memberIds`. Returns { sql, params } or null when empty.
@@ -711,7 +711,9 @@ exports.update = async (req, res) => {
       }
     }
 
-    const hasEditAll = req.user.is_admin || canEdit >= 2 || canApprove;
+    // A team head may edit tasks assigned to their team members.
+    const isTeamHeadForTask = !req.user.is_admin && await isTaskInHeadScope(req.user, task);
+    const hasEditAll = req.user.is_admin || canEdit >= 2 || canApprove || isTeamHeadForTask;
 
     // Closed tasks cannot be edited (except by admin or manager with full edit access)
     if (task.is_active === 3 && !hasEditAll) {
@@ -1156,6 +1158,11 @@ exports.getActivity = async (req, res) => {
           }
         }
       }
+    }
+
+    // Team head: can view activity for a task assigned to a team member.
+    if (!allowed) {
+      allowed = await isTaskInHeadScope(req.user, task[0]);
     }
 
     if (!allowed) {

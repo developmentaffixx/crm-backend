@@ -415,6 +415,30 @@ async function isHeadOfUser(headUserId, targetUserId) {
 }
 
 /**
+ * True if `user` is a team head and the given task is ASSIGNED TO (primary or
+ * collaborator) one of their team members. Used to let a head view/manage a
+ * team member's task consistently across endpoints.
+ * @param {object} user  req.user
+ * @param {{id:number, assigned_to:number}} task  task row with id + assigned_to
+ */
+async function isTaskInHeadScope(user, task) {
+  if (!user || !task) return false;
+  try {
+    const scope = await getTeamScopeForHead(user.id);
+    if (!scope.isHead || scope.memberIds.length === 0) return false;
+    if (scope.memberIds.includes(task.assigned_to)) return true;
+    const [collab] = await db.query(
+      'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id IN (?) LIMIT 1',
+      [task.id, scope.memberIds]
+    );
+    return collab.length > 0;
+  } catch (err) {
+    console.error('isTaskInHeadScope error:', err);
+    return false;
+  }
+}
+
+/**
  * Factory for an approval guard that allows:
  *   - admins and global approvers (via `canApproveFn`), OR
  *   - a team head, but only when the record being actioned belongs to one of
@@ -454,6 +478,7 @@ module.exports = {
   getUserModulePermission,
   getTeamScopeForHead,
   isHeadOfUser,
+  isTaskInHeadScope,
   approveOrTeamHeadGuard,
   canEditProject,
   canViewProject,

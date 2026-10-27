@@ -1,5 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
+const { getTeamScopeForHead } = require('../middleware/auth');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -269,6 +270,18 @@ async function canAccessTask(user, task) {
         return true;
       }
     }
+  }
+
+  // Team head: can access a task whose assignee (primary or collaborator) is a
+  // member of a team they head — consistent with the task list/detail views.
+  const teamScope = await getTeamScopeForHead(user.id);
+  if (teamScope.isHead && teamScope.memberIds.length > 0) {
+    if (teamScope.memberIds.includes(task.assigned_to)) return true;
+    const [teamCollab] = await db.query(
+      'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id IN (?) LIMIT 1',
+      [task.id, teamScope.memberIds]
+    );
+    if (teamCollab.length > 0) return true;
   }
 
   return false;

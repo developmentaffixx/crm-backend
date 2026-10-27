@@ -2,6 +2,13 @@ const { validationResult } = require('express-validator');
 const db = require('../config/db');
 const { getTeamScopeForHead } = require('../middleware/auth');
 
+// True if the current user heads a team that the ticket's assignee belongs to.
+async function isTicketInHeadScope(user, ticket) {
+  if (!user || !ticket || !ticket.assigned_to) return false;
+  const scope = await getTeamScopeForHead(user.id);
+  return scope.isHead && scope.memberIds.includes(ticket.assigned_to);
+}
+
 /**
  * GET /api/tickets
  */
@@ -472,7 +479,10 @@ exports.update = async (req, res) => {
       }
     }
 
-    if (!req.user.is_admin && ticket.reported_by !== req.user.id) {
+    // A team head may fully edit a ticket assigned to one of their team members.
+    const isTeamHeadForTicket = !req.user.is_admin && await isTicketInHeadScope(req.user, ticket);
+
+    if (!req.user.is_admin && !isTeamHeadForTicket && ticket.reported_by !== req.user.id) {
       // Assigned member can ONLY update status and resolution_summary
       if (ticket.assigned_to === req.user.id) {
         const assigneeAllowed = ['status', 'resolution_summary'];
