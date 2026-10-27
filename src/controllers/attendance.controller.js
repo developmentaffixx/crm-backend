@@ -1479,6 +1479,21 @@ exports.adminGetToday = async (req, res) => {
       }
     }
 
+    // Fetch current active tickets (user has punched into a ticket)
+    const [activeTickets] = await db.query(
+      `SELECT tat.user_id, tat.ticket_id, t.title
+       FROM ticket_active_timers tat
+       JOIN tickets t ON t.id = tat.ticket_id
+       WHERE tat.user_id IS NOT NULL
+       ORDER BY tat.started_at DESC`
+    );
+    const activeTicketMap = {};
+    for (const r of activeTickets) {
+      if (!activeTicketMap[r.user_id]) {
+        activeTicketMap[r.user_id] = { id: r.ticket_id, title: r.title };
+      }
+    }
+
     const team = users.map(u => {
       const rawProductive = (taskMap[u.id] || 0) + (ticketMap[u.id] || 0) + (meetingMap[u.id] || 0);
       const productive_seconds = Math.min(rawProductive, u.total_served_seconds || 0);
@@ -1498,6 +1513,7 @@ exports.adminGetToday = async (req, res) => {
         leave_type: u.leave_type,
         current_task: u.current_task_id ? { id: u.current_task_id, title: u.current_task_title } : null,
         current_meeting: activeMeetingMap[u.id] || null,
+        current_ticket: activeTicketMap[u.id] || null,
         afs_active: !!u.active_afs_id,
         afs_start_time: u.afs_start_time
       };
