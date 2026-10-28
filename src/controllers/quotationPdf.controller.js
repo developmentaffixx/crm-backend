@@ -251,27 +251,31 @@ exports.generatePdf = async (req, res) => {
         doc.moveDown(0.6);
       }
 
-      // Force page break: Plan & Terms go to page 2
-      doc.addPage();
+      // Space before next section (let it flow, no forced page break)
+      doc.moveDown(0.5);
     }
 
     // ─── Plan Includes ────────────────────────────────────────────────────────
     if (planIncludes.length > 0) {
-      checkNewPage(40);
+      // Keep the heading with at least a couple of items so it never sits alone
+      // at the very bottom of a page.
+      checkNewPage(70);
       resetX();
       doc.fontSize(14).font(FONT_BOLD).text(quotation.plan_title || 'Plan Includes', LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
       doc.moveDown(0.6);
 
       for (const item of planIncludes) {
-        checkNewPage(16);
-        resetX();
-
         if (item.label && !item.value) {
-          // Sub-header (bold, no bullet)
+          // Sub-header (bold, no bullet). Reserve enough room so a header is never
+          // orphaned at the bottom of a page without any item under it.
+          checkNewPage(32);
           doc.moveDown(0.4);
+          resetX();
           doc.fontSize(10).font(FONT_BOLD).text(item.label, LEFT_MARGIN, doc.y, { width: CONTENT_WIDTH });
           doc.moveDown(0.3);
         } else if (item.label && item.value) {
+          checkNewPage(16);
+          resetX();
           // Label: value
           doc.fontSize(9).font(FONT_BOLD).text(`• ${item.label}: `, LEFT_MARGIN + 16, doc.y, {
             width: CONTENT_WIDTH - 16, continued: true
@@ -280,6 +284,8 @@ exports.generatePdf = async (req, res) => {
           doc.moveDown(0.15);
         } else if (item.value) {
           // Plain bullet
+          checkNewPage(16);
+          resetX();
           doc.fontSize(9).font(FONT_REGULAR).text(`• ${item.value}`, LEFT_MARGIN + 16, doc.y, {
             width: CONTENT_WIDTH - 16, lineGap: 3
           });
