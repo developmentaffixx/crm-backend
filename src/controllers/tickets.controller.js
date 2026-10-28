@@ -6,7 +6,45 @@ const { getTeamScopeForHead } = require('../middleware/auth');
 async function isTicketInHeadScope(user, ticket) {
   if (!user || !ticket || !ticket.assigned_to) return false;
   const scope = await getTeamScopeForHead(user.id);
-  return scope.isHead && scope.memberIds.includes(ticket.assigned_to);
+  if (scope.isHead && scope.memberIds.includes(ticket.assigned_to)) return true;
+  // Also a head if any collaborator on the ticket is a team member.
+  if (scope.isHead && scope.memberIds.length > 0) {
+    const [collab] = await db.query(
+      'SELECT 1 FROM ticket_assignees WHERE ticket_id = ? AND user_id IN (?) LIMIT 1',
+      [ticket.id, scope.memberIds]
+    );
+    if (collab.length > 0) return true;
+  }
+  return false;
+}
+
+// Sync the ticket_assignees junction table: one primary + any collaborators.
+// Mirrors syncAssignees() in the tasks controller.
+async function syncTicketAssignees(ticketId, primaryUserId, collaboratorIds = []) {
+  await db.query('DELETE FROM ticket_assignees WHERE ticket_id = ?', [ticketId]);
+  if (primaryUserId) {
+    await db.query(
+      "INSERT INTO ticket_assignees (ticket_id, user_id, role) VALUES (?, ?, 'primary')",
+      [ticketId, primaryUserId]
+    );
+  }
+  for (const uid of collaboratorIds) {
+    if (uid && uid !== primaryUserId) {
+      await db.query(
+        "INSERT IGNORE INTO ticket_assignees (ticket_id, user_id, role) VALUES (?, ?, 'collaborator')",
+        [ticketId, uid]
+      );
+    }
+  }
+}
+
+// True if the user is a collaborator (or primary) on the ticket via junction table.
+async function isTicketAssignee(ticketId, userId) {
+  const [rows] = await db.query(
+    'SELECT 1 FROM ticket_assignees WHERE ticket_id = ? AND user_id = ? LIMIT 1',
+    [ticketId, userId]
+  );
+  return rows.length > 0;
 }
 
 /**
@@ -57,11 +95,21 @@ exports.list = async (req, res) => {
       const teamScope = await getTeamScopeForHead(req.user.id);
       if (teamScope.isHead && teamScope.memberIds.length > 0) {
         const ph = teamScope.memberIds.map(() => '?').join(',');
-        baseWhere += ` AND (t.assigned_to = ? OR t.reported_by = ? OR t.assigned_to IN (${ph}))`;
-        baseParams.push(req.user.id, req.user.id, ...teamScope.memberIds);
+        // Self (assignee/reporter/collaborator) OR any team member who is the
+        // assignee or a collaborator of the ticket.
+        baseWhere += ` AND (
+          t.assigned_to = ? OR t.reported_by = ?
+          OR EXISTS (SELECT 1 FROM ticket_assignees ta_self WHERE ta_self.ticket_id = t.id AND ta_self.user_id = ?)
+          OR t.assigned_to IN (${ph})
+          OR EXISTS (SELECT 1 FROM ticket_assignees ta_team WHERE ta_team.ticket_id = t.id AND ta_team.user_id IN (${ph}))
+        )`;
+        baseParams.push(req.user.id, req.user.id, req.user.id, ...teamScope.memberIds, ...teamScope.memberIds);
       } else {
-        baseWhere += ' AND (t.assigned_to = ? OR t.reported_by = ?)';
-        baseParams.push(req.user.id, req.user.id);
+        baseWhere += ` AND (
+          t.assigned_to = ? OR t.reported_by = ?
+          OR EXISTS (SELECT 1 FROM ticket_assignees ta_self WHERE ta_self.ticket_id = t.id AND ta_self.user_id = ?)
+        )`;
+        baseParams.push(req.user.id, req.user.id, req.user.id);
       }
     }
 
@@ -103,6 +151,25 @@ exports.list = async (req, res) => {
        LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );
+
+    // ── Attach collaborators to each ticket (mirrors tasks list) ──
+    const ticketIds = rows.map(r => r.id);
+    if (ticketIds.length > 0) {
+      const [assigneeRows] = await db.query(
+        `SELECT ta.ticket_id, ta.user_id, ta.role,
+                CONCAT(u.first_name, ' ', u.last_name) AS name
+         FROM ticket_assignees ta
+         JOIN users u ON u.id = ta.user_id
+         WHERE ta.ticket_id IN (?)`,
+        [ticketIds]
+      );
+      const assigneesMap = {};
+      for (const a of assigneeRows) {
+        if (!assigneesMap[a.ticket_id]) assigneesMap[a.ticket_id] = [];
+        assigneesMap[a.ticket_id].push({ user_id: a.user_id, role: a.role, name: a.name });
+      }
+      for (const t of rows) t.assignees = assigneesMap[t.id] || [];
+    }
 
     // ── Total count for the active status filter (drives pagination) ──
     const [[{ total_count }]] = await db.query(
@@ -257,13 +324,23 @@ exports.getOne = async (req, res) => {
 
     const ticket = rows[0];
 
-    // Non-admin access check. Allow the assignee, the reporter, or a team head
-    // whose member the ticket is assigned to (consistent with the list view).
+    // Non-admin access check. Allow the assignee, the reporter, a collaborator,
+    // or a team head whose member is the assignee/collaborator (matches list).
     if (!req.user.is_admin && ticket.assigned_to !== req.user.id && ticket.reported_by !== req.user.id) {
-      let allowed = false;
-      const teamScope = await getTeamScopeForHead(req.user.id);
-      if (teamScope.isHead && teamScope.memberIds.includes(ticket.assigned_to)) {
-        allowed = true;
+      let allowed = await isTicketAssignee(ticket.id, req.user.id);
+      if (!allowed) {
+        const teamScope = await getTeamScopeForHead(req.user.id);
+        if (teamScope.isHead && teamScope.memberIds.length > 0) {
+          if (teamScope.memberIds.includes(ticket.assigned_to)) {
+            allowed = true;
+          } else {
+            const [teamCollab] = await db.query(
+              'SELECT 1 FROM ticket_assignees WHERE ticket_id = ? AND user_id IN (?) LIMIT 1',
+              [ticket.id, teamScope.memberIds]
+            );
+            allowed = teamCollab.length > 0;
+          }
+        }
       }
       if (!allowed) {
         return res.status(403).json({ message: 'Access denied' });
@@ -295,6 +372,17 @@ exports.getOne = async (req, res) => {
       [ticket.id]
     );
     ticket.attachments = attachments;
+
+    // Fetch assignees (primary + collaborators)
+    const [assignees] = await db.query(
+      `SELECT ta.user_id, ta.role,
+              CONCAT(u.first_name, ' ', u.last_name) AS name
+       FROM ticket_assignees ta
+       JOIN users u ON u.id = ta.user_id
+       WHERE ta.ticket_id = ?`,
+      [ticket.id]
+    );
+    ticket.assignees = assignees;
 
     // Fetch activity log
     const [activities] = await db.query(
@@ -349,12 +437,23 @@ exports.create = async (req, res) => {
   const {
     mode, title, description, ticket_type, priority, status,
     related_to_type, related_to_id, vendor_name, brand_id, project_id,
-    assigned_to, due_date, internal_notes
+    assigned_to, due_date, internal_notes, collaborators
   } = req.body;
 
   // Helper: convert empty strings to null (multipart/form-data sends everything as strings)
   const toNull = (val) => (val === '' || val === undefined || val === null) ? null : val;
   const toInt = (val) => { const n = parseInt(val); return isNaN(n) ? null : n; };
+  // Collaborators may arrive as an array (repeated field) or a JSON string via
+  // multipart/form-data. Normalise to an array of numeric user IDs.
+  const parseCollaborators = (val) => {
+    if (val === undefined || val === null || val === '') return [];
+    let arr = val;
+    if (typeof val === 'string') {
+      try { arr = JSON.parse(val); } catch { arr = val.split(','); }
+    }
+    if (!Array.isArray(arr)) arr = [arr];
+    return arr.map(Number).filter(Boolean);
+  };
 
   try {
     // Generate ticket_id_code: TKT-YYMM-CLIENT-###
@@ -421,6 +520,9 @@ exports.create = async (req, res) => {
     );
 
     const ticketId = result.insertId;
+
+    // Sync assignees (primary + collaborators)
+    await syncTicketAssignees(ticketId, toInt(assigned_to), parseCollaborators(collaborators));
 
     // Log activity
     await db.query(
@@ -505,7 +607,19 @@ exports.update = async (req, res) => {
     const updates = {};
     allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
 
-    if (Object.keys(updates).length === 0) {
+    // Collaborators are handled via the junction table, not a column on tickets.
+    const collaboratorsProvided = req.body.collaborators !== undefined;
+    const parseCollaborators = (val) => {
+      if (val === undefined || val === null || val === '') return [];
+      let arr = val;
+      if (typeof val === 'string') {
+        try { arr = JSON.parse(val); } catch { arr = val.split(','); }
+      }
+      if (!Array.isArray(arr)) arr = [arr];
+      return arr.map(Number).filter(Boolean);
+    };
+
+    if (Object.keys(updates).length === 0 && !collaboratorsProvided) {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
@@ -560,9 +674,36 @@ exports.update = async (req, res) => {
       );
     }
 
-    const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-    const values = [...Object.values(updates), req.params.id];
-    await db.query(`UPDATE tickets SET ${setClauses} WHERE id = ?`, values);
+    if (Object.keys(updates).length > 0) {
+      const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+      const values = [...Object.values(updates), req.params.id];
+      await db.query(`UPDATE tickets SET ${setClauses} WHERE id = ?`, values);
+    }
+
+    // Sync collaborators (and/or primary) when provided
+    if (collaboratorsProvided || updates.assigned_to !== undefined) {
+      const primaryUser = updates.assigned_to !== undefined
+        ? (parseInt(updates.assigned_to, 10) || null)
+        : ticket.assigned_to;
+      let collabIds;
+      if (collaboratorsProvided) {
+        collabIds = parseCollaborators(req.body.collaborators);
+      } else {
+        const [existing] = await db.query(
+          "SELECT user_id FROM ticket_assignees WHERE ticket_id = ? AND role = 'collaborator'",
+          [ticket.id]
+        );
+        collabIds = existing.map(r => r.user_id);
+      }
+      if (primaryUser) {
+        await syncTicketAssignees(ticket.id, primaryUser, collabIds);
+        await db.query(
+          `INSERT INTO ticket_activity_log (ticket_id, user_id, action, new_value)
+           VALUES (?, ?, 'assignment', ?)`,
+          [ticket.id, req.user.id, `Collaborators updated (${collabIds.length})`]
+        );
+      }
+    }
 
     // Handle new file uploads
     if (req.files && req.files.length > 0) {
@@ -712,9 +853,9 @@ exports.startTimer = async (req, res) => {
       return res.status(400).json({ message: 'Timer is only available for Work mode tickets' });
     }
 
-    // Only assigned user or admin can start timer
-    if (!req.user.is_admin && ticket.assigned_to !== req.user.id) {
-      return res.status(403).json({ message: 'Only the assigned user can track time on this ticket' });
+    // Only the assigned user, a collaborator, or an admin can start a timer.
+    if (!req.user.is_admin && ticket.assigned_to !== req.user.id && !(await isTicketAssignee(ticket.id, req.user.id))) {
+      return res.status(403).json({ message: 'Only the assigned user or a collaborator can track time on this ticket' });
     }
 
     if (['resolved', 'closed'].includes(ticket.status)) {
@@ -834,8 +975,8 @@ exports.stopTimer = async (req, res) => {
 
     const ticket = rows[0];
 
-    if (!req.user.is_admin && ticket.assigned_to !== req.user.id) {
-      return res.status(403).json({ message: 'Only the assigned user can track time on this ticket' });
+    if (!req.user.is_admin && ticket.assigned_to !== req.user.id && !(await isTicketAssignee(ticket.id, req.user.id))) {
+      return res.status(403).json({ message: 'Only the assigned user or a collaborator can track time on this ticket' });
     }
 
     // Check if user has an active timer on this ticket

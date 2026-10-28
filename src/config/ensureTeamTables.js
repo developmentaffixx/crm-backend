@@ -38,6 +38,27 @@ async function ensureTeamTables() {
       ) ENGINE=InnoDB
     `);
 
+    // ── Ticket collaborators (mirrors task_assignees) ──────────────────────
+    // Created without FK constraints for the same portability reason as above.
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ticket_assignees (
+        id         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        ticket_id  INT UNSIGNED NOT NULL,
+        user_id    INT UNSIGNED NOT NULL,
+        role       ENUM('primary', 'collaborator') NOT NULL DEFAULT 'collaborator',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_ticket_assignee_user (ticket_id, user_id),
+        INDEX idx_ticket_assignees_ticket (ticket_id),
+        INDEX idx_ticket_assignees_user (user_id)
+      ) ENGINE=InnoDB
+    `);
+
+    // Backfill primary assignees for existing tickets (safe to repeat).
+    await db.query(`
+      INSERT IGNORE INTO ticket_assignees (ticket_id, user_id, role)
+      SELECT id, assigned_to, 'primary' FROM tickets WHERE deleted = 0 AND assigned_to IS NOT NULL
+    `);
+
     console.log('[teams] tables verified/created');
   } catch (err) {
     console.error('[teams] ensureTeamTables failed:', err.code, err.errno, err.message);
