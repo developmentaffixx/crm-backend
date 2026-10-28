@@ -1021,16 +1021,29 @@ exports.markDone = async (req, res) => {
       return res.status(400).json({ message: 'Ticket must be open, in progress, or on hold to mark as done' });
     }
 
+    // Reason is required when marking a ticket as done
+    const reason = (req.body.reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({ message: 'A reason is required to mark the ticket as done' });
+    }
+
     await db.query(
       "UPDATE tickets SET status = 'pending_done', marked_done_by = ?, marked_done_at = NOW() WHERE id = ?",
       [req.user.id, ticket.id]
     );
 
-    // Log activity
+    // Log status-change activity with the provided reason
     await db.query(
       `INSERT INTO ticket_activity_log (ticket_id, user_id, action, old_value, new_value, comment)
-       VALUES (?, ?, 'status_change', ?, 'pending_done', 'Marked as done — awaiting approval')`,
-      [ticket.id, req.user.id, ticket.status]
+       VALUES (?, ?, 'status_change', ?, 'pending_done', ?)`,
+      [ticket.id, req.user.id, ticket.status, `Marked as done — awaiting approval: ${reason}`]
+    );
+
+    // Also save the reason as a visible comment on the ticket
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, comment)
+       VALUES (?, ?, 'comment', ?)`,
+      [ticket.id, req.user.id, reason]
     );
 
     const [updated] = await db.query('SELECT * FROM tickets WHERE id = ?', [ticket.id]);
