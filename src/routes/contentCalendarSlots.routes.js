@@ -26,11 +26,17 @@ router.put('/fill', controller.fillSlot);
 // PUT  /api/content-calendar-slots/submit       — submit filled slot for approval
 router.put('/submit', controller.submitSlot);
 
-// PUT  /api/content-calendar-slots/approve      — approve a submitted slot
+// PUT  /api/content-calendar-slots/smm-review   — SMM stage-1 review (accept / rework)
+router.put('/smm-review', controller.smmReview);
+
+// PUT  /api/content-calendar-slots/approve      — PC/PM final approval (submitted|smm_approved)
 router.put('/approve', controller.approveSlot);
 
 // PUT  /api/content-calendar-slots/reject       — reject a slot (with reason)
 router.put('/reject', controller.rejectSlot);
+
+// PUT  /api/content-calendar-slots/remodify     — assignee reopens an approved slot
+router.put('/remodify', controller.remodifySlot);
 
 // PUT  /api/content-calendar-slots/complete     — mark approved slot as completed
 router.put('/complete', controller.completeSlot);

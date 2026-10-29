@@ -214,7 +214,7 @@ exports.myPermissions = async (req, res) => {
     let permRows = [];
     try {
       const [rows] = await db.query(
-        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM role_permissions WHERE role_id = ?',
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete, can_smm_approve, can_pcpm_approve FROM role_permissions WHERE role_id = ?',
         [roleId]
       );
       permRows = rows;
@@ -233,6 +233,8 @@ exports.myPermissions = async (req, res) => {
         can_delete:   p.can_delete,
         can_approve:  p.can_approve ?? 0,
         can_complete: p.can_complete ?? 0,
+        can_smm_approve:  p.can_smm_approve ?? 0,
+        can_pcpm_approve: p.can_pcpm_approve ?? 0,
       };
       return acc;
     }, {});
@@ -241,7 +243,7 @@ exports.myPermissions = async (req, res) => {
     let userPermRows = [];
     try {
       const [rows] = await db.query(
-        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM user_permissions WHERE user_id = ?',
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete, can_smm_approve, can_pcpm_approve FROM user_permissions WHERE user_id = ?',
         [req.user.id]
       );
       userPermRows = rows;
@@ -261,6 +263,8 @@ exports.myPermissions = async (req, res) => {
         can_delete:   p.can_delete,
         can_approve:  p.can_approve ?? 0,
         can_complete: p.can_complete ?? 0,
+        can_smm_approve:  p.can_smm_approve ?? 0,
+        can_pcpm_approve: p.can_pcpm_approve ?? 0,
       };
     });
 

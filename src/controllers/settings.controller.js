@@ -230,19 +230,21 @@ exports.updateRolePermissions = async (req, res) => {
     // System roles can now be fully customized
 
     for (const perm of permissions) {
-      const { module, can_view = 0, can_create = 0, can_edit = 0, can_delete = 0, can_approve = 0, can_complete = 0 } = perm;
+      const { module, can_view = 0, can_create = 0, can_edit = 0, can_delete = 0, can_approve = 0, can_complete = 0, can_smm_approve = 0, can_pcpm_approve = 0 } = perm;
       try {
         await db.query(
-          `INSERT INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete, can_approve, can_complete)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete, can_approve, can_complete, can_smm_approve, can_pcpm_approve)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON DUPLICATE KEY UPDATE
-             can_view     = VALUES(can_view),
-             can_create   = VALUES(can_create),
-             can_edit     = VALUES(can_edit),
-             can_delete   = VALUES(can_delete),
-             can_approve  = VALUES(can_approve),
-             can_complete = VALUES(can_complete)`,
-          [roleId, module, can_view, can_create, can_edit, can_delete, can_approve, can_complete]
+             can_view         = VALUES(can_view),
+             can_create       = VALUES(can_create),
+             can_edit         = VALUES(can_edit),
+             can_delete       = VALUES(can_delete),
+             can_approve      = VALUES(can_approve),
+             can_complete     = VALUES(can_complete),
+             can_smm_approve  = VALUES(can_smm_approve),
+             can_pcpm_approve = VALUES(can_pcpm_approve)`,
+          [roleId, module, can_view, can_create, can_edit, can_delete, can_approve, can_complete, can_smm_approve, can_pcpm_approve]
         );
       } catch (colErr) {
         await db.query(
@@ -454,7 +456,7 @@ exports.getUserPermissionOverrides = async (req, res) => {
       let rp = [];
       try {
         const [rows] = await db.query(
-          'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM role_permissions WHERE role_id = ?',
+          'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete, can_smm_approve, can_pcpm_approve FROM role_permissions WHERE role_id = ?',
           [roleId]
         );
         rp = rows;
@@ -471,6 +473,8 @@ exports.getUserPermissionOverrides = async (req, res) => {
           can_edit: p.can_edit, can_delete: p.can_delete,
           can_approve: p.can_approve ?? 0,
           can_complete: p.can_complete ?? 0,
+          can_smm_approve: p.can_smm_approve ?? 0,
+          can_pcpm_approve: p.can_pcpm_approve ?? 0,
         };
       });
     }
@@ -479,7 +483,7 @@ exports.getUserPermissionOverrides = async (req, res) => {
     let up = [];
     try {
       const [rows] = await db.query(
-        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM user_permissions WHERE user_id = ?',
+        'SELECT module, can_view, can_create, can_edit, can_delete, can_approve, can_complete, can_smm_approve, can_pcpm_approve FROM user_permissions WHERE user_id = ?',
         [userId]
       );
       up = rows;
@@ -497,6 +501,8 @@ exports.getUserPermissionOverrides = async (req, res) => {
         can_edit: p.can_edit, can_delete: p.can_delete,
         can_approve: p.can_approve ?? 0,
         can_complete: p.can_complete ?? 0,
+        can_smm_approve: p.can_smm_approve ?? 0,
+        can_pcpm_approve: p.can_pcpm_approve ?? 0,
       };
     });
 
@@ -563,16 +569,18 @@ exports.updateUserPermissionOverrides = async (req, res) => {
     if (permEntries.length > 0) {
       const permValues = permEntries.map(([module, p]) => [
         userId, module,
-        parseInt(p.can_view     ?? 0, 10),
-        parseInt(p.can_create   ?? 0, 10),
-        parseInt(p.can_edit     ?? 0, 10),
-        parseInt(p.can_delete   ?? 0, 10),
-        parseInt(p.can_approve  ?? 0, 10),
-        parseInt(p.can_complete ?? 0, 10),
+        parseInt(p.can_view         ?? 0, 10),
+        parseInt(p.can_create       ?? 0, 10),
+        parseInt(p.can_edit         ?? 0, 10),
+        parseInt(p.can_delete       ?? 0, 10),
+        parseInt(p.can_approve      ?? 0, 10),
+        parseInt(p.can_complete     ?? 0, 10),
+        parseInt(p.can_smm_approve  ?? 0, 10),
+        parseInt(p.can_pcpm_approve ?? 0, 10),
       ]);
       try {
         await db.query(
-          `INSERT INTO user_permissions (user_id, module, can_view, can_create, can_edit, can_delete, can_approve, can_complete)
+          `INSERT INTO user_permissions (user_id, module, can_view, can_create, can_edit, can_delete, can_approve, can_complete, can_smm_approve, can_pcpm_approve)
            VALUES ?`,
           [permValues]
         );

@@ -44,6 +44,7 @@ exports.listSlots = async (req, res) => {
 
     const [plans] = await db.query(
       `SELECT p.id, p.project_id, p.cycle_id, p.plan_month, p.client_id,
+              p.shared_with_client,
               pr.title AS project_title, l.business_name AS client_name
        FROM content_calendar_plans p
        LEFT JOIN projects pr ON pr.id = p.project_id
@@ -61,10 +62,16 @@ exports.listSlots = async (req, res) => {
     let statusFilter = '';
     const statusParams = [];
     if (slot_status) {
-      // Map frontend 'pending_approval' to the actual DB value 'submitted'
-      const mappedStatus = slot_status === 'pending_approval' ? 'submitted' : slot_status;
-      statusFilter = ' AND slot_status = ?';
-      statusParams.push(mappedStatus);
+      if (slot_status === 'pending_approval') {
+        // PC/PM queue: freshly submitted OR already SMM-reviewed, awaiting final approval
+        statusFilter = " AND slot_status IN ('submitted','smm_approved')";
+      } else if (slot_status === 'smm_review') {
+        // SMM queue: only slots awaiting first-stage review
+        statusFilter = " AND slot_status = 'submitted'";
+      } else {
+        statusFilter = ' AND slot_status = ?';
+        statusParams.push(slot_status);
+      }
     }
 
     let assignedFilter = '';
@@ -595,15 +602,19 @@ exports.submitSlot = async (req, res) => {
   }
 };
 
-// ─── APPROVE SLOT (Admin or SMM with 'all' access) ────────────────────────────
+// ─── SMM REVIEW (Stage 1: Admin or user with SMM Approval) ────────────────────
+// Accept  → slot moves 'submitted' → 'smm_approved' (SMM Reviewed)
+// Rework  → delegates to rejectSlot semantics ('submitted' → 'rejected')
+// Soft gate (Option B): this stage is optional — PC/PM can still approve a
+// 'submitted' slot directly without it passing through SMM review first.
 
-exports.approveSlot = async (req, res) => {
+exports.smmReview = async (req, res) => {
   try {
-    const { item_type, item_id } = req.body;
+    const { item_type, item_id, action = 'accept', reason } = req.body;
 
-    const canApprove = req.user.is_admin || req.userCanApprove;
-    if (!canApprove) {
-      return res.status(403).json({ message: 'Only admin or authorized leads with approve permission can approve slots' });
+    const canSmm = req.user.is_admin || req.userCanSmmApprove;
+    if (!canSmm) {
+      return res.status(403).json({ message: 'Only admin or users with SMM Approval permission can review slots' });
     }
 
     if (!item_type || !item_id) {
@@ -616,8 +627,72 @@ exports.approveSlot = async (req, res) => {
     const [rows] = await db.query(`SELECT * FROM ${table} WHERE id = ?`, [item_id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Slot not found' });
 
-    if (rows[0].slot_status !== 'submitted') {
-      return res.status(400).json({ message: `Can only approve slots with status "submitted". Current: "${rows[0].slot_status}"` });
+    const slot = rows[0];
+
+    // Rework path → reuse reject logic (sends back to assignee as 'rejected')
+    if (action === 'rework') {
+      req.body.action = 'rework';
+      return exports.rejectSlot(req, res);
+    }
+
+    // Accept path
+    if (slot.slot_status !== 'submitted') {
+      return res.status(400).json({ message: `Can only SMM-review slots with status "submitted". Current: "${slot.slot_status}"` });
+    }
+
+    await db.query(
+      `UPDATE ${table} SET slot_status = 'smm_approved', smm_approved_by = ?, smm_approved_at = NOW(), rejection_reason = NULL WHERE id = ?`,
+      [req.user.id, item_id]
+    );
+
+    // Notify assignee that SMM passed their content forward
+    if (slot.assigned_to) {
+      await createSmmNotification(null, {
+        user_id: slot.assigned_to,
+        triggered_by: req.user.id,
+        type: 'slot_smm_approved',
+        slot_type: item_type,
+        slot_id: item_id,
+        title: `Your ${item_type} passed SMM review`,
+        message: `SMM reviewed your content. Awaiting PC/PM final approval.`,
+        link: getPageLink(item_type),
+      });
+      res.emitSocket('smm:notification', { user_id: slot.assigned_to, type: 'slot_smm_approved' });
+    }
+
+    res.emitSocket('content-calendar:slot-smm-approved', { item_type, item_id, smm_approved_by: req.user.id });
+    return res.json({ message: 'Slot passed SMM review', item_type, item_id });
+  } catch (err) {
+    console.error('SMM review error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── APPROVE SLOT (Stage 2: Admin or user with PC/PM Approval) ────────────────
+// Soft gate: accepts a slot that is 'submitted' OR 'smm_approved'.
+
+exports.approveSlot = async (req, res) => {
+  try {
+    const { item_type, item_id } = req.body;
+
+    // PC/PM approval (final sign-off). Backward-compat: legacy can_approve still works.
+    const canApprove = req.user.is_admin || req.userCanPcpmApprove || req.userCanApprove;
+    if (!canApprove) {
+      return res.status(403).json({ message: 'Only admin or users with PC/PM Approval permission can approve slots' });
+    }
+
+    if (!item_type || !item_id) {
+      return res.status(400).json({ message: 'item_type and item_id are required' });
+    }
+
+    const table = TABLE_MAP[item_type];
+    if (!table) return res.status(400).json({ message: 'Invalid item_type' });
+
+    const [rows] = await db.query(`SELECT * FROM ${table} WHERE id = ?`, [item_id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Slot not found' });
+
+    if (!['submitted', 'smm_approved'].includes(rows[0].slot_status)) {
+      return res.status(400).json({ message: `Can only approve slots with status "submitted" or "smm_approved". Current: "${rows[0].slot_status}"` });
     }
 
     await db.query(
@@ -680,9 +755,10 @@ exports.rejectSlot = async (req, res) => {
   try {
     const { item_type, item_id, reason, action = 'reject' } = req.body;
 
-    const canReject = req.user.is_admin || req.userCanApprove;
+    // Either SMM reviewers or PC/PM approvers (or admin) can send a slot back.
+    const canReject = req.user.is_admin || req.userCanSmmApprove || req.userCanPcpmApprove || req.userCanApprove;
     if (!canReject) {
-      return res.status(403).json({ message: 'Only admin or authorized leads with approve permission can reject or request re-work for slots' });
+      return res.status(403).json({ message: 'Only admin or users with SMM / PC-PM Approval permission can reject or request re-work for slots' });
     }
 
     if (!item_type || !item_id) {
@@ -699,12 +775,12 @@ exports.rejectSlot = async (req, res) => {
     const [rows] = await db.query(`SELECT * FROM ${table} WHERE id = ?`, [item_id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Slot not found' });
 
-    if (rows[0].slot_status !== 'submitted' && rows[0].slot_status !== 'approved') {
-      return res.status(400).json({ message: `Can only reject or rework slots with status "submitted" or "approved". Current: "${rows[0].slot_status}"` });
+    if (!['submitted', 'smm_approved', 'approved'].includes(rows[0].slot_status)) {
+      return res.status(400).json({ message: `Can only reject or rework slots with status "submitted", "smm_approved" or "approved". Current: "${rows[0].slot_status}"` });
     }
 
     await db.query(
-      `UPDATE ${table} SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
+      `UPDATE ${table} SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL, smm_approved_at = NULL, smm_approved_by = NULL WHERE id = ?`,
       [reason.trim(), item_id]
     );
 
@@ -778,10 +854,11 @@ exports.completeSlot = async (req, res) => {
 
     const slot = rows[0];
 
-    // Admin or user with can_complete permission can mark complete
-    const canComplete = req.user.is_admin || req.userCanComplete;
+    // Mark as Done is available to anyone holding EITHER approval toggle
+    // (SMM or PC/PM), the legacy Mark-as-Done permission, or admin.
+    const canComplete = req.user.is_admin || req.userCanComplete || req.userCanSmmApprove || req.userCanPcpmApprove;
     if (!canComplete) {
-      return res.status(403).json({ message: 'Only admin or users with Mark as Done permission can mark as completed' });
+      return res.status(403).json({ message: 'Only admin or users with SMM / PC-PM Approval (or Mark as Done) permission can mark as completed' });
     }
 
     // Must be approved first
@@ -894,6 +971,110 @@ exports.completeSlot = async (req, res) => {
   }
 };
 
+// ─── RE-MODIFY SLOT (assignee reopens an already-approved slot) ───────────────
+// The assigned member can click "Re-modify" on an 'approved' slot to fix their
+// content. It reopens back to 'assigned' so they can re-edit & resubmit, which
+// then re-runs the review/approval flow.
+// Blocked if the slot is already 'completed' or its plan is shared with client.
+exports.remodifySlot = async (req, res) => {
+  try {
+    const { item_type, item_id, reason } = req.body;
+    const userId = req.user.id;
+
+    if (!item_type || !item_id) {
+      return res.status(400).json({ message: 'item_type and item_id are required' });
+    }
+
+    const table = TABLE_MAP[item_type];
+    if (!table) return res.status(400).json({ message: 'Invalid item_type' });
+
+    const [rows] = await db.query(`SELECT * FROM ${table} WHERE id = ?`, [item_id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Slot not found' });
+
+    const slot = rows[0];
+
+    // Only the assigned member (or admin) can re-modify their own approved slot.
+    if (!req.user.is_admin && String(slot.assigned_to) !== String(userId)) {
+      return res.status(403).json({ message: 'Only the assigned member can re-modify this slot' });
+    }
+
+    // Must currently be approved.
+    if (slot.slot_status !== 'approved') {
+      return res.status(400).json({ message: `Can only re-modify an approved slot. Current: "${slot.slot_status}"` });
+    }
+
+    // Block if already completed.
+    if (slot.slot_status === 'completed') {
+      return res.status(400).json({ message: 'Cannot re-modify a completed slot' });
+    }
+
+    // Block if the parent plan has already been shared with the client.
+    const [planRows] = await db.query(
+      'SELECT shared_with_client FROM content_calendar_plans WHERE id = ?',
+      [slot.plan_id]
+    );
+    if (planRows.length > 0 && planRows[0].shared_with_client) {
+      return res.status(400).json({ message: 'Cannot re-modify — this calendar has already been shared with the client' });
+    }
+
+    // Reopen the slot for the assignee to edit again.
+    await db.query(
+      `UPDATE ${table}
+       SET slot_status = 'assigned', approved_at = NULL, approved_by = NULL,
+           smm_approved_at = NULL, smm_approved_by = NULL,
+           rejection_reason = ?
+       WHERE id = ?`,
+      [reason && reason.trim() ? `Re-modify requested: ${reason.trim()}` : null, item_id]
+    );
+
+    // Reverse-sync linked record back to editable state.
+    if (item_type === 'post') {
+      try {
+        await db.query(
+          `UPDATE content_write_requests
+           SET status = 'pending', approved_by = NULL, approved_at = NULL
+           WHERE calendar_slot_id = ? AND deleted = 0`,
+          [item_id]
+        );
+      } catch (syncErr) {
+        console.warn('[remodifySlot] Write request sync warning:', syncErr.message);
+      }
+    } else if (item_type === 'ad') {
+      try {
+        await db.query(
+          `UPDATE ad_campaigns SET status = 'draft'
+           WHERE (linked_calendar_ad_id = ? OR calendar_slot_id = ?) AND deleted = 0`,
+          [item_id, item_id]
+        );
+        res.emitSocket('ads:updated', { status: 'draft' });
+      } catch (syncErr) {
+        console.warn('[remodifySlot] Ad campaign sync warning:', syncErr.message);
+      }
+    }
+
+    // Notify the assigner / SMM that the member is reworking approved content.
+    if (slot.assigned_by) {
+      await createSmmNotification(null, {
+        user_id: slot.assigned_by,
+        triggered_by: userId,
+        type: 'slot_remodify',
+        slot_type: item_type,
+        slot_id: item_id,
+        title: `${item_type} slot reopened for re-modification`,
+        message: `The assignee is re-editing previously approved content. It will need re-approval.`,
+        link: '/social/content-calendar',
+      });
+      res.emitSocket('smm:notification', { user_id: slot.assigned_by, type: 'slot_remodify' });
+    }
+
+    res.emitSocket('content-calendar:slot-remodify', { item_type, item_id, user_id: userId });
+    return res.json({ message: 'Slot reopened for re-modification', item_type, item_id });
+  } catch (err) {
+    console.error('Re-modify slot error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── BULK APPROVE ─────────────────────────────────────────────────────────────
 
 exports.bulkApprove = async (req, res) => {
@@ -987,9 +1168,9 @@ exports.pendingCount = async (req, res) => {
       try {
         const [pc] = await db.query(
           `SELECT 
-            (SELECT COUNT(*) FROM content_calendar_posts cp JOIN content_calendar_plans p ON p.id = cp.plan_id WHERE cp.slot_status = 'submitted' AND p.deleted = 0) +
-            (SELECT COUNT(*) FROM content_calendar_shoots cs JOIN content_calendar_plans p ON p.id = cs.plan_id WHERE cs.slot_status = 'submitted' AND p.deleted = 0) +
-            (SELECT COUNT(*) FROM content_calendar_ads ca JOIN content_calendar_plans p ON p.id = ca.plan_id WHERE ca.slot_status = 'submitted' AND p.deleted = 0)
+            (SELECT COUNT(*) FROM content_calendar_posts cp JOIN content_calendar_plans p ON p.id = cp.plan_id WHERE cp.slot_status IN ('submitted','smm_approved') AND p.deleted = 0) +
+            (SELECT COUNT(*) FROM content_calendar_shoots cs JOIN content_calendar_plans p ON p.id = cs.plan_id WHERE cs.slot_status IN ('submitted','smm_approved') AND p.deleted = 0) +
+            (SELECT COUNT(*) FROM content_calendar_ads ca JOIN content_calendar_plans p ON p.id = ca.plan_id WHERE ca.slot_status IN ('submitted','smm_approved') AND p.deleted = 0)
             AS total`
         );
         pendingApproval = pc[0]?.total || 0;

@@ -19,16 +19,20 @@ function requireSocialAccess(submenu) {
         req.userCanDelete   = true;
         req.userCanApprove  = true;
         req.userCanComplete = true;
+        req.userCanSmmApprove  = true;
+        req.userCanPcpmApprove = true;
         return next();
       }
 
       // Check user permissions and overrides for creative_hub module
-      let canView     = 0;
-      let canCreate   = 0;
-      let canEdit     = 0;
-      let canDelete   = 0;
-      let canApprove  = 0;
-      let canComplete = 0;
+      let canView      = 0;
+      let canCreate    = 0;
+      let canEdit      = 0;
+      let canDelete    = 0;
+      let canApprove   = 0;
+      let canComplete  = 0;
+      let canSmmApprove  = 0;
+      let canPcpmApprove = 0;
 
       // 1. Get role baseline for creative_hub
       const [userRows] = await db.query(
@@ -40,16 +44,18 @@ function requireSocialAccess(submenu) {
       if (roleId) {
         try {
           const [rolePerms] = await db.query(
-            'SELECT can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM role_permissions WHERE role_id = ? AND module = "creative_hub"',
+            'SELECT can_view, can_create, can_edit, can_delete, can_approve, can_complete, can_smm_approve, can_pcpm_approve FROM role_permissions WHERE role_id = ? AND module = "creative_hub"',
             [roleId]
           );
           if (rolePerms && rolePerms.length) {
-            canView     = rolePerms[0].can_view || 0;
-            canCreate   = rolePerms[0].can_create || 0;
-            canEdit     = rolePerms[0].can_edit || 0;
-            canDelete   = rolePerms[0].can_delete || 0;
-            canApprove  = rolePerms[0].can_approve || 0;
-            canComplete = rolePerms[0].can_complete || 0;
+            canView        = rolePerms[0].can_view || 0;
+            canCreate      = rolePerms[0].can_create || 0;
+            canEdit        = rolePerms[0].can_edit || 0;
+            canDelete      = rolePerms[0].can_delete || 0;
+            canApprove     = rolePerms[0].can_approve || 0;
+            canComplete    = rolePerms[0].can_complete || 0;
+            canSmmApprove  = rolePerms[0].can_smm_approve || 0;
+            canPcpmApprove = rolePerms[0].can_pcpm_approve || 0;
           }
         } catch (e) {
           try {
@@ -63,6 +69,9 @@ function requireSocialAccess(submenu) {
               canEdit    = rolePerms[0].can_edit || 0;
               canDelete  = rolePerms[0].can_delete || 0;
               canApprove = rolePerms[0].can_approve || 0;
+              // Pre-migration fallback: legacy approvers get both new toggles
+              canSmmApprove  = rolePerms[0].can_approve || 0;
+              canPcpmApprove = rolePerms[0].can_approve || 0;
             }
           } catch (e2) {}
         }
@@ -71,7 +80,7 @@ function requireSocialAccess(submenu) {
       // 2. User module overrides (if any)
       try {
         const [userPerms] = await db.query(
-          'SELECT can_view, can_create, can_edit, can_delete, can_approve, can_complete FROM user_permissions WHERE user_id = ? AND module = "creative_hub"',
+          'SELECT can_view, can_create, can_edit, can_delete, can_approve, can_complete, can_smm_approve, can_pcpm_approve FROM user_permissions WHERE user_id = ? AND module = "creative_hub"',
           [req.user.id]
         );
         if (userPerms && userPerms.length) {
@@ -81,6 +90,8 @@ function requireSocialAccess(submenu) {
           if (userPerms[0].can_delete !== null && userPerms[0].can_delete !== undefined) canDelete = userPerms[0].can_delete;
           if (userPerms[0].can_approve !== null && userPerms[0].can_approve !== undefined) canApprove = userPerms[0].can_approve;
           if (userPerms[0].can_complete !== null && userPerms[0].can_complete !== undefined) canComplete = userPerms[0].can_complete;
+          if (userPerms[0].can_smm_approve !== null && userPerms[0].can_smm_approve !== undefined) canSmmApprove = userPerms[0].can_smm_approve;
+          if (userPerms[0].can_pcpm_approve !== null && userPerms[0].can_pcpm_approve !== undefined) canPcpmApprove = userPerms[0].can_pcpm_approve;
         }
       } catch (e) {
         try {
@@ -159,6 +170,8 @@ function requireSocialAccess(submenu) {
       req.userCanDelete   = canDelete > 0;
       req.userCanApprove  = canApprove > 0;
       req.userCanComplete = canComplete > 0;
+      req.userCanSmmApprove  = canSmmApprove > 0;
+      req.userCanPcpmApprove = canPcpmApprove > 0;
 
       next();
     } catch (err) {

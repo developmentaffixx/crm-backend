@@ -676,7 +676,7 @@ exports.calendarView = async (req, res) => {
     let plans = [];
     try {
       const [rows] = await db.query(
-        `SELECT p.id, p.client_id, p.project_id, p.cycle_id, l.business_name AS client_name, pr.title AS project_title
+        `SELECT p.id, p.client_id, p.project_id, p.cycle_id, p.shared_with_client, l.business_name AS client_name, pr.title AS project_title
          FROM content_calendar_plans p
          LEFT JOIN leads l ON l.id = p.client_id
          LEFT JOIN projects pr ON pr.id = p.project_id
@@ -699,7 +699,7 @@ exports.calendarView = async (req, res) => {
         fallbackWhere += ' AND (p.created_by = ? OR p.project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))';
         fallbackParams.push(req.user.id, req.user.id);
         const [rows] = await db.query(
-          `SELECT p.id, p.client_id, p.project_id, p.cycle_id, l.business_name AS client_name, pr.title AS project_title
+          `SELECT p.id, p.client_id, p.project_id, p.cycle_id, p.shared_with_client, l.business_name AS client_name, pr.title AS project_title
            FROM content_calendar_plans p
            LEFT JOIN leads l ON l.id = p.client_id
            LEFT JOIN projects pr ON pr.id = p.project_id
