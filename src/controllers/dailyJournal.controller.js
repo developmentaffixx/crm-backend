@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { getExpectedHoursForRange } = require('./workSchedule.controller');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/daily-journal — list journal entries (with filters)
@@ -281,3 +282,182 @@ exports.remove = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/daily-journal/report/productivity
+// Daily PRODUCTIVITY report for SM Ops members: per-member, per selected date
+// (or date range) — productive time (task+ticket+meeting+shoot logs), expected
+// target hours, whether their daily update was submitted, health, escalations.
+// Admin / SMM lead (socialAccessLevel >= 2) only.
+// Query: date_from, date_to (default: today), project_id (optional)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.productivityReport = async (req, res) => {
+  try {
+    // Only admin or SMM lead (full access) can see the team productivity report
+    if (!req.user.is_admin && (!req.socialAccessLevel || req.socialAccessLevel < 2)) {
+      return res.status(403).json({ message: 'Only admin or SMM leads can view the team productivity report' });
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    const dateFrom = req.query.date_from || today;
+    const dateTo = req.query.date_to || dateFrom;
+
+    // ── Resolve SM Ops members: active non-admin users whose role grants any
+    // creative_hub submenu access (role_submenu_permissions) OR legacy
+    // role_social_permissions. Falls back gracefully if a table is missing.
+    let memberIds = [];
+    try {
+      const [rows] = await db.query(
+        `SELECT DISTINCT u.id
+         FROM users u
+         JOIN role_submenu_permissions rsp
+           ON rsp.role_id = u.role_id AND rsp.module = 'creative_hub' AND rsp.can_access >= 1
+         WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0`
+      );
+      memberIds = rows.map(r => r.id);
+    } catch (e) { /* table may not exist */ }
+
+    if (memberIds.length === 0) {
+      try {
+        const [rows] = await db.query(
+          `SELECT DISTINCT u.id
+           FROM users u
+           JOIN role_social_permissions rsp ON rsp.role_id = u.role_id
+           WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
+             AND (rsp.social_overview >= 1 OR rsp.content_calendar >= 1 OR rsp.content_writing >= 1
+                  OR rsp.shoot_planning >= 1 OR rsp.ads_planning >= 1 OR rsp.daily_journal >= 1 OR rsp.report_centre >= 1)`
+        );
+        memberIds = rows.map(r => r.id);
+      } catch (e) { /* ignore */ }
+    }
+
+    // Also include anyone who submitted a journal in the range (covers user-level overrides)
+    try {
+      const [extra] = await db.query(
+        `SELECT DISTINCT submitted_by AS id FROM smm_daily_journal
+         WHERE journal_date BETWEEN ? AND ?`,
+        [dateFrom, dateTo]
+      );
+      const set = new Set(memberIds);
+      extra.forEach(r => set.add(r.id));
+      memberIds = Array.from(set);
+    } catch (e) { /* ignore */ }
+
+    if (memberIds.length === 0) {
+      return res.json({ date_from: dateFrom, date_to: dateTo, members: [], summary: emptyReportSummary() });
+    }
+
+    // Fetch member profile info
+    const [users] = await db.query(
+      `SELECT id, CONCAT(first_name, ' ', last_name) AS name, department, designation, avatar_url
+       FROM users WHERE id IN (?) ORDER BY first_name`,
+      [memberIds]
+    );
+
+    // ── Productive time per member over the range (seconds) ──
+    const sumLogs = async (table, dateCol, valueExpr) => {
+      const map = {};
+      try {
+        const [rows] = await db.query(
+          `SELECT user_id, COALESCE(SUM(${valueExpr}), 0) AS total
+           FROM ${table}
+           WHERE user_id IN (?) AND DATE(${dateCol}) BETWEEN ? AND ?
+             ${table === 'ticket_time_logs' ? '' : 'AND ended_at IS NOT NULL AND duration > 0'}
+           GROUP BY user_id`,
+          [memberIds, dateFrom, dateTo]
+        );
+        rows.forEach(r => { map[r.user_id] = parseInt(r.total) || 0; });
+      } catch (e) { /* table may not exist */ }
+      return map;
+    };
+
+    const taskMap   = await sumLogs('task_time_logs', 'started_at', 'duration');
+    const ticketMap = await sumLogs('ticket_time_logs', 'created_at', 'minutes'); // minutes → *60 below
+    const meetingMap = await sumLogs('meeting_time_logs', 'started_at', 'duration');
+    const shootMap  = await sumLogs('shoot_time_logs', 'started_at', 'duration');
+
+    // ── Journal entries in the range per member ──
+    const journalMap = {}; // user_id → { submittedDates:Set, health:{}, escalations:0, entries:0 }
+    try {
+      const [journals] = await db.query(
+        `SELECT submitted_by, journal_date, health_status, escalation_required
+         FROM smm_daily_journal
+         WHERE submitted_by IN (?) AND journal_date BETWEEN ? AND ?`,
+        [memberIds, dateFrom, dateTo]
+      );
+      journals.forEach(j => {
+        const m = journalMap[j.submitted_by] || { dates: new Set(), critical: 0, attention: 0, escalations: 0, entries: 0 };
+        m.entries += 1;
+        m.dates.add(String(j.journal_date).split('T')[0]);
+        if (j.health_status === 'critical') m.critical += 1;
+        else if (j.health_status === 'attention_needed') m.attention += 1;
+        if (j.escalation_required === 'yes') m.escalations += 1;
+        journalMap[j.submitted_by] = m;
+      });
+    } catch (e) { /* ignore */ }
+
+    // ── Build per-member rows ──
+    const members = [];
+    for (const u of users) {
+      const productiveSeconds =
+        (taskMap[u.id] || 0) +
+        ((ticketMap[u.id] || 0) * 60) +
+        (meetingMap[u.id] || 0) +
+        (shootMap[u.id] || 0);
+
+      // Expected (target) hours across the range for this member
+      let expectedHours = 0;
+      try {
+        const { totalExpected } = await getExpectedHoursForRange(dateFrom, dateTo, u.id);
+        expectedHours = totalExpected || 0;
+      } catch (e) { /* ignore */ }
+      const expectedSeconds = Math.round(expectedHours * 3600);
+
+      const j = journalMap[u.id] || { dates: new Set(), critical: 0, attention: 0, escalations: 0, entries: 0 };
+      const submitted = j.entries > 0;
+      const health = j.critical > 0 ? 'critical' : (j.attention > 0 ? 'attention_needed' : (submitted ? 'on_track' : null));
+
+      members.push({
+        user_id: u.id,
+        name: u.name,
+        department: u.department,
+        designation: u.designation,
+        avatar_url: u.avatar_url,
+        productive_seconds: productiveSeconds,
+        expected_seconds: expectedSeconds,
+        target_met: expectedSeconds > 0 ? productiveSeconds >= expectedSeconds : null,
+        journal_submitted: submitted,
+        journal_entries: j.entries,
+        health_status: health,
+        escalations: j.escalations,
+      });
+    }
+
+    // Sort: most productive first
+    members.sort((a, b) => b.productive_seconds - a.productive_seconds);
+
+    // ── Summary ──
+    const summary = {
+      member_count: members.length,
+      total_productive_seconds: members.reduce((s, m) => s + m.productive_seconds, 0),
+      submitted_count: members.filter(m => m.journal_submitted).length,
+      missing_count: members.filter(m => !m.journal_submitted).length,
+      target_met_count: members.filter(m => m.target_met === true).length,
+      below_target_count: members.filter(m => m.target_met === false).length,
+      escalations_total: members.reduce((s, m) => s + (m.escalations || 0), 0),
+      critical_count: members.filter(m => m.health_status === 'critical').length,
+    };
+
+    return res.json({ date_from: dateFrom, date_to: dateTo, members, summary });
+  } catch (err) {
+    console.error('Daily productivity report error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+function emptyReportSummary() {
+  return {
+    member_count: 0, total_productive_seconds: 0, submitted_count: 0, missing_count: 0,
+    target_met_count: 0, below_target_count: 0, escalations_total: 0, critical_count: 0,
+  };
+}

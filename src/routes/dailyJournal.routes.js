@@ -6,6 +6,16 @@ const { requireSocialAccess } = require('../middleware/socialAccess');
 const dailyJournalController = require('../controllers/dailyJournal.controller');
 
 router.use(authenticate);
+
+// GET /api/daily-journal/report/productivity — team daily productivity report
+// Guarded by report_centre access (this powers the SM Ops Report Centre → Daily tab).
+// Registered BEFORE the generic routes/guard so it uses its own permission check.
+router.get(
+  '/report/productivity',
+  requireSocialAccess('report_centre'),
+  dailyJournalController.productivityReport
+);
+
 router.use(requireSocialAccess('daily_journal'));
 
 // GET  /api/daily-journal         — list entries with filters
