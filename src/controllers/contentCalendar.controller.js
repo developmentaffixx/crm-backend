@@ -824,6 +824,7 @@ exports.calendarView = async (req, res) => {
     try {
       const [rows] = await db.query(
         `SELECT cs.*, p.client_id, l.business_name AS client_name,
+                COALESCE(s.id, s2.id) AS linked_shoot_id_resolved,
                 COALESCE(s.shoot_id_code, s2.shoot_id_code) AS linked_shoot_code,
                 COALESCE(s.project_campaign_name, s2.project_campaign_name) AS shoot_name,
                 COALESCE(s.shoot_date, s2.shoot_date) AS linked_shoot_date,

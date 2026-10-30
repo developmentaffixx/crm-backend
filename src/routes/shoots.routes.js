@@ -6,6 +6,16 @@ const { requireSocialAccess } = require('../middleware/socialAccess');
 const shootsController = require('../controllers/shoots.controller');
 
 router.use(authenticate);
+
+// ── Punch (clock in/out on a shoot) ───────────────────────────────────────────
+// Deliberately NOT behind requireSocialAccess: authorization is by collaborator
+// membership (checked in the controller), so a shoot collaborator with no Shoots
+// or Calendar module access can still punch their shoot time.
+router.get('/:id/punch-status', param('id').isInt(), shootsController.punchStatus);
+router.post('/:id/punch-in', param('id').isInt(), shootsController.punchIn);
+router.post('/:id/punch-out', param('id').isInt(), shootsController.punchOut);
+
+// All remaining routes require Shoots module access
 router.use(requireSocialAccess('shoot_planning'));
 
 // GET  /api/shoots

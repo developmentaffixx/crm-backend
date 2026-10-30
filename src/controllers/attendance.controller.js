@@ -78,8 +78,15 @@ exports.clockIn = async (req, res) => {
        WHERE mat.user_id = ? AND DATE(mat.started_at) < CURDATE()`,
       [userId]
     );
+    const [orphanedShootTimers] = await db.query(
+      `SELECT sat.id, sat.shoot_id, sat.started_at, s.shoot_id_code AS title, s.project_campaign_name
+       FROM shoot_active_timers sat
+       JOIN shoots s ON s.id = sat.shoot_id
+       WHERE sat.user_id = ? AND DATE(sat.started_at) < CURDATE()`,
+      [userId]
+    );
 
-    if (unclosedAttendance.length > 0 || orphanedTaskTimers.length > 0 || orphanedTicketTimers.length > 0 || orphanedMeetingTimers.length > 0) {
+    if (unclosedAttendance.length > 0 || orphanedTaskTimers.length > 0 || orphanedTicketTimers.length > 0 || orphanedMeetingTimers.length > 0 || orphanedShootTimers.length > 0) {
       return res.status(400).json({
         message: 'You have unresolved past-day attendance or timers. Please resolve them before clocking in.',
         pending: true,
@@ -87,6 +94,7 @@ exports.clockIn = async (req, res) => {
         orphaned_task_timers: orphanedTaskTimers,
         orphaned_ticket_timers: orphanedTicketTimers,
         orphaned_meeting_timers: orphanedMeetingTimers,
+        orphaned_shoot_timers: orphanedShootTimers,
       });
     }
     // ──────────────────────────────────────────────────────────────────────────
@@ -242,14 +250,18 @@ exports.clockOut = async (req, res) => {
       'SELECT id FROM meeting_active_timers WHERE user_id = ?',
       [userId]
     );
+    const [activeShootTimers] = await db.query(
+      'SELECT id FROM shoot_active_timers WHERE user_id = ?',
+      [userId]
+    );
     const [activeAfs] = await db.query(
       'SELECT id FROM afs_logs WHERE user_id = ? AND end_time IS NULL',
       [userId]
     );
 
-    if (activeTaskTimers.length > 0 || activeTicketTimers.length > 0 || activeMeetingTimers.length > 0 || activeAfs.length > 0) {
+    if (activeTaskTimers.length > 0 || activeTicketTimers.length > 0 || activeMeetingTimers.length > 0 || activeShootTimers.length > 0 || activeAfs.length > 0) {
       return res.status(400).json({
-        message: 'Cannot clock out while tasks, tickets, meetings, or AFS sessions are running. Please stop them first.'
+        message: 'Cannot clock out while tasks, tickets, meetings, shoots, or AFS sessions are running. Please stop them first.'
       });
     }
 
@@ -454,11 +466,17 @@ async function calculateProductivityTargetStatus(userId, inputDate = null) {
        WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0`,
       [userId, monthStart, yesterday]
     );
+    const [prevShoot] = await db.query(
+      `SELECT COALESCE(SUM(duration), 0) AS total FROM shoot_time_logs
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0`,
+      [userId, monthStart, yesterday]
+    );
 
     const prevTaskSec = parseInt(prevTask[0].total) || 0;
     const prevTicketSec = (parseInt(prevTicket[0].total) || 0) * 60;
     const prevMeetingSec = parseInt(prevMeeting[0].total) || 0;
-    prevCompletedSeconds = prevTaskSec + prevTicketSec + prevMeetingSec;
+    const prevShootSec = parseInt(prevShoot[0].total) || 0;
+    prevCompletedSeconds = prevTaskSec + prevTicketSec + prevMeetingSec + prevShootSec;
 
     if (prevCompletedSeconds < prevExpectedSeconds) {
       prevDeficitSeconds = prevExpectedSeconds - prevCompletedSeconds;
@@ -515,7 +533,17 @@ async function calculateProductivityTargetStatus(userId, inputDate = null) {
   );
   const meetingTodaySec = (parseInt(meetingToday[0].total) || 0) + (parseInt(activeMeeting[0]?.elapsed) || 0);
 
-  const todayProductiveSeconds = taskTodaySec + ticketTodaySec + meetingTodaySec;
+  const [shootToday] = await db.query(
+    'SELECT COALESCE(SUM(duration), 0) AS total FROM shoot_time_logs WHERE user_id = ? AND DATE(started_at) = ? AND ended_at IS NOT NULL AND duration > 0',
+    [userId, today]
+  );
+  const [activeShoot] = await db.query(
+    'SELECT COALESCE(TIMESTAMPDIFF(SECOND, started_at, NOW()), 0) AS elapsed FROM shoot_active_timers WHERE user_id = ? AND DATE(started_at) = ? ORDER BY started_at DESC LIMIT 1',
+    [userId, today]
+  );
+  const shootTodaySec = (parseInt(shootToday[0].total) || 0) + (parseInt(activeShoot[0]?.elapsed) || 0);
+
+  const todayProductiveSeconds = taskTodaySec + ticketTodaySec + meetingTodaySec + shootTodaySec;
 
   // 5. Shortfall / Surplus calculation
   const todayShortfallSeconds = Math.max(0, todayEffectiveTargetSeconds - todayProductiveSeconds);
@@ -693,12 +721,25 @@ exports.getToday = async (req, res) => {
     );
     const totalMeetingSecondsToday = parseInt(meetingTimerResult[0].total) + parseInt(activeMeetingTimerResult[0]?.elapsed || 0);
 
+    // Completed shoot timer segments today (from shoot_time_logs)
+    const [shootTimerResult] = await db.query(
+      'SELECT COALESCE(SUM(duration), 0) AS total FROM shoot_time_logs WHERE user_id = ? AND DATE(started_at) = CURDATE() AND ended_at IS NOT NULL AND duration > 0',
+      [userId]
+    );
+    // Currently running shoot timer — lives in shoot_active_timers (no log entry until stopped)
+    const [activeShootTimerResult] = await db.query(
+      'SELECT COALESCE(TIMESTAMPDIFF(SECOND, started_at, NOW()), 0) AS elapsed FROM shoot_active_timers WHERE user_id = ? AND DATE(started_at) = CURDATE() ORDER BY started_at DESC LIMIT 1',
+      [userId]
+    );
+    const totalShootSecondsToday = parseInt(shootTimerResult[0].total) + parseInt(activeShootTimerResult[0]?.elapsed || 0);
+
     console.log('DEBUG CLOCK WIDGET:', {
       userId,
       taskSeconds: totalTaskSecondsToday,
       ticketMinutes: ticketTimerResult[0].total,
       meetingSeconds: totalMeetingSecondsToday,
-      totalProductive: totalTaskSecondsToday + (ticketTimerResult[0].total * 60) + totalMeetingSecondsToday
+      shootSeconds: totalShootSecondsToday,
+      totalProductive: totalTaskSecondsToday + (ticketTimerResult[0].total * 60) + totalMeetingSecondsToday + totalShootSecondsToday
     });
 
     // Get today's schedule info (full/half/holiday)
@@ -726,6 +767,7 @@ exports.getToday = async (req, res) => {
       total_task_seconds: parseInt(totalTaskSecondsToday) || 0,
       total_ticket_seconds: (parseInt(ticketTimerResult[0].total) || 0) * 60,
       total_meeting_seconds: totalMeetingSecondsToday,
+      total_shoot_seconds: parseInt(totalShootSecondsToday) || 0,
       today_schedule: todaySchedule,
       is_first_day: isFirstDay,
       productivity_status: productivityStatus,
@@ -779,11 +821,19 @@ exports.getMyWeek = async (req, res) => {
        AND ended_at IS NOT NULL AND duration > 0`,
       [userId, week_start, endDate]
     );
+    const [shootTimeResult] = await db.query(
+      `SELECT COALESCE(SUM(duration), 0) AS total 
+       FROM shoot_time_logs
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       AND ended_at IS NOT NULL AND duration > 0`,
+      [userId, week_start, endDate]
+    );
 
     const taskHours = (parseInt(taskTimeResult[0].total) || 0) / 3600;
     const ticketHours = (parseInt(ticketTimeResult[0].total) || 0) / 60;
     const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 3600;
-    const completed = taskHours + ticketHours + meetingHours;
+    const shootHours = (parseInt(shootTimeResult[0].total) || 0) / 3600;
+    const completed = taskHours + ticketHours + meetingHours + shootHours;
 
     const required = totalExpected * 60; // Convert hours to minutes for frontend
     const completedMinutes = completed * 60;
@@ -951,6 +1001,12 @@ exports.getHistory = async (req, res) => {
          GROUP BY COALESCE(mm.user_id, m.created_by), m.meeting_date`,
         [startDate, endDate]
       );
+      const [shootTimeLogs] = await db.query(
+        `SELECT user_id, DATE(started_at) AS log_date, COALESCE(SUM(duration), 0) AS total_seconds
+         FROM shoot_time_logs WHERE DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0
+         GROUP BY user_id, DATE(started_at)`,
+        [startDate, endDate]
+      );
 
       // Build productive lookup: { 'userId_date': seconds }
       const productiveLookup = {};
@@ -965,6 +1021,11 @@ exports.getHistory = async (req, res) => {
         productiveLookup[key] = (productiveLookup[key] || 0) + ((parseInt(row.total_minutes) || 0) * 60);
       }
       for (const row of meetingTimeLogs) {
+        const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
+        const key = `${row.user_id}_${d}`;
+        productiveLookup[key] = (productiveLookup[key] || 0) + (parseInt(row.total_seconds) || 0);
+      }
+      for (const row of shootTimeLogs) {
         const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
         const key = `${row.user_id}_${d}`;
         productiveLookup[key] = (productiveLookup[key] || 0) + (parseInt(row.total_seconds) || 0);
@@ -1086,6 +1147,14 @@ exports.getHistory = async (req, res) => {
       [user_id, user_id, startDate, endDate]
     );
 
+    // Fetch productive time per day (shoots)
+    const [shootTimeLogs] = await db.query(
+      `SELECT DATE(started_at) AS log_date, COALESCE(SUM(duration), 0) AS total_seconds
+       FROM shoot_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0
+       GROUP BY DATE(started_at)`,
+      [user_id, startDate, endDate]
+    );
+
     // Build lookup maps for productive time by date
     const taskByDate = {};
     for (const row of taskTimeLogs) {
@@ -1102,6 +1171,11 @@ exports.getHistory = async (req, res) => {
       const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
       meetingByDate[d] = parseInt(row.total_seconds) || 0;
     }
+    const shootByDate = {};
+    for (const row of shootTimeLogs) {
+      const d = row.log_date instanceof Date ? row.log_date.toISOString().split('T')[0] : String(row.log_date).split('T')[0];
+      shootByDate[d] = parseInt(row.total_seconds) || 0;
+    }
 
     // Group plans by attendance_id
     const plansByAttendance = {};
@@ -1115,7 +1189,7 @@ exports.getHistory = async (req, res) => {
     // Attach plans and productive time to each record
     const enrichedRecords = records.map(record => {
       const dateStr = record.date instanceof Date ? record.date.toISOString().split('T')[0] : String(record.date).split('T')[0];
-      const productiveSeconds = (taskByDate[dateStr] || 0) + (ticketByDate[dateStr] || 0) + (meetingByDate[dateStr] || 0);
+      const productiveSeconds = (taskByDate[dateStr] || 0) + (ticketByDate[dateStr] || 0) + (meetingByDate[dateStr] || 0) + (shootByDate[dateStr] || 0);
       return {
         ...record,
         plans: plansByAttendance[record.id] || [],
@@ -1465,6 +1539,14 @@ exports.adminGetToday = async (req, res) => {
     const meetingMap = {};
     for (const r of meetingLogs) meetingMap[r.user_id] = parseInt(r.total_seconds) || 0;
 
+    // Fetch productive time (shoots)
+    const [shootLogs] = await db.query(
+      `SELECT user_id, COALESCE(SUM(duration), 0) AS total_seconds
+       FROM shoot_time_logs WHERE DATE(started_at) = CURDATE() GROUP BY user_id`
+    );
+    const shootMap = {};
+    for (const r of shootLogs) shootMap[r.user_id] = parseInt(r.total_seconds) || 0;
+
     // Fetch current active meetings (user has punched into a meeting)
     const [activeMeetings] = await db.query(
       `SELECT mat.user_id, mat.meeting_id, m.title
@@ -1495,7 +1577,7 @@ exports.adminGetToday = async (req, res) => {
     }
 
     const team = users.map(u => {
-      const rawProductive = (taskMap[u.id] || 0) + (ticketMap[u.id] || 0) + (meetingMap[u.id] || 0);
+      const rawProductive = (taskMap[u.id] || 0) + (ticketMap[u.id] || 0) + (meetingMap[u.id] || 0) + (shootMap[u.id] || 0);
       const productive_seconds = Math.min(rawProductive, u.total_served_seconds || 0);
       return {
         id: u.id,
@@ -1567,11 +1649,19 @@ exports.adminWeekReport = async (req, res) => {
          AND ended_at IS NOT NULL AND duration > 0`,
         [user.id, week_start, endDate]
       );
+      const [shootTimeResult] = await db.query(
+        `SELECT COALESCE(SUM(duration), 0) AS total 
+         FROM shoot_time_logs
+         WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+         AND ended_at IS NOT NULL AND duration > 0`,
+        [user.id, week_start, endDate]
+      );
 
       const taskHours = taskTimeResult[0].total / 3600;
       const ticketHours = ticketTimeResult[0].total / 60;
       const meetingHours = meetingTimeResult[0].total / 3600;
-      const completed = taskHours + ticketHours + meetingHours;
+      const shootHours = shootTimeResult[0].total / 3600;
+      const completed = taskHours + ticketHours + meetingHours + shootHours;
 
       const deficit = Math.max(0, totalExpected - completed);
       const surplus = completed > totalExpected ? completed - totalExpected : 0;
@@ -1586,7 +1676,8 @@ exports.adminWeekReport = async (req, res) => {
         surplus: parseFloat(surplus.toFixed(2)),
         task_hours: parseFloat(taskHours.toFixed(2)),
         ticket_hours: parseFloat(ticketHours.toFixed(2)),
-        meeting_hours: parseFloat(meetingHours.toFixed(2))
+        meeting_hours: parseFloat(meetingHours.toFixed(2)),
+        shoot_hours: parseFloat(shootHours.toFixed(2))
       });
     }
 
@@ -2044,6 +2135,13 @@ exports.adminGetAllPending = async (req, res) => {
        GROUP BY mat.user_id`
     );
 
+    const [orphanedShoots] = await db.query(
+      `SELECT sat.user_id, COUNT(*) AS count
+       FROM shoot_active_timers sat
+       WHERE DATE(sat.started_at) < CURDATE()
+       GROUP BY sat.user_id`
+    );
+
     // Build user map
     const userMap = {};
     for (const record of unclosed) {
@@ -2056,6 +2154,7 @@ exports.adminGetAllPending = async (req, res) => {
           orphaned_task_count: 0,
           orphaned_ticket_count: 0,
           orphaned_meeting_count: 0,
+          orphaned_shoot_count: 0,
         };
       }
       userMap[record.user_id].unclosed_attendance.push({
@@ -2067,21 +2166,27 @@ exports.adminGetAllPending = async (req, res) => {
 
     for (const row of orphanedTasks) {
       if (!userMap[row.user_id]) {
-        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0 };
+        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0, orphaned_shoot_count: 0 };
       }
       userMap[row.user_id].orphaned_task_count = row.count;
     }
     for (const row of orphanedTickets) {
       if (!userMap[row.user_id]) {
-        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0 };
+        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0, orphaned_shoot_count: 0 };
       }
       userMap[row.user_id].orphaned_ticket_count = row.count;
     }
     for (const row of orphanedMeetings) {
       if (!userMap[row.user_id]) {
-        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0 };
+        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0, orphaned_shoot_count: 0 };
       }
       userMap[row.user_id].orphaned_meeting_count = row.count;
+    }
+    for (const row of orphanedShoots) {
+      if (!userMap[row.user_id]) {
+        userMap[row.user_id] = { user_id: row.user_id, name: '', department: '', unclosed_attendance: [], orphaned_task_count: 0, orphaned_ticket_count: 0, orphaned_meeting_count: 0, orphaned_shoot_count: 0 };
+      }
+      userMap[row.user_id].orphaned_shoot_count = row.count;
     }
 
     return res.json({ users_with_pending: Object.values(userMap) });
@@ -2124,7 +2229,15 @@ async function getPendingResolutionData(userId) {
     [userId]
   );
 
-  const hasPending = unclosedAttendance.length > 0 || orphanedTaskTimers.length > 0 || orphanedTicketTimers.length > 0 || orphanedMeetingTimers.length > 0;
+  const [orphanedShootTimers] = await db.query(
+    `SELECT sat.id, sat.shoot_id, sat.started_at, s.shoot_id_code AS title, s.project_campaign_name
+     FROM shoot_active_timers sat
+     JOIN shoots s ON s.id = sat.shoot_id
+     WHERE sat.user_id = ? AND DATE(sat.started_at) < CURDATE()`,
+    [userId]
+  );
+
+  const hasPending = unclosedAttendance.length > 0 || orphanedTaskTimers.length > 0 || orphanedTicketTimers.length > 0 || orphanedMeetingTimers.length > 0 || orphanedShootTimers.length > 0;
 
   return {
     has_pending: hasPending,
@@ -2132,6 +2245,7 @@ async function getPendingResolutionData(userId) {
     orphaned_task_timers: orphanedTaskTimers,
     orphaned_ticket_timers: orphanedTicketTimers,
     orphaned_meeting_timers: orphanedMeetingTimers,
+    orphaned_shoot_timers: orphanedShootTimers,
   };
 }
 
@@ -2228,6 +2342,24 @@ async function resolveUserPending(userId, attendanceId, clockOutTime, timers) {
         [t.meeting_id, userId, t.started_at, stopDateTime, duration, 'Manually resolved (forgot to stop)']
       );
       await db.query('DELETE FROM meeting_active_timers WHERE id = ?', [t.id]);
+
+    } else if (timer.type === 'shoot') {
+      const [shootTimer] = await db.query(
+        'SELECT * FROM shoot_active_timers WHERE id = ? AND user_id = ?',
+        [timer.timer_id, userId]
+      );
+      if (shootTimer.length === 0) continue;
+
+      const t = shootTimer[0];
+      const startedAt = new Date(t.started_at);
+      const duration = Math.max(1, Math.floor((stopDateTime - startedAt) / 1000));
+
+      await db.query(
+        `INSERT INTO shoot_time_logs (shoot_id, user_id, started_at, ended_at, duration, note)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [t.shoot_id, userId, t.started_at, stopDateTime, duration, 'Manually resolved (forgot to stop)']
+      );
+      await db.query('DELETE FROM shoot_active_timers WHERE id = ?', [t.id]);
     }
   }
 
@@ -2293,11 +2425,19 @@ exports.getMyMonthBalance = async (req, res) => {
        AND ended_at IS NOT NULL AND duration > 0`,
       [userId, monthStart, today]
     );
+    const [shootTimeResult] = await db.query(
+      `SELECT COALESCE(SUM(duration), 0) AS total 
+       FROM shoot_time_logs
+       WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       AND ended_at IS NOT NULL AND duration > 0`,
+      [userId, monthStart, today]
+    );
 
     const taskHours = (parseInt(taskTimeResult[0].total) || 0) / 3600;
     const ticketHours = (parseInt(ticketTimeResult[0].total) || 0) / 60;
     const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 3600;
-    const completedHours = taskHours + ticketHours + meetingHours;
+    const shootHours = (parseInt(shootTimeResult[0].total) || 0) / 3600;
+    const completedHours = taskHours + ticketHours + meetingHours + shootHours;
 
     // Balance = completed - required (positive = surplus, negative = deficit)
     const balanceHours = completedHours - totalExpected;
@@ -2329,6 +2469,12 @@ exports.getMyMonthBalance = async (req, res) => {
        GROUP BY DATE(started_at)`,
       [userId, monthStart, today]
     );
+    const [dailyShoots] = await db.query(
+      `SELECT DATE(started_at) AS date, COALESCE(SUM(duration), 0) AS total 
+       FROM shoot_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ? AND ended_at IS NOT NULL AND duration > 0
+       GROUP BY DATE(started_at)`,
+      [userId, monthStart, today]
+    );
 
     // Build daily map
     const taskMap = {};
@@ -2337,10 +2483,12 @@ exports.getMyMonthBalance = async (req, res) => {
     dailyTickets.forEach(r => { ticketMap[new Date(r.date).toISOString().split('T')[0]] = (parseInt(r.total) || 0) / 60; });
     const meetingMap = {};
     dailyMeetings.forEach(r => { meetingMap[new Date(r.date).toISOString().split('T')[0]] = (parseInt(r.total) || 0) / 3600; });
+    const shootMap = {};
+    dailyShoots.forEach(r => { shootMap[new Date(r.date).toISOString().split('T')[0]] = (parseInt(r.total) || 0) / 3600; });
 
     let runningBalance = 0;
     const daily_balance = dailyBreakdown.map(day => {
-      const dayCompleted = (taskMap[day.date] || 0) + (ticketMap[day.date] || 0) + (meetingMap[day.date] || 0);
+      const dayCompleted = (taskMap[day.date] || 0) + (ticketMap[day.date] || 0) + (meetingMap[day.date] || 0) + (shootMap[day.date] || 0);
       const dayDiff = dayCompleted - day.expected_hours;
       runningBalance += dayDiff;
       return {
@@ -2368,6 +2516,7 @@ exports.getMyMonthBalance = async (req, res) => {
       task_hours: parseFloat(taskHours.toFixed(2)),
       ticket_hours: parseFloat(ticketHours.toFixed(2)),
       meeting_hours: parseFloat(meetingHours.toFixed(2)),
+      shoot_hours: parseFloat(shootHours.toFixed(2)),
       daily_balance,
       status: surplus > 0 ? 'surplus' : deficit > 0 ? 'deficit' : 'on_track'
     });
@@ -2413,11 +2562,19 @@ exports.adminMonthBalanceReport = async (req, res) => {
          AND ended_at IS NOT NULL AND duration > 0`,
         [user.id, monthStart, today]
       );
+      const [shootTimeResult] = await db.query(
+        `SELECT COALESCE(SUM(duration), 0) AS total 
+         FROM shoot_time_logs
+         WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+         AND ended_at IS NOT NULL AND duration > 0`,
+        [user.id, monthStart, today]
+      );
 
       const taskHours = (parseInt(taskTimeResult[0].total) || 0) / 3600;
       const ticketHours = (parseInt(ticketTimeResult[0].total) || 0) / 60;
       const meetingHours = (parseInt(meetingTimeResult[0].total) || 0) / 3600;
-      const completedHours = taskHours + ticketHours + meetingHours;
+      const shootHours = (parseInt(shootTimeResult[0].total) || 0) / 3600;
+      const completedHours = taskHours + ticketHours + meetingHours + shootHours;
 
       const balanceHours = completedHours - totalExpected;
 
@@ -2506,12 +2663,21 @@ exports.adminTimesheetTeam = async (req, res) => {
         [user.id, startStr, endStr]
       );
 
+      // Shoot time
+      const [shootTime] = await db.query(
+        `SELECT COALESCE(SUM(duration), 0) AS total_seconds
+         FROM shoot_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+         AND ended_at IS NOT NULL AND duration > 0`,
+        [user.id, startStr, endStr]
+      );
+
       const totalServed = Number(attendance[0].total_served_seconds) || 0;
       const totalAfs = Number(attendance[0].total_afs_seconds) || 0;
       const totalTaskSeconds = Number(taskTime[0].total_seconds) || 0;
       const totalTicketSeconds = (Number(ticketTime[0].total_minutes) || 0) * 60;
       const totalMeetingSeconds = Number(meetingTime[0].total_seconds) || 0;
-      const rawProductiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
+      const totalShootSeconds = Number(shootTime[0].total_seconds) || 0;
+      const rawProductiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds + totalShootSeconds;
       const productiveSeconds = Math.min(rawProductiveSeconds, totalServed);
       const productivityPercent = totalServed > 0 ? Math.round((productiveSeconds / totalServed) * 100) : 0;
 
@@ -2537,6 +2703,7 @@ exports.adminTimesheetTeam = async (req, res) => {
         total_task_seconds: totalTaskSeconds,
         total_ticket_seconds: totalTicketSeconds,
         total_meeting_seconds: totalMeetingSeconds,
+        total_shoot_seconds: totalShootSeconds,
         productivity_percent: productivityPercent,
       });
     }
@@ -2648,6 +2815,15 @@ exports.adminTimesheet = async (req, res) => {
       [user_id, startStr, endStr]
     );
 
+    // Shoot time logs
+    const [shootTime] = await db.query(
+      `SELECT DATE(started_at) AS log_date, SUM(duration) AS total_seconds
+       FROM shoot_time_logs WHERE user_id = ? AND DATE(started_at) BETWEEN ? AND ?
+       AND ended_at IS NOT NULL AND duration > 0
+       GROUP BY DATE(started_at)`,
+      [user_id, startStr, endStr]
+    );
+
     // Get lunch duration from settings
     const [settings] = await db.query('SELECT lunch_duration_minutes FROM attendance_settings WHERE id = 1');
     const lunchSeconds = (settings[0]?.lunch_duration_minutes || 60) * 60;
@@ -2658,7 +2834,8 @@ exports.adminTimesheet = async (req, res) => {
     const totalTaskSeconds = taskTime.reduce((sum, t) => sum + (Number(t.total_seconds) || 0), 0);
     const totalTicketMinutes = ticketTime.reduce((sum, t) => sum + (Number(t.total_minutes) || 0), 0);
     const totalMeetingSeconds = meetingTime.reduce((sum, m) => sum + (Number(m.total_seconds) || 0), 0);
-    const rawProductiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + totalMeetingSeconds;
+    const totalShootSeconds = shootTime.reduce((sum, s) => sum + (Number(s.total_seconds) || 0), 0);
+    const rawProductiveSeconds = totalTaskSeconds + (totalTicketMinutes * 60) + totalMeetingSeconds + totalShootSeconds;
     // Cap productive to never exceed served (handles overlapping timers / simultaneous tracking)
     const productiveSeconds = Math.min(rawProductiveSeconds, totalServed);
     // Deduct lunch per day present from unaccounted time
@@ -2673,6 +2850,7 @@ exports.adminTimesheet = async (req, res) => {
       taskTime,
       ticketTime,
       meetingTime,
+      shootTime,
       summary: {
         total_served_seconds: totalServed,
         total_afs_seconds: totalAfs,
@@ -2681,6 +2859,7 @@ exports.adminTimesheet = async (req, res) => {
         total_task_seconds: totalTaskSeconds,
         total_ticket_minutes: totalTicketMinutes,
         total_meeting_seconds: totalMeetingSeconds,
+        total_shoot_seconds: totalShootSeconds,
         days_present: attendance.length,
         leave_days: leaveRecords.length,
       },
@@ -2734,6 +2913,16 @@ exports.adminTimesheetDay = async (req, res) => {
       [user_id, date]
     );
 
+    // Shoot time logs with shoot title
+    const [shootLogs] = await db.query(
+      `SELECT sl.id, sl.shoot_id, s.shoot_id_code AS shoot_title, s.project_campaign_name, sl.started_at, sl.ended_at, sl.duration, sl.note
+       FROM shoot_time_logs sl
+       JOIN shoots s ON s.id = sl.shoot_id
+       WHERE sl.user_id = ? AND DATE(sl.started_at) = ?
+       ORDER BY sl.started_at ASC`,
+      [user_id, date]
+    );
+
     // AFS logs
     const [afsLogs] = await db.query(
       `SELECT id, start_time, end_time, duration_seconds
@@ -2753,8 +2942,9 @@ exports.adminTimesheetDay = async (req, res) => {
     const totalTaskSeconds = taskLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
     const totalTicketSeconds = ticketLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
     const totalMeetingSeconds = meetingLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
+    const totalShootSeconds = shootLogs.reduce((sum, l) => sum + (Number(l.duration) || 0), 0);
     const totalAfsSeconds = afsLogs.reduce((sum, l) => sum + (Number(l.duration_seconds) || 0), 0);
-    const rawProductiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds;
+    const rawProductiveSeconds = totalTaskSeconds + totalTicketSeconds + totalMeetingSeconds + totalShootSeconds;
     const totalServedSeconds = Number(attendance[0]?.total_served_seconds) || 0;
     // Cap productive to never exceed served (handles overlapping timers)
     const productiveSeconds = Math.min(rawProductiveSeconds, totalServedSeconds);
@@ -2771,11 +2961,13 @@ exports.adminTimesheetDay = async (req, res) => {
       tasks: taskLogs,
       tickets: ticketLogs,
       meetings: meetingLogs,
+      shoots: shootLogs,
       afs: afsLogs,
       summary: {
         total_task_seconds: totalTaskSeconds,
         total_ticket_seconds: totalTicketSeconds,
         total_meeting_seconds: totalMeetingSeconds,
+        total_shoot_seconds: totalShootSeconds,
         total_afs_seconds: totalAfsSeconds,
         productive_seconds: productiveSeconds,
         idle_seconds: idleSeconds,

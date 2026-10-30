@@ -181,4 +181,63 @@ function requireSocialAccess(submenu) {
   };
 }
 
-module.exports = { requireSocialAccess };
+/**
+ * Resolve a user's access level (0 = none, 1 = own, 2 = all) for a specific
+ * Social Media Ops submenu, using the same priority chain as requireSocialAccess:
+ *   user_submenu_permissions -> role_submenu_permissions -> role_social_permissions (legacy).
+ * Admins always get 2. Returns a Number.
+ *
+ * Useful when one endpoint lives under a given submenu's route guard but needs
+ * to additionally check access to a *different* submenu (e.g. the Content
+ * Calendar footage action requiring Shoots access).
+ */
+async function getSocialSubmenuAccess(userId, submenu) {
+  try {
+    const [userRows] = await db.query(
+      'SELECT role_id, is_admin FROM users WHERE id = ? AND deleted = 0',
+      [userId]
+    );
+    if (userRows.length && userRows[0].is_admin) return 2;
+    const roleId = userRows.length ? userRows[0].role_id : null;
+
+    // Priority 1: user submenu override
+    try {
+      const [userSub] = await db.query(
+        'SELECT can_access FROM user_submenu_permissions WHERE user_id = ? AND module = "creative_hub" AND submenu = ?',
+        [userId, submenu]
+      );
+      if (userSub.length > 0 && userSub[0].can_access !== null) {
+        return Number(userSub[0].can_access) || 0;
+      }
+    } catch (e) {}
+
+    if (roleId) {
+      // Priority 2: role submenu permission
+      try {
+        const [roleSub] = await db.query(
+          'SELECT can_access FROM role_submenu_permissions WHERE role_id = ? AND module = "creative_hub" AND submenu = ?',
+          [roleId, submenu]
+        );
+        if (roleSub.length > 0 && roleSub[0].can_access !== null) {
+          return Number(roleSub[0].can_access) || 0;
+        }
+      } catch (e) {}
+
+      // Priority 3: legacy role_social_permissions column
+      try {
+        const [legacyRows] = await db.query(
+          `SELECT ${submenu} AS access_level FROM role_social_permissions WHERE role_id = ?`,
+          [roleId]
+        );
+        if (legacyRows.length > 0 && legacyRows[0].access_level !== null) {
+          return Number(legacyRows[0].access_level) || 0;
+        }
+      } catch (e) {}
+    }
+  } catch (e) {
+    console.error('getSocialSubmenuAccess error:', e.message);
+  }
+  return 0;
+}
+
+module.exports = { requireSocialAccess, getSocialSubmenuAccess };

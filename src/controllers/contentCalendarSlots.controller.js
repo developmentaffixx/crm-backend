@@ -5,6 +5,8 @@ const db = require('../config/db');
 // Flow: Book → Assign → Notify → Fill on respective page → Approve/Reject → Complete
 // ═══════════════════════════════════════════════════════════════════════════════
 
+const { getSocialSubmenuAccess } = require('../middleware/socialAccess');
+
 const TABLE_MAP = {
   post: 'content_calendar_posts',
   shoot: 'content_calendar_shoots',
@@ -1452,6 +1454,15 @@ exports.updateFootageDetails = async (req, res) => {
     await ensureFootageColumns();
     const { slot_id, footage_drive_link, shoot_statement } = req.body;
     const userId = req.user.id;
+
+    // Only users with Shoots module access (admin, or shoot_planning >= 1) may
+    // set the footage / drive location. This is the storage detail the shoot
+    // team records after a shoot, so it's gated by Shoots access rather than
+    // general calendar access.
+    const shootAccess = req.user.is_admin ? 2 : await getSocialSubmenuAccess(userId, 'shoot_planning');
+    if (shootAccess < 1) {
+      return res.status(403).json({ message: 'Access denied: only users with Shoots access can update footage & drive location' });
+    }
 
     if (!slot_id) {
       return res.status(400).json({ message: 'slot_id is required' });
