@@ -5,15 +5,18 @@ const db = require('../config/db');
 // ─────────────────────────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
-    const { project_id, user_id, date_from, date_to, health_status, page = 1, limit = 20 } = req.query;
+    const { project_id, user_id, client_id, date_from, date_to, health_status, client_communication, escalation_required, page = 1, limit = 20 } = req.query;
     let where = '1=1';
     const params = [];
 
     if (project_id) { where += ' AND dj.project_id = ?'; params.push(project_id); }
     if (user_id) { where += ' AND dj.submitted_by = ?'; params.push(user_id); }
+    if (client_id) { where += ' AND p.client_id = ?'; params.push(client_id); }
     if (date_from) { where += ' AND dj.journal_date >= ?'; params.push(date_from); }
     if (date_to) { where += ' AND dj.journal_date <= ?'; params.push(date_to); }
     if (health_status) { where += ' AND dj.health_status = ?'; params.push(health_status); }
+    if (client_communication) { where += ' AND dj.client_communication = ?'; params.push(client_communication); }
+    if (escalation_required) { where += ' AND dj.escalation_required = ?'; params.push(escalation_required); }
 
     // Non-admin: only see their own entries or entries for projects they are members of
     if (!req.user.is_admin) {
