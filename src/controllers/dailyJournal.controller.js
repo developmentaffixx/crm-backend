@@ -344,120 +344,141 @@ exports.productivityReport = async (req, res) => {
     } catch (e) { /* ignore */ }
 
     if (memberIds.length === 0) {
-      return res.json({ date_from: dateFrom, date_to: dateTo, members: [], summary: emptyReportSummary() });
+      return res.json({ date_from: dateFrom, date_to: dateTo, journals: [], members: [], summary: emptyReportSummary() });
     }
 
-    // Fetch member profile info
+    // ═══════════════════════════════════════════════════════════════════════
+    // SECTION A — Daily Update summary (what the update-users submitted)
+    // ═══════════════════════════════════════════════════════════════════════
+    let journals = [];
+    try {
+      const [jrows] = await db.query(
+        `SELECT dj.id, dj.project_id, dj.journal_date, dj.submitted_by,
+                dj.work_categories, dj.client_communication, dj.communication_summary,
+                dj.issues_delays, dj.issues_details, dj.leads_opportunities,
+                dj.tomorrow_priorities, dj.escalation_required, dj.escalation_details,
+                dj.health_status,
+                p.title AS project_title, l.business_name AS client_name,
+                CONCAT(u.first_name, ' ', u.last_name) AS submitted_by_name
+         FROM smm_daily_journal dj
+         LEFT JOIN projects p ON p.id = dj.project_id
+         LEFT JOIN leads l ON l.id = p.client_id
+         LEFT JOIN users u ON u.id = dj.submitted_by
+         WHERE dj.journal_date BETWEEN ? AND ?
+         ORDER BY dj.journal_date DESC, dj.submitted_at DESC`,
+        [dateFrom, dateTo]
+      );
+      const parseJson = (v) => { if (!v) return null; try { return typeof v === 'string' ? JSON.parse(v) : v; } catch { return null; } };
+      journals = jrows.map(j => ({
+        ...j,
+        work_categories: parseJson(j.work_categories),
+        issues_delays: parseJson(j.issues_delays),
+        tomorrow_priorities: parseJson(j.tomorrow_priorities),
+      }));
+    } catch (e) { console.warn('Daily report journals warning:', e.message); }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SECTION B — Team activity: tasks / tickets / shoots each member WORKED ON
+    // that date (defined as "logged time on that day").
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Member profiles
     const [users] = await db.query(
       `SELECT id, CONCAT(first_name, ' ', last_name) AS name, department, designation, avatar_url
        FROM users WHERE id IN (?) ORDER BY first_name`,
       [memberIds]
     );
 
-    // ── Productive time per member over the range (seconds) ──
-    const sumLogs = async (table, dateCol, valueExpr) => {
-      const map = {};
-      try {
-        const [rows] = await db.query(
-          `SELECT user_id, COALESCE(SUM(${valueExpr}), 0) AS total
-           FROM ${table}
-           WHERE user_id IN (?) AND DATE(${dateCol}) BETWEEN ? AND ?
-             ${table === 'ticket_time_logs' ? '' : 'AND ended_at IS NOT NULL AND duration > 0'}
-           GROUP BY user_id`,
-          [memberIds, dateFrom, dateTo]
-        );
-        rows.forEach(r => { map[r.user_id] = parseInt(r.total) || 0; });
-      } catch (e) { /* table may not exist */ }
-      return map;
-    };
-
-    const taskMap   = await sumLogs('task_time_logs', 'started_at', 'duration');
-    const ticketMap = await sumLogs('ticket_time_logs', 'created_at', 'minutes'); // minutes → *60 below
-    const meetingMap = await sumLogs('meeting_time_logs', 'started_at', 'duration');
-    const shootMap  = await sumLogs('shoot_time_logs', 'started_at', 'duration');
-
-    // ── Journal entries in the range per member ──
-    const journalMap = {}; // user_id → { submittedDates:Set, health:{}, escalations:0, entries:0 }
+    // Tasks worked (distinct tasks a member logged time on in range)
+    const tasksByUser = {};
     try {
-      const [journals] = await db.query(
-        `SELECT submitted_by, journal_date, health_status, escalation_required
-         FROM smm_daily_journal
-         WHERE submitted_by IN (?) AND journal_date BETWEEN ? AND ?`,
+      const [rows] = await db.query(
+        `SELECT DISTINCT tl.user_id, t.id, t.title, t.task_id_code, t.status
+         FROM task_time_logs tl
+         JOIN tasks t ON t.id = tl.task_id
+         WHERE tl.user_id IN (?) AND DATE(tl.started_at) BETWEEN ? AND ?
+         ORDER BY t.id DESC`,
         [memberIds, dateFrom, dateTo]
       );
-      journals.forEach(j => {
-        const m = journalMap[j.submitted_by] || { dates: new Set(), critical: 0, attention: 0, escalations: 0, entries: 0 };
-        m.entries += 1;
-        m.dates.add(String(j.journal_date).split('T')[0]);
-        if (j.health_status === 'critical') m.critical += 1;
-        else if (j.health_status === 'attention_needed') m.attention += 1;
-        if (j.escalation_required === 'yes') m.escalations += 1;
-        journalMap[j.submitted_by] = m;
-      });
-    } catch (e) { /* ignore */ }
+      rows.forEach(r => { (tasksByUser[r.user_id] = tasksByUser[r.user_id] || []).push({ id: r.id, title: r.title, code: r.task_id_code, status: r.status }); });
+    } catch (e) { console.warn('Daily report tasks warning:', e.message); }
 
-    // ── Build per-member rows ──
+    // Tickets worked (ticket_time_logs uses log_date + minutes)
+    const ticketsByUser = {};
+    try {
+      const [rows] = await db.query(
+        `SELECT DISTINCT tl.user_id, tk.id, tk.title, tk.status
+         FROM ticket_time_logs tl
+         JOIN tickets tk ON tk.id = tl.ticket_id
+         WHERE tl.user_id IN (?) AND tl.log_date BETWEEN ? AND ? AND tk.deleted = 0
+         ORDER BY tk.id DESC`,
+        [memberIds, dateFrom, dateTo]
+      );
+      rows.forEach(r => { (ticketsByUser[r.user_id] = ticketsByUser[r.user_id] || []).push({ id: r.id, title: r.title, status: r.status }); });
+    } catch (e) { console.warn('Daily report tickets warning:', e.message); }
+
+    // Shoots worked (shoot_time_logs = punches)
+    const shootsByUser = {};
+    try {
+      const [rows] = await db.query(
+        `SELECT DISTINCT sl.user_id, s.id, s.shoot_id_code, s.project_campaign_name, s.status
+         FROM shoot_time_logs sl
+         JOIN shoots s ON s.id = sl.shoot_id
+         WHERE sl.user_id IN (?) AND DATE(sl.started_at) BETWEEN ? AND ? AND s.deleted = 0
+         ORDER BY s.id DESC`,
+        [memberIds, dateFrom, dateTo]
+      );
+      rows.forEach(r => { (shootsByUser[r.user_id] = shootsByUser[r.user_id] || []).push({ id: r.id, code: r.shoot_id_code, title: r.project_campaign_name, status: r.status }); });
+    } catch (e) { console.warn('Daily report shoots warning:', e.message); }
+
+    // Did each member submit a journal in the range?
+    const submittedSet = new Set(journals.map(j => j.submitted_by));
+
+    // Build member rows — only members who have activity OR submitted an update
     const members = [];
     for (const u of users) {
-      const productiveSeconds =
-        (taskMap[u.id] || 0) +
-        ((ticketMap[u.id] || 0) * 60) +
-        (meetingMap[u.id] || 0) +
-        (shootMap[u.id] || 0);
-
-      // Expected (target) hours across the range for this member
-      let expectedHours = 0;
-      try {
-        const { totalExpected } = await getExpectedHoursForRange(dateFrom, dateTo, u.id);
-        expectedHours = totalExpected || 0;
-      } catch (e) { /* ignore */ }
-      const expectedSeconds = Math.round(expectedHours * 3600);
-
-      const j = journalMap[u.id] || { dates: new Set(), critical: 0, attention: 0, escalations: 0, entries: 0 };
-      const submitted = j.entries > 0;
-      const health = j.critical > 0 ? 'critical' : (j.attention > 0 ? 'attention_needed' : (submitted ? 'on_track' : null));
-
+      const tasks = tasksByUser[u.id] || [];
+      const tickets = ticketsByUser[u.id] || [];
+      const shoots = shootsByUser[u.id] || [];
+      const submitted = submittedSet.has(u.id);
+      if (tasks.length === 0 && tickets.length === 0 && shoots.length === 0 && !submitted) continue;
       members.push({
         user_id: u.id,
         name: u.name,
-        department: u.department,
         designation: u.designation,
         avatar_url: u.avatar_url,
-        productive_seconds: productiveSeconds,
-        expected_seconds: expectedSeconds,
-        target_met: expectedSeconds > 0 ? productiveSeconds >= expectedSeconds : null,
         journal_submitted: submitted,
-        journal_entries: j.entries,
-        health_status: health,
-        escalations: j.escalations,
+        tasks,
+        tickets,
+        shoots,
+        task_count: tasks.length,
+        ticket_count: tickets.length,
+        shoot_count: shoots.length,
       });
     }
+    // Most active first
+    members.sort((a, b) => (b.task_count + b.ticket_count + b.shoot_count) - (a.task_count + a.ticket_count + a.shoot_count));
 
-    // Sort: most productive first
-    members.sort((a, b) => b.productive_seconds - a.productive_seconds);
-
-    // ── Summary ──
     const summary = {
+      journal_count: journals.length,
       member_count: members.length,
-      total_productive_seconds: members.reduce((s, m) => s + m.productive_seconds, 0),
-      submitted_count: members.filter(m => m.journal_submitted).length,
-      missing_count: members.filter(m => !m.journal_submitted).length,
-      target_met_count: members.filter(m => m.target_met === true).length,
-      below_target_count: members.filter(m => m.target_met === false).length,
-      escalations_total: members.reduce((s, m) => s + (m.escalations || 0), 0),
-      critical_count: members.filter(m => m.health_status === 'critical').length,
+      tasks_total: members.reduce((s, m) => s + m.task_count, 0),
+      tickets_total: members.reduce((s, m) => s + m.ticket_count, 0),
+      shoots_total: members.reduce((s, m) => s + m.shoot_count, 0),
+      escalations_total: journals.filter(j => j.escalation_required === 'yes').length,
+      critical_count: journals.filter(j => j.health_status === 'critical').length,
     };
 
-    return res.json({ date_from: dateFrom, date_to: dateTo, members, summary });
+    return res.json({ date_from: dateFrom, date_to: dateTo, journals, members, summary });
   } catch (err) {
-    console.error('Daily productivity report error:', err);
+    console.error('Daily report error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
 function emptyReportSummary() {
   return {
-    member_count: 0, total_productive_seconds: 0, submitted_count: 0, missing_count: 0,
-    target_met_count: 0, below_target_count: 0, escalations_total: 0, critical_count: 0,
+    journal_count: 0, member_count: 0, tasks_total: 0, tickets_total: 0,
+    shoots_total: 0, escalations_total: 0, critical_count: 0,
   };
 }
