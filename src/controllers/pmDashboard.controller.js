@@ -466,14 +466,81 @@ exports.getOverview = async (req, res) => {
       console.error('PM Dashboard coordinators query error:', err.message);
     }
 
-    // ── 9. TOP KPI CARDS AGGREGATION ──────────────────────────────────────
+    // ── 9. SLOT-LEVEL KPIs (content_calendar_posts) ───────────────────────
+    // These five drive the redesigned KPI cards. All are scoped to the same
+    // plans the dashboard already resolved above (respects coordinator/own scope).
+    let slotKpis = { due_today: 0, delayed: 0, pending_approval: 0, rejected: 0 };
+    try {
+      // Reuse the scoped plan ids from the projects query so the counts honour
+      // the coordinator / own-scope filter. If no plans matched, counts stay 0.
+      const scopedPlanIds = projects.map(p => p.plan_id).filter(Boolean);
+
+      if (scopedPlanIds.length > 0) {
+        const [slotRows] = await db.query(
+          `SELECT
+             SUM(CASE WHEN cp.posting_date = CURDATE()
+                       AND cp.slot_status NOT IN ('approved','completed')
+                      THEN 1 ELSE 0 END) AS due_today,
+             SUM(CASE WHEN cp.reschedule_reason IS NOT NULL AND cp.reschedule_reason <> ''
+                       AND cp.slot_status NOT IN ('approved','completed')
+                      THEN 1 ELSE 0 END) AS delayed,
+             SUM(CASE WHEN cp.slot_status IN ('submitted','smm_approved') THEN 1 ELSE 0 END) AS pending_approval,
+             SUM(CASE WHEN cp.slot_status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+           FROM content_calendar_posts cp
+           WHERE cp.plan_id IN (?)`,
+          [scopedPlanIds]
+        );
+        slotKpis = {
+          due_today: parseInt(slotRows[0]?.due_today, 10) || 0,
+          delayed: parseInt(slotRows[0]?.delayed, 10) || 0,
+          pending_approval: parseInt(slotRows[0]?.pending_approval, 10) || 0,
+          rejected: parseInt(slotRows[0]?.rejected, 10) || 0,
+        };
+      }
+    } catch (err) {
+      // reschedule_reason column may not exist yet — retry without it so the
+      // other counts still return instead of zeroing everything.
+      console.error('PM Dashboard slot KPI query error:', err.message);
+      try {
+        const scopedPlanIds = projects.map(p => p.plan_id).filter(Boolean);
+        if (scopedPlanIds.length > 0) {
+          const [slotRows] = await db.query(
+            `SELECT
+               SUM(CASE WHEN cp.posting_date = CURDATE()
+                         AND cp.slot_status NOT IN ('approved','completed')
+                        THEN 1 ELSE 0 END) AS due_today,
+               SUM(CASE WHEN cp.slot_status IN ('submitted','smm_approved') THEN 1 ELSE 0 END) AS pending_approval,
+               SUM(CASE WHEN cp.slot_status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+             FROM content_calendar_posts cp
+             WHERE cp.plan_id IN (?)`,
+            [scopedPlanIds]
+          );
+          slotKpis = {
+            due_today: parseInt(slotRows[0]?.due_today, 10) || 0,
+            delayed: 0,
+            pending_approval: parseInt(slotRows[0]?.pending_approval, 10) || 0,
+            rejected: parseInt(slotRows[0]?.rejected, 10) || 0,
+          };
+        }
+      } catch (e2) {
+        console.error('PM Dashboard slot KPI fallback error:', e2.message);
+      }
+    }
+
+    // ── 10. TOP KPI CARDS AGGREGATION ─────────────────────────────────────
     const kpis = {
+      // Card 1: Active content plans / projects
       active_projects: projects.length,
-      on_track: onTrackCount,
+      on_track: onTrackCount, // retained for Project Health section usage
+
+      // Cards 2–5: slot-level KPIs
+      due_today: slotKpis.due_today,                 // posts due today, not yet posted
+      delayed: slotKpis.delayed,                     // rescheduled posts still pending
+      pending_client_approval: slotKpis.pending_approval, // submitted / smm_approved
+      rejected: slotKpis.rejected,                   // sent back for rework
+
+      // retained for other dashboard sections (not shown as top cards anymore)
       at_risk: atRiskCount,
-      delayed: delayedCount,
-      due_today: dueTodayCount,
-      pending_client_approval: totalPendingApprovalSlots,
       open_issues: tickets.length,
       upcoming_shoots: upcomingShoots.length,
     };
@@ -545,6 +612,571 @@ exports.logClientFollowup = async (req, res) => {
     return res.json({ message: 'Follow-up logged successfully' });
   } catch (err) {
     console.error('Log client follow-up error:', err);
+    return res.status(500).json({ message: 'Server error: ' + err.message });
+  }
+};
+
+/**
+ * GET /api/pm-dashboard/sm-ops
+ * Returns all 7 SM Ops sections for the PC/PM dashboard:
+ *   1. approval_queue   — slots awaiting PC/PM final approval (submitted / smm_approved)
+ *   2. delayed_slots    — slots with a reschedule reason, still pending
+ *   3. rejected_slots   — slots currently in 'rejected' status
+ *   4. upcoming_shoots  — real shoot readiness from the standalone shoots table
+ *   5. ad_campaigns     — active / pending ad campaigns + whether a report is filed
+ *   6. daily_updates    — today's daily journal submissions + who hasn't filed
+ *   7. plan_progress    — per-plan slot progress across posts + shoots + ads
+ *
+ * Scope: honours the same coordinator_id / scope filters as /overview.
+ */
+exports.getSmOps = async (req, res) => {
+  try {
+    const userId   = req.user.id;
+    const isAdmin  = !!req.user.is_admin;
+    const { scope, coordinator_id } = req.query;
+
+    const filterUserId = coordinator_id
+      ? parseInt(coordinator_id, 10)
+      : (scope === 'own' && !isAdmin ? userId : null);
+
+    // ── Resolve scoped plan IDs (same logic as getOverview) ─────────────────
+    let planIds = [];
+    let planRows = [];
+    try {
+      let planWhere = 'p.deleted = 0';
+      const planParams = [];
+      if (filterUserId) {
+        planWhere += ' AND (p.created_by = ? OR p.project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))';
+        planParams.push(filterUserId, filterUserId);
+      }
+      const [rows] = await db.query(
+        `SELECT p.id, p.project_id, p.client_id, p.plan_month,
+                COALESCE(l.business_name, pr.title, 'Client Project') AS client_name,
+                COALESCE(pr.title, CONCAT('Plan #', p.id)) AS project_name
+         FROM content_calendar_plans p
+         LEFT JOIN projects pr ON pr.id = p.project_id
+         LEFT JOIN leads l     ON l.id  = p.client_id
+         WHERE ${planWhere}
+         ORDER BY p.plan_month DESC`,
+        planParams
+      );
+      planRows = rows;
+      planIds  = rows.map(r => r.id);
+    } catch (err) {
+      console.error('getSmOps plan query error:', err.message);
+    }
+
+    // Helper: build a plan lookup map { planId -> { client_name, project_name } }
+    const planMap = {};
+    planRows.forEach(p => { planMap[p.id] = { client_name: p.client_name, project_name: p.project_name, plan_month: p.plan_month }; });
+
+    if (planIds.length === 0) {
+      return res.json({
+        approval_queue: [], delayed_slots: [], rejected_slots: [],
+        upcoming_shoots: [], ad_campaigns: [], daily_updates: { submitted: [], not_submitted: [], summary: {} },
+        plan_progress: [],
+      });
+    }
+
+    // ── 1. APPROVAL QUEUE (submitted + smm_approved across all 3 types) ─────
+    let approvalQueue = [];
+    try {
+      // Posts
+      const [posts] = await db.query(
+        `SELECT cp.id, 'post' AS item_type, cp.plan_id,
+                cp.slot_status, cp.platform, cp.format, cp.topic AS title,
+                cp.posting_date AS scheduled_date,
+                cp.submitted_at, cp.smm_approved_at,
+                cp.assigned_to,
+                CONCAT(u.first_name,' ',u.last_name) AS owner_name,
+                u.avatar_url AS owner_avatar
+         FROM content_calendar_posts cp
+         LEFT JOIN users u ON u.id = cp.assigned_to
+         WHERE cp.plan_id IN (?) AND cp.slot_status IN ('submitted','smm_approved')
+         ORDER BY cp.submitted_at ASC`,
+        [planIds]
+      );
+
+      // Shoots
+      const [shoots] = await db.query(
+        `SELECT cs.id, 'shoot' AS item_type, cs.plan_id,
+                cs.slot_status, NULL AS platform, NULL AS format,
+                COALESCE(cs.description,'Shoot') AS title,
+                cs.shoot_date AS scheduled_date,
+                cs.submitted_at, cs.smm_approved_at,
+                cs.assigned_to,
+                CONCAT(u.first_name,' ',u.last_name) AS owner_name,
+                u.avatar_url AS owner_avatar
+         FROM content_calendar_shoots cs
+         LEFT JOIN users u ON u.id = cs.assigned_to
+         WHERE cs.plan_id IN (?) AND cs.slot_status IN ('submitted','smm_approved')
+         ORDER BY cs.submitted_at ASC`,
+        [planIds]
+      );
+
+      // Ads
+      const [ads] = await db.query(
+        `SELECT ca.id, 'ad' AS item_type, ca.plan_id,
+                ca.slot_status, ca.platform, NULL AS format,
+                COALESCE(ca.creative_name, ca.ad_no, 'Ad Slot') AS title,
+                ca.start_date AS scheduled_date,
+                ca.submitted_at, ca.smm_approved_at,
+                ca.assigned_to,
+                CONCAT(u.first_name,' ',u.last_name) AS owner_name,
+                u.avatar_url AS owner_avatar
+         FROM content_calendar_ads ca
+         LEFT JOIN users u ON u.id = ca.assigned_to
+         WHERE ca.plan_id IN (?) AND ca.slot_status IN ('submitted','smm_approved')
+         ORDER BY ca.submitted_at ASC`,
+        [planIds]
+      );
+
+      const all = [...posts, ...shoots, ...ads].map(r => {
+        const plan = planMap[r.plan_id] || {};
+        const waitingDays = r.submitted_at
+          ? Math.floor((Date.now() - new Date(r.submitted_at)) / 86400000)
+          : 0;
+        return { ...r, client_name: plan.client_name, project_name: plan.project_name, waiting_days: waitingDays };
+      });
+      // Sort: longest-waiting first
+      all.sort((a, b) => b.waiting_days - a.waiting_days);
+      approvalQueue = all;
+    } catch (err) {
+      console.error('getSmOps approvalQueue error:', err.message);
+    }
+
+    // ── 2. DELAYED / RESCHEDULED SLOTS ──────────────────────────────────────
+    let delayedSlots = [];
+    try {
+      const [posts] = await db.query(
+        `SELECT cp.id, 'post' AS item_type, cp.plan_id,
+                cp.platform, cp.format, cp.topic AS title,
+                cp.posting_date AS current_date_val,
+                cp.reschedule_reason,
+                cp.slot_status,
+                cp.assigned_to,
+                CONCAT(u.first_name,' ',u.last_name) AS owner_name
+         FROM content_calendar_posts cp
+         LEFT JOIN users u ON u.id = cp.assigned_to
+         WHERE cp.plan_id IN (?)
+           AND cp.reschedule_reason IS NOT NULL AND cp.reschedule_reason <> ''
+           AND cp.slot_status NOT IN ('approved','completed')`,
+        [planIds]
+      );
+      const [shoots] = await db.query(
+        `SELECT cs.id, 'shoot' AS item_type, cs.plan_id,
+                NULL AS platform, NULL AS format,
+                COALESCE(cs.description,'Shoot') AS title,
+                cs.shoot_date AS current_date_val,
+                cs.reschedule_reason,
+                cs.slot_status,
+                cs.assigned_to,
+                CONCAT(u.first_name,' ',u.last_name) AS owner_name
+         FROM content_calendar_shoots cs
+         LEFT JOIN users u ON u.id = cs.assigned_to
+         WHERE cs.plan_id IN (?)
+           AND cs.reschedule_reason IS NOT NULL AND cs.reschedule_reason <> ''
+           AND cs.slot_status NOT IN ('approved','completed')`,
+        [planIds]
+      );
+      const [ads] = await db.query(
+        `SELECT ca.id, 'ad' AS item_type, ca.plan_id,
+                ca.platform, NULL AS format,
+                COALESCE(ca.creative_name, ca.ad_no, 'Ad Slot') AS title,
+                ca.start_date AS current_date_val,
+                ca.reschedule_reason,
+                ca.slot_status,
+                ca.assigned_to,
+                CONCAT(u.first_name,' ',u.last_name) AS owner_name
+         FROM content_calendar_ads ca
+         LEFT JOIN users u ON u.id = ca.assigned_to
+         WHERE ca.plan_id IN (?)
+           AND ca.reschedule_reason IS NOT NULL AND ca.reschedule_reason <> ''
+           AND ca.slot_status NOT IN ('approved','completed')`,
+        [planIds]
+      );
+
+      // Fetch most-recent reschedule history for each item so we get old → new date
+      const allDelayed = [...posts, ...shoots, ...ads];
+      if (allDelayed.length > 0) {
+        const histKeys = allDelayed.map(r => `('${r.item_type}', ${r.id})`).join(',');
+        const [hist] = await db.query(
+          `SELECT h.item_type, h.item_id, h.old_date, h.new_date, h.reason,
+                  h.created_at,
+                  CONCAT(u.first_name,' ',u.last_name) AS rescheduled_by_name
+           FROM content_calendar_reschedule_history h
+           LEFT JOIN users u ON u.id = h.rescheduled_by
+           WHERE (h.item_type, h.item_id) IN (${histKeys})
+           ORDER BY h.created_at DESC`
+        ).catch(() => [[]]);
+
+        // Keep only the most recent reschedule per item
+        const histMap = {};
+        hist.forEach(h => {
+          const key = `${h.item_type}_${h.item_id}`;
+          if (!histMap[key]) histMap[key] = h;
+        });
+
+        delayedSlots = allDelayed.map(r => {
+          const plan = planMap[r.plan_id] || {};
+          const h = histMap[`${r.item_type}_${r.id}`];
+          return {
+            ...r,
+            client_name: plan.client_name,
+            project_name: plan.project_name,
+            old_date: h?.old_date || null,
+            new_date: h?.new_date || null,
+            rescheduled_by_name: h?.rescheduled_by_name || null,
+            rescheduled_at: h?.created_at || null,
+          };
+        });
+      }
+    } catch (err) {
+      console.error('getSmOps delayedSlots error:', err.message);
+    }
+
+    // ── 3. REJECTED / REWORK SLOTS ──────────────────────────────────────────
+    let rejectedSlots = [];
+    try {
+      const [posts] = await db.query(
+        `SELECT cp.id, 'post' AS item_type, cp.plan_id,
+                cp.platform, cp.format, cp.topic AS title,
+                cp.posting_date AS scheduled_date,
+                cp.rejection_reason, cp.slot_status,
+                cp.assigned_to,
+                CONCAT(u.first_name,' ',u.last_name) AS owner_name,
+                u.avatar_url AS owner_avatar
+         FROM content_calendar_posts cp
+         LEFT JOIN users u ON u.id = cp.assigned_to
+         WHERE cp.plan_id IN (?) AND cp.slot_status = 'rejected'`,
+        [planIds]
+      );
+      const [shoots] = await db.query(
+        `SELECT cs.id, 'shoot' AS item_type, cs.plan_id,
+                NULL AS platform, NULL AS format,
+                COALESCE(cs.description,'Shoot') AS title,
+                cs.shoot_date AS scheduled_date,
+                cs.rejection_reason, cs.slot_status,
+                cs.assigned_to,
+                CONCAT(u.first_name,' ',u.last_name) AS owner_name,
+                u.avatar_url AS owner_avatar
+         FROM content_calendar_shoots cs
+         LEFT JOIN users u ON u.id = cs.assigned_to
+         WHERE cs.plan_id IN (?) AND cs.slot_status = 'rejected'`,
+        [planIds]
+      );
+      const [ads] = await db.query(
+        `SELECT ca.id, 'ad' AS item_type, ca.plan_id,
+                ca.platform, NULL AS format,
+                COALESCE(ca.creative_name, ca.ad_no,'Ad Slot') AS title,
+                ca.start_date AS scheduled_date,
+                ca.rejection_reason, ca.slot_status,
+                ca.assigned_to,
+                CONCAT(u.first_name,' ',u.last_name) AS owner_name,
+                u.avatar_url AS owner_avatar
+         FROM content_calendar_ads ca
+         LEFT JOIN users u ON u.id = ca.assigned_to
+         WHERE ca.plan_id IN (?) AND ca.slot_status = 'rejected'`,
+        [planIds]
+      );
+
+      rejectedSlots = [...posts, ...shoots, ...ads].map(r => {
+        const plan = planMap[r.plan_id] || {};
+        return { ...r, client_name: plan.client_name, project_name: plan.project_name };
+      });
+    } catch (err) {
+      console.error('getSmOps rejectedSlots error:', err.message);
+    }
+
+    // ── 4. UPCOMING SHOOTS (real readiness, standalone shoots table) ─────────
+    let upcomingShoots = [];
+    try {
+      let shootWhere = 's.deleted = 0 AND s.shoot_date >= CURDATE() AND s.status NOT IN (\'completed\')';
+      const shootParams = [];
+      if (filterUserId) {
+        shootWhere += ' AND (s.shoot_manager_id = ? OR s.created_by = ?)';
+        shootParams.push(filterUserId, filterUserId);
+      }
+      const [rows] = await db.query(
+        `SELECT s.id, s.shoot_id_code, s.project_campaign_name,
+                s.shoot_date, s.reporting_time, s.start_time,
+                s.location_type, s.exact_address, s.city,
+                s.equipment_used, s.status,
+                s.photographers, s.videographers,
+                s.shoot_manager_id,
+                l.business_name AS client_name,
+                CONCAT(um.first_name,' ',um.last_name) AS shoot_manager_name,
+                um.avatar_url AS shoot_manager_avatar
+         FROM shoots s
+         LEFT JOIN leads l  ON l.id  = s.client_brand_id
+         LEFT JOIN users um ON um.id = s.shoot_manager_id
+         WHERE ${shootWhere}
+         ORDER BY s.shoot_date ASC, s.reporting_time ASC
+         LIMIT 25`,
+        shootParams
+      );
+
+      upcomingShoots = rows.map(s => {
+        const hasManager    = !!s.shoot_manager_name;
+        const hasLocation   = !!(s.exact_address || s.city || s.location_type);
+        const hasEquipment  = !!s.equipment_used;
+        let photographers   = [];
+        let videographers   = [];
+        try { photographers = s.photographers ? JSON.parse(s.photographers) : []; } catch { /* */ }
+        try { videographers = s.videographers ? JSON.parse(s.videographers) : []; } catch { /* */ }
+        const hasCrew       = hasManager || photographers.length > 0 || videographers.length > 0;
+
+        let readiness = 'ready';
+        const missing = [];
+        if (!hasCrew)     { readiness = 'not_ready'; missing.push('Crew'); }
+        if (!hasLocation) { readiness = 'not_ready'; missing.push('Location'); }
+        if (!hasEquipment && readiness !== 'not_ready') readiness = 'partial';
+
+        return {
+          id: s.id,
+          shoot_code: s.shoot_id_code || `SHT-${s.id}`,
+          client_name: s.client_name || s.project_campaign_name,
+          campaign_name: s.project_campaign_name,
+          shoot_date: s.shoot_date,
+          shoot_time: (s.reporting_time || s.start_time || ''),
+          location: s.city || s.exact_address || s.location_type || null,
+          shoot_manager: s.shoot_manager_name || null,
+          shoot_manager_avatar: s.shoot_manager_avatar || null,
+          has_equipment: hasEquipment,
+          crew_count: photographers.length + videographers.length + (hasManager ? 1 : 0),
+          status: s.status,
+          readiness,
+          missing_items: missing,
+        };
+      });
+    } catch (err) {
+      console.error('getSmOps upcomingShoots error:', err.message);
+    }
+
+    // ── 5. AD CAMPAIGNS ──────────────────────────────────────────────────────
+    let adCampaigns = [];
+    try {
+      let adWhere = 'ac.deleted = 0 AND ac.status NOT IN (\'completed\',\'rejected\')';
+      const adParams = [];
+      if (filterUserId) {
+        adWhere += ' AND (ac.created_by = ? OR ac.assigned_to = ? OR ac.project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))';
+        adParams.push(filterUserId, filterUserId, filterUserId);
+      }
+      const [rows] = await db.query(
+        `SELECT ac.id, ac.campaign_id_code, ac.campaign_name,
+                ac.platform, ac.objective, ac.budget,
+                ac.start_date, ac.end_date,
+                ac.status, ac.notes,
+                ac.assigned_to,
+                p.title AS project_name,
+                l.business_name AS client_name,
+                CONCAT(ua.first_name,' ',ua.last_name) AS assigned_to_name,
+                acr.id AS report_id,
+                acr.amount_spent,
+                acr.reach, acr.impressions, acr.clicks
+         FROM ad_campaigns ac
+         LEFT JOIN projects p   ON p.id  = ac.project_id
+         LEFT JOIN leads l      ON l.id  = p.client_id
+         LEFT JOIN users ua     ON ua.id = ac.assigned_to
+         LEFT JOIN ad_campaign_reports acr ON acr.campaign_id = ac.id
+         WHERE ${adWhere}
+         ORDER BY ac.created_at DESC
+         LIMIT 30`,
+        adParams
+      );
+      adCampaigns = rows.map(r => ({
+        ...r,
+        has_report: !!r.report_id,
+        days_running: r.start_date
+          ? Math.floor((Date.now() - new Date(r.start_date)) / 86400000)
+          : null,
+      }));
+    } catch (err) {
+      console.error('getSmOps adCampaigns error:', err.message);
+    }
+
+    // ── 6. DAILY UPDATES ─────────────────────────────────────────────────────
+    let dailyUpdates = { submitted: [], not_submitted: [], summary: {} };
+    try {
+      const today = new Date().toISOString().split('T')[0];
+
+      // Who are the SM Ops team members?
+      let memberIds = [];
+      try {
+        const [mRows] = await db.query(
+          `SELECT DISTINCT u.id
+           FROM users u
+           JOIN role_submenu_permissions rsp
+             ON rsp.role_id = u.role_id AND rsp.module = 'creative_hub' AND rsp.can_access >= 1
+           WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0`
+        );
+        memberIds = mRows.map(r => r.id);
+      } catch (_e) { /* table may not exist */ }
+
+      // Fallback to legacy table
+      if (memberIds.length === 0) {
+        try {
+          const [mRows] = await db.query(
+            `SELECT DISTINCT u.id FROM users u
+             JOIN role_social_permissions rsp ON rsp.role_id = u.role_id
+             WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
+               AND (rsp.content_calendar >= 1 OR rsp.content_writing >= 1 OR rsp.shoot_planning >= 1 OR rsp.ads_planning >= 1 OR rsp.daily_journal >= 1)`
+          );
+          memberIds = mRows.map(r => r.id);
+        } catch (_e2) { /* ignore */ }
+      }
+
+      if (memberIds.length > 0) {
+        // Who submitted today?
+        const [submitted] = await db.query(
+          `SELECT dj.id, dj.project_id, dj.submitted_by,
+                  dj.health_status, dj.escalation_required, dj.escalation_details,
+                  dj.client_communication,
+                  p.title AS project_name,
+                  CONCAT(u.first_name,' ',u.last_name) AS member_name,
+                  u.avatar_url AS member_avatar
+           FROM smm_daily_journal dj
+           LEFT JOIN projects p ON p.id = dj.project_id
+           LEFT JOIN users u    ON u.id = dj.submitted_by
+           WHERE dj.journal_date = ? AND dj.submitted_by IN (?)
+           ORDER BY dj.submitted_by`,
+          [today, memberIds]
+        );
+
+        const submittedIds = new Set(submitted.map(r => r.submitted_by));
+
+        // Who hasn't submitted?
+        const [members] = await db.query(
+          `SELECT u.id, CONCAT(u.first_name,' ',u.last_name) AS name,
+                  u.avatar_url, u.designation
+           FROM users u
+           WHERE u.id IN (?) ORDER BY u.first_name`,
+          [memberIds]
+        );
+
+        const notSubmitted = members.filter(m => !submittedIds.has(m.id));
+
+        dailyUpdates = {
+          submitted,
+          not_submitted: notSubmitted,
+          summary: {
+            total_members: memberIds.length,
+            submitted_count: submittedIds.size,
+            not_submitted_count: notSubmitted.length,
+            escalations: submitted.filter(s => s.escalation_required === 'yes').length,
+            critical: submitted.filter(s => s.health_status === 'critical').length,
+            attention_needed: submitted.filter(s => s.health_status === 'attention_needed').length,
+          },
+        };
+      }
+    } catch (err) {
+      console.error('getSmOps dailyUpdates error:', err.message);
+    }
+
+    // ── 7. PER-PLAN PROGRESS ─────────────────────────────────────────────────
+    let planProgress = [];
+    try {
+      // Post counts per plan
+      const [postStats] = await db.query(
+        `SELECT plan_id,
+                COUNT(*) AS total,
+                SUM(CASE WHEN slot_status = 'approved' OR slot_status = 'completed' THEN 1 ELSE 0 END) AS approved,
+                SUM(CASE WHEN slot_status IN ('submitted','smm_approved') THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN slot_status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                SUM(CASE WHEN slot_status = 'open' OR slot_status = 'assigned' THEN 1 ELSE 0 END) AS in_progress
+         FROM content_calendar_posts
+         WHERE plan_id IN (?)
+         GROUP BY plan_id`,
+        [planIds]
+      );
+      // Shoot counts per plan
+      const [shootStats] = await db.query(
+        `SELECT plan_id,
+                COUNT(*) AS total,
+                SUM(CASE WHEN slot_status = 'approved' OR slot_status = 'completed' THEN 1 ELSE 0 END) AS approved,
+                SUM(CASE WHEN slot_status IN ('submitted','smm_approved') THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN slot_status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                SUM(CASE WHEN slot_status = 'open' OR slot_status = 'assigned' THEN 1 ELSE 0 END) AS in_progress
+         FROM content_calendar_shoots
+         WHERE plan_id IN (?)
+         GROUP BY plan_id`,
+        [planIds]
+      );
+      // Ad counts per plan
+      const [adStats] = await db.query(
+        `SELECT plan_id,
+                COUNT(*) AS total,
+                SUM(CASE WHEN slot_status = 'approved' OR slot_status = 'completed' THEN 1 ELSE 0 END) AS approved,
+                SUM(CASE WHEN slot_status IN ('submitted','smm_approved') THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN slot_status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                SUM(CASE WHEN slot_status = 'open' OR slot_status = 'assigned' THEN 1 ELSE 0 END) AS in_progress
+         FROM content_calendar_ads
+         WHERE plan_id IN (?)
+         GROUP BY plan_id`,
+        [planIds]
+      );
+
+      // Merge into a plan-keyed map
+      const statsMap = {};
+      const merge = (rows, type) => {
+        rows.forEach(r => {
+          if (!statsMap[r.plan_id]) statsMap[r.plan_id] = { posts: {}, shoots: {}, ads: {} };
+          statsMap[r.plan_id][type] = {
+            total: Number(r.total) || 0,
+            approved: Number(r.approved) || 0,
+            pending: Number(r.pending) || 0,
+            rejected: Number(r.rejected) || 0,
+            in_progress: Number(r.in_progress) || 0,
+          };
+        });
+      };
+      merge(postStats, 'posts');
+      merge(shootStats, 'shoots');
+      merge(adStats, 'ads');
+
+      planProgress = planRows.map(p => {
+        const s = statsMap[p.id] || { posts: {}, shoots: {}, ads: {} };
+        const empty = { total: 0, approved: 0, pending: 0, rejected: 0, in_progress: 0 };
+        const posts  = s.posts  || empty;
+        const shoots = s.shoots || empty;
+        const ads    = s.ads    || empty;
+
+        const totalAll    = posts.total    + shoots.total    + ads.total;
+        const approvedAll = posts.approved + shoots.approved + ads.approved;
+        const pendingAll  = posts.pending  + shoots.pending  + ads.pending;
+        const rejectedAll = posts.rejected + shoots.rejected + ads.rejected;
+        const progress    = totalAll > 0 ? Math.round((approvedAll / totalAll) * 100) : 0;
+
+        return {
+          plan_id: p.id,
+          client_name: p.client_name,
+          project_name: p.project_name,
+          plan_month: p.plan_month,
+          total: totalAll,
+          approved: approvedAll,
+          pending: pendingAll,
+          rejected: rejectedAll,
+          progress,
+          posts,
+          shoots,
+          ads,
+        };
+      }).filter(p => p.total > 0); // only plans that have slots
+    } catch (err) {
+      console.error('getSmOps planProgress error:', err.message);
+    }
+
+    return res.json({
+      approval_queue: approvalQueue,
+      delayed_slots:  delayedSlots,
+      rejected_slots: rejectedSlots,
+      upcoming_shoots: upcomingShoots,
+      ad_campaigns:   adCampaigns,
+      daily_updates:  dailyUpdates,
+      plan_progress:  planProgress,
+    });
+  } catch (err) {
+    console.error('getSmOps fatal error:', err);
     return res.status(500).json({ message: 'Server error: ' + err.message });
   }
 };

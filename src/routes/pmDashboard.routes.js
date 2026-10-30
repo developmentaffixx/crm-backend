@@ -20,6 +20,9 @@ const checkPmDashboardAccess = (req, res, next) => {
 // GET /api/pm-dashboard/overview
 router.get('/overview', checkPmDashboardAccess, controller.getOverview);
 
+// GET /api/pm-dashboard/sm-ops  — 7 SM Ops sections
+router.get('/sm-ops', checkPmDashboardAccess, controller.getSmOps);
+
 // PUT /api/pm-dashboard/tasks/:id/status
 router.put('/tasks/:id/status', checkPmDashboardAccess, controller.updateTaskStatus);
 
