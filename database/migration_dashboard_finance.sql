@@ -1,25 +1,19 @@
 -- ============================================================
 -- Migration: Add dashboard_finance submenu permission
--- This allows assigning Finance Dashboard access to roles/users
--- via the existing submenu permission system.
+--
+-- Your system stores submenu access directly in
+-- role_submenu_permissions — no separate submenus table needed.
+--
+-- Run this ONE query to grant Finance Dashboard access
+-- to role_id = 1 (admin role). Adjust role_id as needed.
 -- ============================================================
 
--- 1. Insert the submenu definition (if a submenus registry table exists)
---    This is a no-op if your system reads submenu keys dynamically from
---    role_submenu_permissions / user_submenu_permissions directly.
---    Safe to run multiple times (INSERT IGNORE).
-
-INSERT IGNORE INTO submenus (module, submenu, label, sort_order)
-VALUES ('dashboard', 'dashboard_finance', 'Finance Dashboard', 30)
-ON DUPLICATE KEY UPDATE label = 'Finance Dashboard';
-
--- 2. Grant Finance Dashboard access to the Admin role (role_id = 1).
---    Adjust role_id if your admin role has a different ID.
 INSERT INTO role_submenu_permissions (role_id, module, submenu, can_access)
 VALUES (1, 'dashboard', 'dashboard_finance', 2)
 ON DUPLICATE KEY UPDATE can_access = 2;
 
--- Done. To grant access to other roles, run:
--- INSERT INTO role_submenu_permissions (role_id, module, submenu, can_access)
--- VALUES (<role_id>, 'dashboard', 'dashboard_finance', 1)
--- ON DUPLICATE KEY UPDATE can_access = 1;
+-- ============================================================
+-- After running this, you can also assign it to other roles
+-- via Settings → Roles → Dashboard → "Dashboard 3 (Finance)"
+-- (the option now appears in the UI automatically).
+-- ============================================================
