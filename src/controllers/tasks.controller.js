@@ -261,10 +261,11 @@ exports.list = async (req, res) => {
         )`;
         params.push(tid, tid, tid);
       }
-    } else if (req.user.is_admin) {
+    } else if (req.user.is_admin && !assigned_to) {
       // Admin default view: exclude tasks assigned to plain team members (role='member').
       // Show tasks assigned to: heads, teamless users, or tasks with no assignee.
-      // When admin picks a team filter above, this block is skipped.
+      // Skipped when: team_id filter is active (handled above) OR assigned_to filter is
+      // active (admin explicitly wants to see a specific person's tasks, including members).
       where += ` AND (
         t.assigned_to IS NULL
         OR NOT EXISTS (
@@ -403,8 +404,9 @@ exports.list = async (req, res) => {
         )`;
         summaryParams.push(tid, tid, tid);
       }
-    } else if (req.user.is_admin) {
+    } else if (req.user.is_admin && !assigned_to) {
       // Mirror the default admin exclusion: hide plain team member tasks in summary counts too.
+      // Skip when assigned_to is active — same reason as the main query above.
       summaryWhere += ` AND (
         t.assigned_to IS NULL
         OR NOT EXISTS (
