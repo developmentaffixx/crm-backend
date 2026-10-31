@@ -73,6 +73,7 @@ const quotationsRoutes       = require('./src/routes/quotations.routes');
 const smmDocumentsRoutes     = require('./src/routes/smmDocuments.routes');
 const pmDashboardRoutes      = require('./src/routes/pmDashboard.routes');
 const hrDashboardRoutes      = require('./src/routes/hrDashboard.routes');
+const financeDashboardRoutes = require('./src/routes/financeDashboard.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -176,6 +177,7 @@ app.use('/api/quotations',             quotationsRoutes);
 app.use('/api/smm-documents',          smmDocumentsRoutes);
 app.use('/api/pm-dashboard',           pmDashboardRoutes);
 app.use('/api/hr-dashboard',           hrDashboardRoutes);
+app.use('/api/finance-dashboard',      financeDashboardRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
 const { authenticate: authMiddleware } = require('./src/middleware/auth');
