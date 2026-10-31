@@ -251,6 +251,7 @@ exports.list = async (req, res) => {
       const tid = parseInt(team_id, 10);
       const allowedTeam = req.user.is_admin || teamScope.teamIds.includes(tid);
       if (allowedTeam && tid) {
+        // When a specific team is selected, show ALL tasks for that team's members (heads + members)
         where += ` AND (
           t.assigned_to IN (SELECT tm.user_id FROM team_members tm WHERE tm.team_id = ?)
           OR t.created_by IN (SELECT tm.user_id FROM team_members tm WHERE tm.team_id = ?)
@@ -260,6 +261,18 @@ exports.list = async (req, res) => {
         )`;
         params.push(tid, tid, tid);
       }
+    } else if (req.user.is_admin) {
+      // Admin default view: exclude tasks assigned to plain team members (role='member').
+      // Show tasks assigned to: heads, teamless users, or tasks with no assignee.
+      // When admin picks a team filter above, this block is skipped.
+      where += ` AND (
+        t.assigned_to IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM team_members tm_excl
+          JOIN teams t_excl ON t_excl.id = tm_excl.team_id AND t_excl.deleted = 0
+          WHERE tm_excl.user_id = t.assigned_to AND tm_excl.role = 'member'
+        )
+      )`;
     }
 
     // Search by title or description
@@ -390,6 +403,16 @@ exports.list = async (req, res) => {
         )`;
         summaryParams.push(tid, tid, tid);
       }
+    } else if (req.user.is_admin) {
+      // Mirror the default admin exclusion: hide plain team member tasks in summary counts too.
+      summaryWhere += ` AND (
+        t.assigned_to IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM team_members tm_excl
+          JOIN teams t_excl ON t_excl.id = tm_excl.team_id AND t_excl.deleted = 0
+          WHERE tm_excl.user_id = t.assigned_to AND tm_excl.role = 'member'
+        )
+      )`;
     }
 
     const [allRows] = await db.query(
