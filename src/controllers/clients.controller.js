@@ -595,6 +595,46 @@ exports.downloadFile = async (req, res) => {
 };
 
 /**
+ * GET /api/clients/:id/files/:fileId/info
+ * Diagnostic: returns DB record + disk existence check
+ */
+exports.fileInfo = async (req, res) => {
+  try {
+    const [file] = await db.query('SELECT * FROM client_files WHERE id = ? AND client_id = ?', [req.params.fileId, req.params.id]);
+    if (file.length === 0) {
+      // Also list all files for this client so we can see what IDs exist
+      const [allFiles] = await db.query('SELECT id, file_name, file_path FROM client_files WHERE client_id = ?', [req.params.id]);
+      return res.json({ found: false, clientId: req.params.id, fileId: req.params.fileId, allFilesForClient: allFiles });
+    }
+    const storedPath = file[0].file_path;
+    const existsAtStored = fs.existsSync(storedPath);
+
+    // Try fallback resolve
+    const uploadsIndex = storedPath.replace(/\\/g, '/').indexOf('/uploads/');
+    let resolvedPath = null;
+    let existsAtResolved = false;
+    if (uploadsIndex !== -1) {
+      const relative = storedPath.replace(/\\/g, '/').slice(uploadsIndex + 1);
+      resolvedPath = path.join(__dirname, '../../', relative);
+      existsAtResolved = fs.existsSync(resolvedPath);
+    }
+
+    return res.json({
+      found: true,
+      id: file[0].id,
+      file_name: file[0].file_name,
+      storedPath,
+      existsAtStored,
+      resolvedPath,
+      existsAtResolved,
+      __dirname,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/**
  * DELETE /api/clients/:id/files/:fileId
  */
 exports.deleteFile = async (req, res) => {

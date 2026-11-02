@@ -69,6 +69,9 @@ router.delete('/:id/folders/:folderId', clientsController.deleteFolder);
 // GET /api/clients/:id/files/:fileId/download — download a file
 router.get('/:id/files/:fileId/download', clientsController.downloadFile);
 
+// GET /api/clients/:id/files/:fileId/info — debug: check file record & disk path
+router.get('/:id/files/:fileId/info', clientsController.fileInfo);
+
 // POST /api/clients/:id/files         — upload files
 router.post('/:id/files', param('id').isInt(), upload.array('files', 10), clientsController.uploadFile);
 
