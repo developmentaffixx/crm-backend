@@ -562,12 +562,32 @@ exports.uploadFile = async (req, res) => {
 exports.downloadFile = async (req, res) => {
   try {
     const [file] = await db.query('SELECT * FROM client_files WHERE id = ? AND client_id = ?', [req.params.fileId, req.params.id]);
-    if (file.length === 0) return res.status(404).json({ message: 'File not found' });
+    if (file.length === 0) {
+      console.error(`downloadFile: no DB record for fileId=${req.params.fileId} clientId=${req.params.id}`);
+      return res.status(404).json({ message: 'File not found in database' });
+    }
 
     const filePath = file[0].file_path;
-    if (!fs.existsSync(filePath)) return res.status(404).json({ message: 'File not found on disk' });
+    console.log(`downloadFile: filePath from DB = "${filePath}"`);
 
-    res.download(filePath, file[0].file_name);
+    // Try the stored path first; if missing, attempt to resolve relative to uploads dir
+    let resolvedPath = filePath;
+    if (!fs.existsSync(resolvedPath)) {
+      // DB may store absolute path from a different environment — extract the relative part
+      const uploadsIndex = filePath.replace(/\\/g, '/').indexOf('/uploads/');
+      if (uploadsIndex !== -1) {
+        const relative = filePath.replace(/\\/g, '/').slice(uploadsIndex + 1); // e.g. uploads/clients/34/file.pdf
+        resolvedPath = path.join(__dirname, '../../', relative);
+        console.log(`downloadFile: resolved fallback path = "${resolvedPath}"`);
+      }
+    }
+
+    if (!fs.existsSync(resolvedPath)) {
+      console.error(`downloadFile: file not on disk. tried "${filePath}" and "${resolvedPath}"`);
+      return res.status(404).json({ message: 'File not found on disk', storedPath: filePath });
+    }
+
+    res.download(resolvedPath, file[0].file_name);
   } catch (err) {
     console.error('Download file error:', err);
     return res.status(500).json({ message: 'Server error' });
