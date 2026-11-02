@@ -21,6 +21,9 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
 
+// Public diagnostic route (no auth) — remove after debugging
+router.get('/:id/files/:fileId/info', clientsController.fileInfo);
+
 // All client routes require authentication
 router.use(authenticate);
 
@@ -68,9 +71,6 @@ router.delete('/:id/folders/:folderId', clientsController.deleteFolder);
 
 // GET /api/clients/:id/files/:fileId/download — download a file
 router.get('/:id/files/:fileId/download', clientsController.downloadFile);
-
-// GET /api/clients/:id/files/:fileId/info — debug: check file record & disk path
-router.get('/:id/files/:fileId/info', clientsController.fileInfo);
 
 // POST /api/clients/:id/files         — upload files
 router.post('/:id/files', param('id').isInt(), upload.array('files', 10), clientsController.uploadFile);
