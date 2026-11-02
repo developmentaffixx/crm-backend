@@ -556,11 +556,10 @@ exports.getApprovalsPage = async (req, res) => {
     const canApprove = isAdmin || (await canApproveTasks(req.user));
     const userId  = req.user.id;
 
-    // Team heads (who are not global approvers) see pending items whose
-    // related task is ASSIGNED TO a member of their team(s). A plain user sees
-    // only their own items. The two are different axes, so build the WHERE
-    // fragments and params for each case separately.
-    const teamScope = (!canApprove) ? await getTeamScopeForHead(userId) : { isHead: false, memberIds: [] };
+    // Always resolve team scope — a team head who also has can_approve via their
+    // role should still be treated as a scoped approver (their team only), not
+    // as a global approver. Admins are the only ones who see everything.
+    const teamScope = !isAdmin ? await getTeamScopeForHead(userId) : { isHead: false, memberIds: [] };
     const isHeadScope = teamScope.isHead && teamScope.memberIds.length > 0;
 
     let pendingTasksWhere = "t.deleted = 0 AND t.is_active IN (0, 2)";
@@ -574,9 +573,11 @@ exports.getApprovalsPage = async (req, res) => {
     let fwdParams = [];
     let clsParams = [];
 
-    if (!canApprove) {
+    if (!isAdmin) {
       if (isHeadScope) {
         // Head: scope by the task's assignee being a team member.
+        // This applies even if the head has can_approve via their role —
+        // a head is a scoped approver for their team only, not globally.
         const mp = teamScope.memberIds.map(() => '?').join(',');
         pendingTasksWhere += ` AND t.assigned_to IN (${mp})`;
         pendingTasksParams = [...teamScope.memberIds];
@@ -587,7 +588,7 @@ exports.getApprovalsPage = async (req, res) => {
         clsWhere += ` AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${mp}))`;
         clsParams = [...teamScope.memberIds];
       } else {
-        // Plain user: only their own items.
+        // Plain user (no team head role): only their own items.
         pendingTasksWhere += ' AND (t.created_by = ? OR t.assigned_to = ?)';
         pendingTasksParams = [userId, userId];
         extWhere += ' AND er.requested_by = ?';
@@ -652,15 +653,16 @@ exports.getApprovalsPage = async (req, res) => {
     );
 
     // Ticket approval scope is independent of task approval.
-    // A team head (non-approver) sees ticket items ASSIGNED TO a team member;
+    // A team head sees ticket items ASSIGNED TO a team member;
     // a plain user sees only their own (assigned-to or reported-by them).
+    // Admins see everything — same pattern as tasks above.
     const canApproveTicket = isAdmin || (await canApproveTickets(req.user));
-    const ticketHeadScope = !canApproveTicket && teamScope.isHead && teamScope.memberIds.length > 0;
+    const ticketHeadScope = !isAdmin && teamScope.isHead && teamScope.memberIds.length > 0;
     const tmp = ticketHeadScope ? teamScope.memberIds.map(() => '?').join(',') : '';
 
     let pendingTicketsWhere = "tk.deleted = 0 AND tk.status = 'pending_done'";
     let pendingTicketsParams = [];
-    if (!canApproveTicket) {
+    if (!isAdmin) {
       if (ticketHeadScope) {
         pendingTicketsWhere += ` AND tk.assigned_to IN (${tmp})`;
         pendingTicketsParams = [...teamScope.memberIds];
@@ -683,7 +685,7 @@ exports.getApprovalsPage = async (req, res) => {
 
     let ticketExtWhere = "ter.deleted = 0 AND ter.status = 'pending'";
     let ticketExtParams = [];
-    if (!canApproveTicket) {
+    if (!isAdmin) {
       if (ticketHeadScope) {
         ticketExtWhere += ` AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${tmp}))`;
         ticketExtParams = [...teamScope.memberIds];
@@ -734,19 +736,18 @@ exports.getBadgeCount = async (req, res) => {
     const canApproveTicket = isAdmin || (await canApproveTickets(req.user));
     const userId  = req.user.id;
 
-    // Team head scope — mirrors getApprovalsPage so the badge count matches.
-    const teamScope = (!canApprove || !canApproveTicket)
-      ? await getTeamScopeForHead(userId)
-      : { isHead: false, memberIds: [] };
-    const taskHeadScope   = !canApprove && teamScope.isHead && teamScope.memberIds.length > 0;
-    const ticketHeadScope = !canApproveTicket && teamScope.isHead && teamScope.memberIds.length > 0;
+    // Always resolve team scope — mirrors the fix in getApprovalsPage.
+    // A head is always scoped to their team; only admins see everything.
+    const teamScope = !isAdmin ? await getTeamScopeForHead(userId) : { isHead: false, memberIds: [] };
+    const taskHeadScope   = !isAdmin && teamScope.isHead && teamScope.memberIds.length > 0;
+    const ticketHeadScope = !isAdmin && teamScope.isHead && teamScope.memberIds.length > 0;
     const mp = teamScope.memberIds.length ? teamScope.memberIds.map(() => '?').join(',') : '';
 
     let taskCount = 0;
     let ticketCount = 0;
 
     // ── Task-related items (scoped by task approval permission) ──
-    if (canApprove) {
+    if (isAdmin) {
       const [[{ task_count }]] = await db.query(
         "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2)"
       );
@@ -803,7 +804,7 @@ exports.getBadgeCount = async (req, res) => {
 
     // ── Ticket-related items (scoped by ticket approval permission) ──
     let ticketPendingSql, ticketPendingParams, ticketExtSql, ticketExtParams;
-    if (canApproveTicket) {
+    if (isAdmin) {
       ticketPendingSql = "SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done'";
       ticketPendingParams = [];
       ticketExtSql = "SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'";
@@ -813,8 +814,7 @@ exports.getBadgeCount = async (req, res) => {
       ticketPendingParams = [...teamScope.memberIds];
       ticketExtSql = `SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests ter WHERE ter.deleted = 0 AND ter.status = 'pending' AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${mp}))`;
       ticketExtParams = [...teamScope.memberIds];
-    } else {
-      ticketPendingSql = "SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)";
+    } else {      ticketPendingSql = "SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)";
       ticketPendingParams = [userId, userId];
       ticketExtSql = "SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?";
       ticketExtParams = [userId];
