@@ -579,14 +579,20 @@ exports.downloadFile = async (req, res) => {
       ? storedPath.slice(uploadsIdx + 1)           // => uploads/clients/34/file.pdf
       : storedPath.replace(/^.*[/\\]uploads[/\\]/, 'uploads/'); // fallback
 
+    // Hostinger versioned builds: __dirname is inside hbuilds/versions/<hash>/nodejs/src/controllers
+    // but uploaded files live under the stable /nodejs/ path outside the versioned build.
+    // Strip everything from /hbuilds/ onwards to get the stable domain root.
+    const domainRoot = __dirname.replace(/\/hbuilds\/.*$/, ''); // => /home/.../deploy.affixxmedia.com
+
     // Build candidate paths to try in order
     const candidates = [
-      storedPath,                                                        // 1. exactly as stored
-      path.join(__dirname, '../../', relativePart),                      // 2. relative to backend/src/controllers/../../  => backend/
-      path.join(process.cwd(), relativePart),                            // 3. relative to cwd (where node was launched)
-      path.join(process.cwd(), 'uploads', 'clients', req.params.id,     // 4. reconstruct from filename only
+      storedPath,                                                                      // 1. exactly as stored
+      path.join(domainRoot, 'nodejs', relativePart),                                  // 2. stable domain/nodejs/uploads/... ← the correct one
+      path.join(domainRoot, 'nodejs', 'uploads', 'clients', req.params.id,            // 3. stable reconstructed from basename
         path.basename(storedPath)),
-      path.join(__dirname, '../../uploads', 'clients', req.params.id,   // 5. reconstruct relative to backend/
+      path.join(__dirname, '../../', relativePart),                                   // 4. relative to current versioned build
+      path.join(process.cwd(), relativePart),                                         // 5. relative to cwd
+      path.join(process.cwd(), 'uploads', 'clients', req.params.id,                  // 6. cwd reconstructed
         path.basename(storedPath)),
     ];
 
@@ -628,12 +634,15 @@ exports.fileInfo = async (req, res) => {
       ? storedPath.slice(uploadsIdx + 1)
       : storedPath.replace(/^.*[/\\]uploads[/\\]/, 'uploads/');
 
+    const domainRoot = __dirname.replace(/\/hbuilds\/.*$/, '');
+
     const candidates = [
       storedPath,
+      path.join(domainRoot, 'nodejs', relativePart),
+      path.join(domainRoot, 'nodejs', 'uploads', 'clients', req.params.id, path.basename(storedPath)),
       path.join(__dirname, '../../', relativePart),
       path.join(process.cwd(), relativePart),
       path.join(process.cwd(), 'uploads', 'clients', req.params.id, path.basename(storedPath)),
-      path.join(__dirname, '../../uploads', 'clients', req.params.id, path.basename(storedPath)),
     ];
 
     const results = candidates.map(c => ({ path: c, exists: fs.existsSync(c) }));
