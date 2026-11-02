@@ -563,31 +563,47 @@ exports.downloadFile = async (req, res) => {
   try {
     const [file] = await db.query('SELECT * FROM client_files WHERE id = ? AND client_id = ?', [req.params.fileId, req.params.id]);
     if (file.length === 0) {
-      console.error(`downloadFile: no DB record for fileId=${req.params.fileId} clientId=${req.params.id}`);
       return res.status(404).json({ message: 'File not found in database' });
     }
 
-    const filePath = file[0].file_path;
-    console.log(`downloadFile: filePath from DB = "${filePath}"`);
+    const storedPath = file[0].file_path.replace(/\\/g, '/');
+    const fileName = file[0].file_name;
 
-    // Try the stored path first; if missing, attempt to resolve relative to uploads dir
-    let resolvedPath = filePath;
-    if (!fs.existsSync(resolvedPath)) {
-      // DB may store absolute path from a different environment — extract the relative part
-      const uploadsIndex = filePath.replace(/\\/g, '/').indexOf('/uploads/');
-      if (uploadsIndex !== -1) {
-        const relative = filePath.replace(/\\/g, '/').slice(uploadsIndex + 1); // e.g. uploads/clients/34/file.pdf
-        resolvedPath = path.join(__dirname, '../../', relative);
-        console.log(`downloadFile: resolved fallback path = "${resolvedPath}"`);
+    // Extract just the relative part after /uploads/
+    // Handles paths like:
+    //   /home/u627061298/domains/.../nodejs/uploads/clients/34/file.pdf
+    //   uploads/clients/34/file.pdf
+    //   C:\path\to\backend\uploads\clients\34\file.pdf
+    const uploadsIdx = storedPath.indexOf('/uploads/');
+    const relativePart = uploadsIdx !== -1
+      ? storedPath.slice(uploadsIdx + 1)           // => uploads/clients/34/file.pdf
+      : storedPath.replace(/^.*[/\\]uploads[/\\]/, 'uploads/'); // fallback
+
+    // Build candidate paths to try in order
+    const candidates = [
+      storedPath,                                                        // 1. exactly as stored
+      path.join(__dirname, '../../', relativePart),                      // 2. relative to backend/src/controllers/../../  => backend/
+      path.join(process.cwd(), relativePart),                            // 3. relative to cwd (where node was launched)
+      path.join(process.cwd(), 'uploads', 'clients', req.params.id,     // 4. reconstruct from filename only
+        path.basename(storedPath)),
+      path.join(__dirname, '../../uploads', 'clients', req.params.id,   // 5. reconstruct relative to backend/
+        path.basename(storedPath)),
+    ];
+
+    let resolvedPath = null;
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        resolvedPath = candidate;
+        break;
       }
     }
 
-    if (!fs.existsSync(resolvedPath)) {
-      console.error(`downloadFile: file not on disk. tried "${filePath}" and "${resolvedPath}"`);
-      return res.status(404).json({ message: 'File not found on disk', storedPath: filePath });
+    if (!resolvedPath) {
+      console.error('downloadFile: file not found. tried:', candidates);
+      return res.status(404).json({ message: 'File not found on disk' });
     }
 
-    res.download(resolvedPath, file[0].file_name);
+    res.download(resolvedPath, fileName);
   } catch (err) {
     console.error('Download file error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -602,32 +618,34 @@ exports.fileInfo = async (req, res) => {
   try {
     const [file] = await db.query('SELECT * FROM client_files WHERE id = ? AND client_id = ?', [req.params.fileId, req.params.id]);
     if (file.length === 0) {
-      // Also list all files for this client so we can see what IDs exist
       const [allFiles] = await db.query('SELECT id, file_name, file_path FROM client_files WHERE client_id = ?', [req.params.id]);
       return res.json({ found: false, clientId: req.params.id, fileId: req.params.fileId, allFilesForClient: allFiles });
     }
-    const storedPath = file[0].file_path;
-    const existsAtStored = fs.existsSync(storedPath);
 
-    // Try fallback resolve
-    const uploadsIndex = storedPath.replace(/\\/g, '/').indexOf('/uploads/');
-    let resolvedPath = null;
-    let existsAtResolved = false;
-    if (uploadsIndex !== -1) {
-      const relative = storedPath.replace(/\\/g, '/').slice(uploadsIndex + 1);
-      resolvedPath = path.join(__dirname, '../../', relative);
-      existsAtResolved = fs.existsSync(resolvedPath);
-    }
+    const storedPath = file[0].file_path.replace(/\\/g, '/');
+    const uploadsIdx = storedPath.indexOf('/uploads/');
+    const relativePart = uploadsIdx !== -1
+      ? storedPath.slice(uploadsIdx + 1)
+      : storedPath.replace(/^.*[/\\]uploads[/\\]/, 'uploads/');
+
+    const candidates = [
+      storedPath,
+      path.join(__dirname, '../../', relativePart),
+      path.join(process.cwd(), relativePart),
+      path.join(process.cwd(), 'uploads', 'clients', req.params.id, path.basename(storedPath)),
+      path.join(__dirname, '../../uploads', 'clients', req.params.id, path.basename(storedPath)),
+    ];
+
+    const results = candidates.map(c => ({ path: c, exists: fs.existsSync(c) }));
 
     return res.json({
       found: true,
       id: file[0].id,
       file_name: file[0].file_name,
       storedPath,
-      existsAtStored,
-      resolvedPath,
-      existsAtResolved,
       __dirname,
+      cwd: process.cwd(),
+      candidates: results,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
