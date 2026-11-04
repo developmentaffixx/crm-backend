@@ -63,6 +63,18 @@ router.use(authenticate);
 // GET  /api/tickets/stats   — dashboard stats
 router.get('/stats', ticketsController.stats);
 
+// GET  /api/tickets/filter-users — users the viewer may filter by (team-aware)
+router.get('/filter-users', ticketsController.filterUsers);
+
+// GET  /api/tickets/pinned  — get current user's pinned tickets
+router.get('/pinned', ticketsController.getPinnedTickets);
+
+// POST /api/tickets/:id/pin  — pin a ticket (max 3 per user)
+router.post('/:id/pin', param('id').isInt(), ticketsController.pinTicket);
+
+// DELETE /api/tickets/:id/pin — unpin a ticket
+router.delete('/:id/pin', param('id').isInt(), ticketsController.unpinTicket);
+
 // GET  /api/tickets/my-active-timer — get current user's running ticket timer
 router.get('/my-active-timer', ticketsController.getMyActiveTimer);
 

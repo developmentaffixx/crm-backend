@@ -568,32 +568,17 @@ exports.downloadFile = async (req, res) => {
 
     const storedPath = file[0].file_path.replace(/\\/g, '/');
     const fileName = file[0].file_name;
+    const basename = path.basename(storedPath);
 
-    // Extract just the relative part after /uploads/
-    // Handles paths like:
-    //   /home/u627061298/domains/.../nodejs/uploads/clients/34/file.pdf
-    //   uploads/clients/34/file.pdf
-    //   C:\path\to\backend\uploads\clients\34\file.pdf
-    const uploadsIdx = storedPath.indexOf('/uploads/');
-    const relativePart = uploadsIdx !== -1
-      ? storedPath.slice(uploadsIdx + 1)           // => uploads/clients/34/file.pdf
-      : storedPath.replace(/^.*[/\\]uploads[/\\]/, 'uploads/'); // fallback
+    // UPLOADS_DIR env var = stable path outside Hostinger versioned builds
+    // e.g. /home/u627061298/domains/deploy.affixxmedia.com/nodejs/uploads
+    const uploadsBase = process.env.UPLOADS_DIR || path.join(__dirname, '../../uploads');
 
-    // Hostinger versioned builds: __dirname is inside hbuilds/versions/<hash>/nodejs/src/controllers
-    // but uploaded files live under the stable /nodejs/ path outside the versioned build.
-    // Strip everything from /hbuilds/ onwards to get the stable domain root.
-    const domainRoot = __dirname.replace(/\/hbuilds\/.*$/, ''); // => /home/.../deploy.affixxmedia.com
-
-    // Build candidate paths to try in order
     const candidates = [
-      storedPath,                                                                      // 1. exactly as stored
-      path.join(domainRoot, 'nodejs', relativePart),                                  // 2. stable domain/nodejs/uploads/... ← the correct one
-      path.join(domainRoot, 'nodejs', 'uploads', 'clients', req.params.id,            // 3. stable reconstructed from basename
-        path.basename(storedPath)),
-      path.join(__dirname, '../../', relativePart),                                   // 4. relative to current versioned build
-      path.join(process.cwd(), relativePart),                                         // 5. relative to cwd
-      path.join(process.cwd(), 'uploads', 'clients', req.params.id,                  // 6. cwd reconstructed
-        path.basename(storedPath)),
+      storedPath,                                                                    // 1. exactly as stored in DB
+      path.join(uploadsBase, 'clients', req.params.id, basename),                   // 2. stable env-var path ← correct for Hostinger
+      path.join(__dirname, '../../uploads', 'clients', req.params.id, basename),    // 3. relative to current build
+      path.join(process.cwd(), 'uploads', 'clients', req.params.id, basename),      // 4. relative to cwd
     ];
 
     let resolvedPath = null;

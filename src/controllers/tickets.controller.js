@@ -48,11 +48,53 @@ async function isTicketAssignee(ticketId, userId) {
 }
 
 /**
+ * GET /api/tickets/filter-users
+ * Returns users the viewer may filter the ticket list by (mirrors tasks filterUsers).
+ *   - Admin → all active users
+ *   - Team head → only their team members
+ *   - Otherwise → just themselves
+ */
+exports.filterUsers = async (req, res) => {
+  try {
+    const allActive = () =>
+      db.query(
+        `SELECT id, first_name, last_name, avatar_url
+           FROM users
+          WHERE deleted = 0 AND is_active = 1
+          ORDER BY first_name, last_name`
+      ).then(([rows]) => rows);
+
+    if (req.user.is_admin) return res.json(await allActive());
+
+    const teamScope = await getTeamScopeForHead(req.user.id);
+    if (teamScope.isHead && teamScope.memberIds.length > 0) {
+      const [rows] = await db.query(
+        `SELECT id, first_name, last_name, avatar_url
+           FROM users
+          WHERE id IN (?) AND deleted = 0
+          ORDER BY first_name, last_name`,
+        [teamScope.memberIds]
+      );
+      return res.json(rows);
+    }
+
+    const [self] = await db.query(
+      'SELECT id, first_name, last_name, avatar_url FROM users WHERE id = ?',
+      [req.user.id]
+    );
+    return res.json(self);
+  } catch (err) {
+    console.error('Ticket filter-users error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * GET /api/tickets
  */
 exports.list = async (req, res) => {
   try {
-    const { mode, status, priority, ticket_type, related_to_type, search } = req.query;
+    const { mode, status, priority, ticket_type, related_to_type, search, assigned_to, team_id } = req.query;
 
     // ── Pagination ──
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -113,6 +155,41 @@ exports.list = async (req, res) => {
       }
     }
 
+    // ── assigned_to filter (primary or collaborator) ──
+    if (assigned_to) {
+      baseWhere += ` AND (t.assigned_to = ? OR EXISTS (
+        SELECT 1 FROM ticket_assignees ta_f WHERE ta_f.ticket_id = t.id AND ta_f.user_id = ?
+      ))`;
+      baseParams.push(assigned_to, assigned_to);
+    }
+
+    // ── team_id filter / admin default exclusion (mirrors tasks module) ──
+    if (team_id) {
+      const tid = parseInt(team_id, 10);
+      const teamScope2 = req.user.is_admin ? { teamIds: [] } : await getTeamScopeForHead(req.user.id);
+      const allowedTeam = req.user.is_admin || (teamScope2.teamIds || []).includes(tid);
+      if (allowedTeam && tid) {
+        baseWhere += ` AND (
+          t.assigned_to IN (SELECT tm.user_id FROM team_members tm WHERE tm.team_id = ?)
+          OR EXISTS (SELECT 1 FROM ticket_assignees ta_tf
+                     JOIN team_members tm2 ON tm2.user_id = ta_tf.user_id
+                     WHERE ta_tf.ticket_id = t.id AND tm2.team_id = ?)
+        )`;
+        baseParams.push(tid, tid);
+      }
+    } else if (req.user.is_admin && !assigned_to) {
+      // Admin default: hide tickets assigned to plain team members (role='member').
+      // Mirrors tasks admin exclusion. Bypassed when team_id or assigned_to is active.
+      baseWhere += ` AND (
+        t.assigned_to IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM team_members tm_excl
+          JOIN teams t_excl ON t_excl.id = tm_excl.team_id AND t_excl.deleted = 0
+          WHERE tm_excl.user_id = t.assigned_to AND tm_excl.role = 'member'
+        )
+      )`;
+    }
+
     // Cycle filter (paused/skipped/completed cycles hidden from the list)
     baseWhere += ` AND NOT (
       t.project_id IS NOT NULL AND EXISTS (
@@ -130,14 +207,18 @@ exports.list = async (req, res) => {
       where += ' AND t.status = ?';
       params.push(status);
     } else if (req.query.exclude_closed) {
-      // Default list view hides closed tickets
-      where += " AND t.status != 'closed'";
+      // Default list view hides closed AND resolved tickets (mirrors tasks hiding 'done')
+      where += " AND t.status NOT IN ('closed', 'resolved')";
     }
 
     // ── Paged rows ──
     const [rows] = await db.query(
       `SELECT t.*,
+              COALESCE((SELECT SUM(tl.duration) FROM ticket_time_logs tl WHERE tl.ticket_id = t.id), 0) AS time_spent,
               CONCAT(u_assigned.first_name, ' ', u_assigned.last_name) AS assigned_to_name,
+              u_assigned.avatar_url AS assigned_to_avatar,
+              u_assigned.first_name AS assigned_to_first_name,
+              u_assigned.last_name AS assigned_to_last_name,
               CONCAT(u_reported.first_name, ' ', u_reported.last_name) AS reported_by_name,
               p.title AS project_title,
               cl.business_name AS client_brand_name
@@ -157,7 +238,8 @@ exports.list = async (req, res) => {
     if (ticketIds.length > 0) {
       const [assigneeRows] = await db.query(
         `SELECT ta.ticket_id, ta.user_id, ta.role,
-                CONCAT(u.first_name, ' ', u.last_name) AS name
+                CONCAT(u.first_name, ' ', u.last_name) AS name,
+                u.avatar_url AS avatar
          FROM ticket_assignees ta
          JOIN users u ON u.id = ta.user_id
          WHERE ta.ticket_id IN (?)`,
@@ -166,7 +248,7 @@ exports.list = async (req, res) => {
       const assigneesMap = {};
       for (const a of assigneeRows) {
         if (!assigneesMap[a.ticket_id]) assigneesMap[a.ticket_id] = [];
-        assigneesMap[a.ticket_id].push({ user_id: a.user_id, role: a.role, name: a.name });
+        assigneesMap[a.ticket_id].push({ user_id: a.user_id, role: a.role, name: a.name, avatar: a.avatar });
       }
       for (const t of rows) t.assignees = assigneesMap[t.id] || [];
     }
@@ -1476,6 +1558,91 @@ exports.getExtensionRequests = async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error('Ticket getExtensionRequests error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TICKET PINS (per-user, max 3) — mirrors task_pins
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/tickets/pinned
+ * Returns the current user's pinned tickets (full ticket data).
+ */
+exports.getPinnedTickets = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT t.id, t.ticket_id_code, t.title, t.status, t.priority, t.due_date,
+              t.assigned_to,
+              CONCAT(u_assigned.first_name, ' ', u_assigned.last_name) AS assigned_to_name,
+              u_assigned.avatar_url AS assigned_to_avatar,
+              u_assigned.first_name AS assigned_to_first_name,
+              u_assigned.last_name AS assigned_to_last_name,
+              tp.pinned_at
+       FROM ticket_pins tp
+       JOIN tickets t ON t.id = tp.ticket_id AND t.deleted = 0
+       LEFT JOIN users u_assigned ON u_assigned.id = t.assigned_to
+       WHERE tp.user_id = ?
+       ORDER BY tp.pinned_at DESC`,
+      [req.user.id]
+    );
+    return res.json({ pinned: rows });
+  } catch (err) {
+    console.error('Get pinned tickets error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/tickets/:id/pin
+ * Pin a ticket for the current user (max 3 pins).
+ */
+exports.pinTicket = async (req, res) => {
+  try {
+    const ticketId = req.params.id;
+    const [ticket] = await db.query('SELECT id FROM tickets WHERE id = ? AND deleted = 0', [ticketId]);
+    if (ticket.length === 0) return res.status(404).json({ message: 'Ticket not found' });
+
+    const [[{ count }]] = await db.query(
+      'SELECT COUNT(*) AS count FROM ticket_pins WHERE user_id = ?',
+      [req.user.id]
+    );
+    if (count >= 3) {
+      return res.status(400).json({ message: 'Maximum 3 pinned tickets allowed. Unpin a ticket first.' });
+    }
+
+    const [existing] = await db.query(
+      'SELECT id FROM ticket_pins WHERE user_id = ? AND ticket_id = ?',
+      [req.user.id, ticketId]
+    );
+    if (existing.length > 0) {
+      return res.status(400).json({ message: 'Ticket is already pinned' });
+    }
+
+    await db.query('INSERT INTO ticket_pins (user_id, ticket_id) VALUES (?, ?)', [req.user.id, ticketId]);
+    return res.json({ message: 'Ticket pinned', ticket_id: Number(ticketId) });
+  } catch (err) {
+    console.error('Pin ticket error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * DELETE /api/tickets/:id/pin
+ * Unpin a ticket for the current user.
+ */
+exports.unpinTicket = async (req, res) => {
+  try {
+    const ticketId = req.params.id;
+    const [result] = await db.query(
+      'DELETE FROM ticket_pins WHERE user_id = ? AND ticket_id = ?',
+      [req.user.id, ticketId]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Pin not found' });
+    return res.json({ message: 'Ticket unpinned', ticket_id: Number(ticketId) });
+  } catch (err) {
+    console.error('Unpin ticket error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

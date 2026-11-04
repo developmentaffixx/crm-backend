@@ -59,6 +59,18 @@ async function ensureTeamTables() {
       SELECT id, assigned_to, 'primary' FROM tickets WHERE deleted = 0 AND assigned_to IS NOT NULL
     `);
 
+    // ── Ticket pins (per-user, max 3) ──────────────────────────────────────
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS ticket_pins (
+        id        INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        user_id   INT UNSIGNED NOT NULL,
+        ticket_id INT UNSIGNED NOT NULL,
+        pinned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_user_ticket_pin (user_id, ticket_id),
+        INDEX idx_ticket_pins_user (user_id)
+      ) ENGINE=InnoDB
+    `);
+
     console.log('[teams] tables verified/created');
   } catch (err) {
     console.error('[teams] ensureTeamTables failed:', err.code, err.errno, err.message);

@@ -8,18 +8,10 @@ const { authenticate } = require('../middleware/auth');
 const clientsController = require('../controllers/clients.controller');
 
 // Multer config for client file uploads
-// Use stable upload path outside versioned Hostinger builds
-const UPLOADS_BASE = (() => {
-  // In Hostinger: __dirname is inside hbuilds/versions/<hash>/nodejs/src/routes
-  // Stable uploads should live at domain/nodejs/uploads/ (outside versioned builds)
-  const domainRoot = __dirname.replace(/\/hbuilds\/.*$/, '');
-  const stablePath = path.join(domainRoot, 'nodejs', 'uploads');
-  // If we stripped something (i.e. we're in a Hostinger versioned build), use stable path
-  // Otherwise fall back to relative uploads next to the app
-  return stablePath !== path.join(__dirname, 'uploads')
-    ? stablePath
-    : path.join(__dirname, '../../uploads');
-})();
+// UPLOADS_DIR env var must be set on the server to a path that persists across deployments.
+// On Hostinger: set UPLOADS_DIR=/home/u627061298/domains/deploy.affixxmedia.com/nodejs/uploads
+// Locally: falls back to backend/uploads/
+const UPLOADS_BASE = process.env.UPLOADS_DIR || path.join(__dirname, '../../uploads');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
