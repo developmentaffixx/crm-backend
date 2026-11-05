@@ -301,7 +301,7 @@ exports.clockOut = async (req, res) => {
        WHERE tk.assigned_to = ?
          AND tk.due_date IS NOT NULL
          AND tk.due_date <= CURDATE()
-         AND tk.status NOT IN ('resolved', 'closed')
+         AND tk.status NOT IN ('resolved', 'closed', 'pending_done')
          AND tk.deleted = 0
          AND NOT EXISTS (
            SELECT 1 FROM ticket_deadline_extension_requests ter
@@ -1884,13 +1884,14 @@ exports.checkOverdueTasks = async (req, res) => {
              SELECT 1 FROM ticket_deadline_extension_requests ter
              WHERE ter.ticket_id = tk.id AND ter.status = 'pending' AND ter.deleted = 0
            ) THEN 'extension'
+           WHEN tk.status = 'pending_done' THEN 'mark_done'
            ELSE NULL
          END AS pending_request_type
        FROM tickets tk
        WHERE tk.assigned_to = ?
          AND tk.due_date IS NOT NULL
          AND tk.due_date <= CURDATE()
-         AND tk.status NOT IN ('resolved', 'closed')
+         AND tk.status NOT IN ('resolved', 'closed', 'pending_done')
          AND tk.deleted = 0
          AND NOT EXISTS (
            SELECT 1 FROM ticket_deadline_extension_requests ter

@@ -150,6 +150,12 @@ router.delete(
   ticketsController.removeAttachment
 );
 
+// POST /api/tickets/:id/reopen  — admin or ticket approver reopens resolved ticket
+router.post('/:id/reopen', param('id').isInt(), requireAdminOrTicketApprove, ticketsController.reopen);
+
+// GET /api/tickets/:id/activity  — full activity log
+router.get('/:id/activity', param('id').isInt(), ticketsController.getActivity);
+
 // ── Mark as Done / Approve / Reject ──────────────────────────────────────────
 
 // POST /api/tickets/:id/mark-done  — assigned user or reporter marks ticket done (pending approval)

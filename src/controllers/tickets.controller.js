@@ -110,8 +110,13 @@ exports.list = async (req, res) => {
       title: 't.title',
       ticket_id_code: 't.ticket_id_code',
     };
-    const sortBy = SORT_COLUMNS[req.query.sort_by] || SORT_COLUMNS.created_at;
+    const sortBy = SORT_COLUMNS[req.query.sort_by] || SORT_COLUMNS.due_date;
     const sortOrder = String(req.query.sort_order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    // When sorting by due_date, push NULLs to the bottom regardless of direction
+    const orderClause = (req.query.sort_by === 'due_date' || !req.query.sort_by)
+      ? `t.due_date IS NULL, t.due_date ${sortOrder}`
+      : `${sortBy} ${sortOrder}`;
 
     // ── Base filters shared by the list, count, and summary ──
     // `baseWhere` excludes the status filter so the summary reflects every
@@ -228,7 +233,7 @@ exports.list = async (req, res) => {
        LEFT JOIN projects p ON p.id = t.project_id
        LEFT JOIN leads cl ON cl.id = t.related_to_id AND t.related_to_type = 'client'
        WHERE ${where}
-       ORDER BY ${sortBy} ${sortOrder}, t.id DESC
+       ORDER BY ${orderClause}, t.id DESC
        LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );
@@ -1558,6 +1563,73 @@ exports.getExtensionRequests = async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error('Ticket getExtensionRequests error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REOPEN (admin / approver reopens a resolved ticket)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/tickets/:id/reopen
+ * Admin or ticket approver reopens a resolved ticket → back to in_progress.
+ */
+exports.reopen = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM tickets WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Ticket not found' });
+
+    const ticket = rows[0];
+
+    if (ticket.status !== 'resolved') {
+      return res.status(400).json({ message: 'Only resolved tickets can be reopened' });
+    }
+
+    const reason = (req.body.reason || '').trim() || null;
+
+    await db.query(
+      "UPDATE tickets SET status = 'in_progress', resolved_at = NULL WHERE id = ?",
+      [ticket.id]
+    );
+
+    await db.query(
+      `INSERT INTO ticket_activity_log (ticket_id, user_id, action, old_value, new_value, comment)
+       VALUES (?, ?, 'status_change', 'resolved', 'in_progress', ?)`,
+      [ticket.id, req.user.id, reason ? `Reopened: ${reason}` : 'Ticket reopened by admin']
+    );
+
+    const [updated] = await db.query('SELECT * FROM tickets WHERE id = ?', [ticket.id]);
+    res.emitSocket('tickets:updated', updated[0]);
+    return res.json(updated[0]);
+  } catch (err) {
+    console.error('Ticket reopen error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIVITY LOG (dedicated endpoint — mirrors GET /api/tasks/:id/activity)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/tickets/:id/activity
+ */
+exports.getActivity = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT al.id, al.action, al.old_value, al.new_value, al.comment,
+              al.created_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name
+       FROM ticket_activity_log al
+       LEFT JOIN users u ON u.id = al.user_id
+       WHERE al.ticket_id = ?
+       ORDER BY al.created_at DESC`,
+      [req.params.id]
+    );
+    return res.json({ activity: rows });
+  } catch (err) {
+    console.error('Ticket getActivity error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
