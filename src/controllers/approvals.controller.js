@@ -576,6 +576,17 @@ exports.getApprovalsPage = async (req, res) => {
     let fwdParams = [];
     let clsParams = [];
 
+    // Subquery fragment: excludes tasks assigned to plain team members (role='member').
+    // Used for the admin default view — same logic as the Tasks list page.
+    const excludeMembersFragment = `(
+        t.assigned_to IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM team_members tm_excl
+          JOIN teams t_excl ON t_excl.id = tm_excl.team_id AND t_excl.deleted = 0
+          WHERE tm_excl.user_id = t.assigned_to AND tm_excl.role = 'member'
+        )
+      )`;
+
     if (isAdmin && filterMemberId) {
       // Admin filtered to a specific member: scope all queries to that user.
       pendingTasksWhere += ' AND (t.assigned_to = ? OR t.created_by = ?)';
@@ -586,6 +597,13 @@ exports.getApprovalsPage = async (req, res) => {
       fwdParams = [filterMemberId, filterMemberId];
       clsWhere += ' AND cr.requested_by = ?';
       clsParams = [filterMemberId];
+    } else if (isAdmin) {
+      // Admin default view: hide tasks assigned to plain team members — show heads/teamless only.
+      pendingTasksWhere += ` AND ${excludeMembersFragment}`;
+      // For ext/fwd/cls: join back to the task to apply the same assignee filter.
+      extWhere += ` AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND ${excludeMembersFragment.replace(/\bt\./g, 'te.')})`;
+      fwdWhere += ` AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND ${excludeMembersFragment.replace(/\bt\./g, 'tf.')})`;
+      clsWhere += ` AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND ${excludeMembersFragment.replace(/\bt\./g, 'tc.')})`;
     } else if (!isAdmin) {
       if (isHeadScope) {
         // Head: scope by the task's assignee being a team member.
@@ -612,8 +630,7 @@ exports.getApprovalsPage = async (req, res) => {
         clsParams = [userId];
       }
     }
-    // else: isAdmin && !filterMemberId → no extra WHERE, see everything (default heads-only view
-    // is enforced by the frontend filter; backend returns all for admins without a filter)
+    // else: isAdmin && !filterMemberId → apply heads-only filter above (excludeMembersFragment)
 
     const scopeParams2 = pendingTasksParams;
     const scopeParams1 = extParams;
@@ -680,6 +697,16 @@ exports.getApprovalsPage = async (req, res) => {
     if (isAdmin && filterMemberId) {
       pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
       pendingTicketsParams = [filterMemberId, filterMemberId];
+    } else if (isAdmin) {
+      // Admin default: exclude tickets assigned to plain team members
+      pendingTicketsWhere += ` AND (
+        tk.assigned_to IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM team_members tm_excl
+          JOIN teams t_excl ON t_excl.id = tm_excl.team_id AND t_excl.deleted = 0
+          WHERE tm_excl.user_id = tk.assigned_to AND tm_excl.role = 'member'
+        )
+      )`;
     } else if (!isAdmin) {
       if (ticketHeadScope) {
         pendingTicketsWhere += ` AND tk.assigned_to IN (${tmp})`;
@@ -706,6 +733,20 @@ exports.getApprovalsPage = async (req, res) => {
     if (isAdmin && filterMemberId) {
       ticketExtWhere += ' AND ter.requested_by = ?';
       ticketExtParams = [filterMemberId];
+    } else if (isAdmin) {
+      // Admin default: exclude extensions on tickets assigned to plain team members
+      ticketExtWhere += ` AND EXISTS (
+        SELECT 1 FROM tickets tke
+        WHERE tke.id = ter.ticket_id
+          AND (
+            tke.assigned_to IS NULL
+            OR NOT EXISTS (
+              SELECT 1 FROM team_members tm_excl
+              JOIN teams t_excl ON t_excl.id = tm_excl.team_id AND t_excl.deleted = 0
+              WHERE tm_excl.user_id = tke.assigned_to AND tm_excl.role = 'member'
+            )
+          )
+      )`;
     } else if (!isAdmin) {
       if (ticketHeadScope) {
         ticketExtWhere += ` AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${tmp}))`;
