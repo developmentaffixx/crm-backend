@@ -547,7 +547,7 @@ exports.cancelForward = async (req, res) => {
 
 /**
  * GET /api/approvals
- * Admin: all pending items across all users.
+ * Admin: all pending items across all users (default: heads only; use ?member_id= to filter by a specific user).
  * Team member: only their own requests.
  */
 exports.getApprovalsPage = async (req, res) => {
@@ -555,6 +555,9 @@ exports.getApprovalsPage = async (req, res) => {
     const isAdmin = req.user.is_admin;
     const canApprove = isAdmin || (await canApproveTasks(req.user));
     const userId  = req.user.id;
+
+    // Admin can pass ?member_id=X to scope the view to a specific member's requests.
+    const filterMemberId = isAdmin && req.query.member_id ? parseInt(req.query.member_id, 10) : null;
 
     // Always resolve team scope — a team head who also has can_approve via their
     // role should still be treated as a scoped approver (their team only), not
@@ -573,7 +576,17 @@ exports.getApprovalsPage = async (req, res) => {
     let fwdParams = [];
     let clsParams = [];
 
-    if (!isAdmin) {
+    if (isAdmin && filterMemberId) {
+      // Admin filtered to a specific member: scope all queries to that user.
+      pendingTasksWhere += ' AND (t.assigned_to = ? OR t.created_by = ?)';
+      pendingTasksParams = [filterMemberId, filterMemberId];
+      extWhere += ' AND er.requested_by = ?';
+      extParams = [filterMemberId];
+      fwdWhere += ' AND (fr.forwarded_by = ? OR fr.forwarded_to = ?)';
+      fwdParams = [filterMemberId, filterMemberId];
+      clsWhere += ' AND cr.requested_by = ?';
+      clsParams = [filterMemberId];
+    } else if (!isAdmin) {
       if (isHeadScope) {
         // Head: scope by the task's assignee being a team member.
         // This applies even if the head has can_approve via their role —
@@ -599,6 +612,8 @@ exports.getApprovalsPage = async (req, res) => {
         clsParams = [userId];
       }
     }
+    // else: isAdmin && !filterMemberId → no extra WHERE, see everything (default heads-only view
+    // is enforced by the frontend filter; backend returns all for admins without a filter)
 
     const scopeParams2 = pendingTasksParams;
     const scopeParams1 = extParams;
@@ -662,7 +677,10 @@ exports.getApprovalsPage = async (req, res) => {
 
     let pendingTicketsWhere = "tk.deleted = 0 AND tk.status = 'pending_done'";
     let pendingTicketsParams = [];
-    if (!isAdmin) {
+    if (isAdmin && filterMemberId) {
+      pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
+      pendingTicketsParams = [filterMemberId, filterMemberId];
+    } else if (!isAdmin) {
       if (ticketHeadScope) {
         pendingTicketsWhere += ` AND tk.assigned_to IN (${tmp})`;
         pendingTicketsParams = [...teamScope.memberIds];
@@ -685,7 +703,10 @@ exports.getApprovalsPage = async (req, res) => {
 
     let ticketExtWhere = "ter.deleted = 0 AND ter.status = 'pending'";
     let ticketExtParams = [];
-    if (!isAdmin) {
+    if (isAdmin && filterMemberId) {
+      ticketExtWhere += ' AND ter.requested_by = ?';
+      ticketExtParams = [filterMemberId];
+    } else if (!isAdmin) {
       if (ticketHeadScope) {
         ticketExtWhere += ` AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${tmp}))`;
         ticketExtParams = [...teamScope.memberIds];
