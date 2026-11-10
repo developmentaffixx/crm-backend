@@ -5,7 +5,7 @@ const multer  = require('multer');
 const path    = require('path');
 const {
   authenticate, requireAdmin, requireAdminOrTicketApprove,
-  canApproveTickets, approveOrTeamHeadGuard,
+  canApproveTickets, approveOrTeamHeadGuard, isCeoUser, getHeadUserIds,
 } = require('../middleware/auth');
 const db = require('../config/db');
 const ticketsController = require('../controllers/tickets.controller');
@@ -20,7 +20,30 @@ async function ticketOwnerIds(req) {
   if (rows.length === 0) return [];
   return [rows[0].assigned_to, rows[0].reported_by].filter(Boolean);
 }
-const ticketApproveGuard = approveOrTeamHeadGuard(canApproveTickets, ticketOwnerIds);
+// CEO can action ticket approvals like Admin.
+const canApproveTicketsOrCeo = async (user) => (await canApproveTickets(user)) || (await isCeoUser(user));
+
+// A Head's own ticket request (mark-done or deadline extension on a ticket
+// assigned to themselves) can only be actioned by Admin / CEO.
+async function ticketIsHeadSelfAction(req) {
+  const [rows] = await db.query(
+    'SELECT assigned_to, marked_done_by, status FROM tickets WHERE id = ? AND deleted = 0',
+    [req.params.id]
+  );
+  if (rows.length === 0) return false;
+  const t = rows[0];
+  const heads = await getHeadUserIds();
+  if (!heads.has(t.assigned_to)) return false;
+  if (req.params.extId) {
+    const [ex] = await db.query(
+      'SELECT requested_by FROM ticket_deadline_extension_requests WHERE id = ? AND ticket_id = ? AND deleted = 0',
+      [req.params.extId, req.params.id]
+    );
+    return ex.length > 0 && ex[0].requested_by === t.assigned_to;
+  }
+  return t.status === 'pending_done' && t.marked_done_by === t.assigned_to;
+}
+const ticketApproveGuard = approveOrTeamHeadGuard(canApproveTicketsOrCeo, ticketOwnerIds, ticketIsHeadSelfAction);
 
 // Multer config for ticket attachments
 const storage = multer.diskStorage({
@@ -65,6 +88,9 @@ router.get('/stats', ticketsController.stats);
 
 // GET  /api/tickets/filter-users — users the viewer may filter by (team-aware)
 router.get('/filter-users', ticketsController.filterUsers);
+
+// GET  /api/tickets/filter-options — role-aware projects / teams / users for the Filter popover
+router.get('/filter-options', ticketsController.filterOptions);
 
 // GET  /api/tickets/pinned  — get current user's pinned tickets
 router.get('/pinned', ticketsController.getPinnedTickets);

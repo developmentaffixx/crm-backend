@@ -716,17 +716,19 @@ exports.getApprovalsPage = async (req, res) => {
     // A team head sees ticket items ASSIGNED TO a team member;
     // a plain user sees only their own (assigned-to or reported-by them).
     // Admins see everything — same pattern as tasks above.
-    const canApproveTicket = isAdmin || (await canApproveTickets(req.user));
-    const ticketHeadScope = !isAdmin && teamScope.isHead && teamScope.memberIds.length > 0;
-    const tmp = ticketHeadScope ? teamScope.memberIds.map(() => '?').join(',') : '';
+    const canApproveTicket = isTop || (await canApproveTickets(req.user));
+    // A head's own tickets go to Admin/CEO, so exclude the head from their own ticket scope.
+    const ticketScopeIds = teamScope.memberIds.filter(id => id !== userId);
+    const ticketHeadScope = !isTop && teamScope.isHead && ticketScopeIds.length > 0;
+    const tmp = ticketHeadScope ? ticketScopeIds.map(() => '?').join(',') : '';
 
     let pendingTicketsWhere = "tk.deleted = 0 AND tk.status = 'pending_done'";
     let pendingTicketsParams = [];
-    if (isAdmin && filterMemberId) {
+    if (isTop && filterMemberId) {
       pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
       pendingTicketsParams = [filterMemberId, filterMemberId];
-    } else if (isAdmin) {
-      // Admin default: exclude tickets assigned to plain team members
+    } else if (isTop) {
+      // Admin/CEO default: exclude tickets assigned to plain team members
       pendingTicketsWhere += ` AND (
         tk.assigned_to IS NULL
         OR NOT EXISTS (
@@ -738,7 +740,7 @@ exports.getApprovalsPage = async (req, res) => {
     } else if (!isAdmin) {
       if (ticketHeadScope) {
         pendingTicketsWhere += ` AND tk.assigned_to IN (${tmp})`;
-        pendingTicketsParams = [...teamScope.memberIds];
+        pendingTicketsParams = [...ticketScopeIds];
       } else {
         pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
         pendingTicketsParams = [userId, userId];
@@ -746,6 +748,7 @@ exports.getApprovalsPage = async (req, res) => {
     }
     const [pendingTickets] = await db.query(
       `SELECT tk.id, tk.title, tk.status, tk.due_date, tk.priority, tk.mode,
+              tk.assigned_to AS assigned_to_id, tk.marked_done_by,
               CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name,
               CONCAT(u2.first_name, ' ', u2.last_name) AS marked_done_by_name
        FROM tickets tk
@@ -758,10 +761,10 @@ exports.getApprovalsPage = async (req, res) => {
 
     let ticketExtWhere = "ter.deleted = 0 AND ter.status = 'pending'";
     let ticketExtParams = [];
-    if (isAdmin && filterMemberId) {
+    if (isTop && filterMemberId) {
       ticketExtWhere += ' AND ter.requested_by = ?';
       ticketExtParams = [filterMemberId];
-    } else if (isAdmin) {
+    } else if (isTop) {
       // Admin default: exclude extensions on tickets assigned to plain team members
       ticketExtWhere += ` AND EXISTS (
         SELECT 1 FROM tickets tke
@@ -778,14 +781,14 @@ exports.getApprovalsPage = async (req, res) => {
     } else if (!isAdmin) {
       if (ticketHeadScope) {
         ticketExtWhere += ` AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${tmp}))`;
-        ticketExtParams = [...teamScope.memberIds];
+        ticketExtParams = [...ticketScopeIds];
       } else {
         ticketExtWhere += ' AND ter.requested_by = ?';
         ticketExtParams = [userId];
       }
     }
     const [ticketExtensions] = await db.query(
-      `SELECT ter.*, tk.title AS ticket_title,
+      `SELECT ter.*, tk.title AS ticket_title, tk.assigned_to AS ticket_assigned_to,
               CONCAT(u.first_name, ' ', u.last_name) AS requested_by_name
        FROM ticket_deadline_extension_requests ter
        LEFT JOIN tickets tk ON tk.id = ter.ticket_id
@@ -815,6 +818,20 @@ exports.getApprovalsPage = async (req, res) => {
     let outExt = flag(extensions, 'requested_by');
     let outFwd = flag(forwards, 'forwarded_by');
     let outCls = flag(closeRequests, 'requested_by');
+    // Same flag for tickets: a Head's own done / extension request on their own ticket.
+    let outTickets = pendingTickets.map(t => ({
+      ...t,
+      requires_top_approval: headIds.has(t.assigned_to_id) && t.marked_done_by === t.assigned_to_id,
+    }));
+    let outTicketExt = ticketExtensions.map(r => ({
+      ...r,
+      requires_top_approval: headIds.has(r.requested_by) && r.ticket_assigned_to === r.requested_by,
+    }));
+    if (!isTop && ticketHeadScope) {
+      outTickets = outTickets.filter(r => !r.requires_top_approval);
+      outTicketExt = outTicketExt.filter(r => !r.requires_top_approval);
+    }
+
     if (!isTop && isHeadScope) {
       // A head cannot action another head's own requests — hide them.
       outTasks = outTasks.filter(r => !r.requires_top_approval);
@@ -828,8 +845,8 @@ exports.getApprovalsPage = async (req, res) => {
       extension_requests: outExt,
       forward_requests: outFwd,
       close_requests: outCls,
-      pending_tickets: pendingTickets,
-      ticket_extension_requests: ticketExtensions,
+      pending_tickets: outTickets,
+      ticket_extension_requests: outTicketExt,
       can_approve_tickets: canApproveTicket,
       is_top_approver: isTop,
     });
@@ -862,8 +879,8 @@ exports.getBadgeCount = async (req, res) => {
     // Head's own items go to Admin/CEO, so exclude the head from their own task scope.
     const taskScopeIds = teamScope.memberIds.filter(id => id !== userId);
     const taskHeadScope   = !isTop && teamScope.isHead && taskScopeIds.length > 0;
-    const ticketHeadScope = !isAdmin && teamScope.isHead && teamScope.memberIds.length > 0;
-    const mp = teamScope.memberIds.length ? teamScope.memberIds.map(() => '?').join(',') : '';
+    const ticketHeadScope = !isTop && teamScope.isHead && taskScopeIds.length > 0;
+    const mp = taskScopeIds.length ? taskScopeIds.map(() => '?').join(',') : '';
 
     let taskCount = 0;
     let ticketCount = 0;
@@ -927,16 +944,16 @@ exports.getBadgeCount = async (req, res) => {
 
     // ── Ticket-related items (scoped by ticket approval permission) ──
     let ticketPendingSql, ticketPendingParams, ticketExtSql, ticketExtParams;
-    if (isAdmin) {
+    if (isTop) {
       ticketPendingSql = "SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done'";
       ticketPendingParams = [];
       ticketExtSql = "SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'";
       ticketExtParams = [];
     } else if (ticketHeadScope) {
       ticketPendingSql = `SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND assigned_to IN (${mp})`;
-      ticketPendingParams = [...teamScope.memberIds];
+      ticketPendingParams = [...taskScopeIds];
       ticketExtSql = `SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests ter WHERE ter.deleted = 0 AND ter.status = 'pending' AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${mp}))`;
-      ticketExtParams = [...teamScope.memberIds];
+      ticketExtParams = [...taskScopeIds];
     } else {      ticketPendingSql = "SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)";
       ticketPendingParams = [userId, userId];
       ticketExtSql = "SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?";

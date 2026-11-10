@@ -1,6 +1,21 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { getTeamScopeForHead } = require('../middleware/auth');
+const { getTeamScopeForHead, isCeoUser, getUserModulePermission } = require('../middleware/auth');
+
+// Resolve how much of the ticket list the viewer may see.
+//   seeAll   -> Admin, CEO, or tickets "View = All"
+//   teamScope-> Team head scope (when not seeAll)
+async function resolveTicketVisibility(user) {
+  if (user.is_admin || (await isCeoUser(user))) {
+    return { seeAll: true, teamScope: { isHead: false, teamIds: [], memberIds: [] } };
+  }
+  const perms = await getUserModulePermission(user.id, 'tickets');
+  if ((perms.can_view ?? 0) >= 2) {
+    return { seeAll: true, teamScope: { isHead: false, teamIds: [], memberIds: [] } };
+  }
+  const teamScope = await getTeamScopeForHead(user.id);
+  return { seeAll: false, teamScope };
+}
 
 // True if the current user heads a team that the ticket's assignee belongs to.
 async function isTicketInHeadScope(user, ticket) {
@@ -48,6 +63,74 @@ async function isTicketAssignee(ticketId, userId) {
 }
 
 /**
+ * GET /api/tickets/filter-options
+ * Role-aware options for the Tickets Filter popover (mirrors tasks):
+ *   - Admin / CEO / View=All -> scope 'all'   : all projects, teams, users
+ *   - Team head              -> scope 'head'  : projects of head + team, own team(s), team members
+ *   - Member                 -> scope 'member': only projects they are assigned to
+ */
+exports.filterOptions = async (req, res) => {
+  try {
+    const uid = req.user.id;
+    const vis = await resolveTicketVisibility(req.user);
+    let scope = 'member';
+    const teamScope = vis.teamScope;
+    if (vis.seeAll) scope = 'all';
+    else if (teamScope.isHead && teamScope.memberIds.length > 0) scope = 'head';
+
+    let projects;
+    if (scope === 'all') {
+      [projects] = await db.query('SELECT id, title FROM projects WHERE deleted = 0 ORDER BY title ASC');
+    } else {
+      const ids = scope === 'head' ? teamScope.memberIds : [uid];
+      [projects] = await db.query(
+        `SELECT DISTINCT p.id, p.title
+           FROM projects p
+          WHERE p.deleted = 0
+            AND (
+              p.created_by IN (?)
+              OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id IN (?))
+              OR EXISTS (SELECT 1 FROM project_service_members psm
+                           JOIN project_services ps ON ps.id = psm.project_service_id
+                          WHERE ps.project_id = p.id AND psm.user_id IN (?))
+            )
+          ORDER BY p.title ASC`,
+        [ids, ids, ids]
+      );
+    }
+
+    let teams = [];
+    if (scope === 'all') {
+      [teams] = await db.query('SELECT id, name FROM teams WHERE deleted = 0 ORDER BY name ASC');
+    } else if (scope === 'head') {
+      [teams] = await db.query(
+        'SELECT id, name FROM teams WHERE deleted = 0 AND id IN (?) ORDER BY name ASC',
+        [teamScope.teamIds]
+      );
+    }
+
+    let users = [];
+    if (scope === 'all') {
+      [users] = await db.query(
+        `SELECT id, first_name, last_name, avatar_url FROM users
+          WHERE deleted = 0 AND is_active = 1 ORDER BY first_name, last_name`
+      );
+    } else if (scope === 'head') {
+      [users] = await db.query(
+        `SELECT id, first_name, last_name, avatar_url FROM users
+          WHERE id IN (?) AND deleted = 0 ORDER BY first_name, last_name`,
+        [teamScope.memberIds]
+      );
+    }
+
+    return res.json({ scope, projects, teams, users });
+  } catch (err) {
+    console.error('Ticket filter-options error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * GET /api/tickets/filter-users
  * Returns users the viewer may filter the ticket list by (mirrors tasks filterUsers).
  *   - Admin → all active users
@@ -64,9 +147,10 @@ exports.filterUsers = async (req, res) => {
           ORDER BY first_name, last_name`
       ).then(([rows]) => rows);
 
-    if (req.user.is_admin) return res.json(await allActive());
+    const vis = await resolveTicketVisibility(req.user);
+    if (vis.seeAll) return res.json(await allActive());
 
-    const teamScope = await getTeamScopeForHead(req.user.id);
+    const teamScope = vis.teamScope;
     if (teamScope.isHead && teamScope.memberIds.length > 0) {
       const [rows] = await db.query(
         `SELECT id, first_name, last_name, avatar_url
@@ -94,7 +178,8 @@ exports.filterUsers = async (req, res) => {
  */
 exports.list = async (req, res) => {
   try {
-    const { mode, status, priority, ticket_type, related_to_type, search, assigned_to, team_id } = req.query;
+    const { mode, status, priority, ticket_type, related_to_type, search, assigned_to, team_id, project_id } = req.query;
+    const vis = await resolveTicketVisibility(req.user);
 
     // ── Pagination ──
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -138,8 +223,10 @@ exports.list = async (req, res) => {
     // Team heads additionally see tickets ASSIGNED TO any member of their
     // team(s). Reporter is not used for the team scope — a member may report a
     // ticket for someone outside the team, which is not the team's to see.
-    if (!req.user.is_admin) {
-      const teamScope = await getTeamScopeForHead(req.user.id);
+    if (project_id) { baseWhere += ' AND t.project_id = ?'; baseParams.push(project_id); }
+
+    if (!vis.seeAll) {
+      const teamScope = vis.teamScope;
       if (teamScope.isHead && teamScope.memberIds.length > 0) {
         const ph = teamScope.memberIds.map(() => '?').join(',');
         // Self (assignee/reporter/collaborator) OR any team member who is the
@@ -171,8 +258,8 @@ exports.list = async (req, res) => {
     // ── team_id filter / admin default exclusion (mirrors tasks module) ──
     if (team_id) {
       const tid = parseInt(team_id, 10);
-      const teamScope2 = req.user.is_admin ? { teamIds: [] } : await getTeamScopeForHead(req.user.id);
-      const allowedTeam = req.user.is_admin || (teamScope2.teamIds || []).includes(tid);
+      const teamScope2 = vis.seeAll ? { teamIds: [] } : vis.teamScope;
+      const allowedTeam = vis.seeAll || (teamScope2.teamIds || []).includes(tid);
       if (allowedTeam && tid) {
         baseWhere += ` AND (
           t.assigned_to IN (SELECT tm.user_id FROM team_members tm WHERE tm.team_id = ?)
@@ -182,7 +269,7 @@ exports.list = async (req, res) => {
         )`;
         baseParams.push(tid, tid);
       }
-    } else if (req.user.is_admin && !assigned_to) {
+    } else if (vis.seeAll && !assigned_to) {
       // Admin default: hide tickets assigned to plain team members (role='member').
       // Mirrors tasks admin exclusion. Bypassed when team_id or assigned_to is active.
       baseWhere += ` AND (
@@ -310,9 +397,25 @@ exports.stats = async (req, res) => {
     let where = 't.deleted = 0';
     const params = [];
 
-    if (!req.user.is_admin) {
-      where += ' AND (t.assigned_to = ? OR t.reported_by = ?)';
-      params.push(req.user.id, req.user.id);
+    // Same visibility as the list so the stat cards match the table.
+    const vis = await resolveTicketVisibility(req.user);
+    if (!vis.seeAll) {
+      const ts = vis.teamScope;
+      if (ts.isHead && ts.memberIds.length > 0) {
+        where += ` AND (
+          t.assigned_to = ? OR t.reported_by = ?
+          OR EXISTS (SELECT 1 FROM ticket_assignees ta_self WHERE ta_self.ticket_id = t.id AND ta_self.user_id = ?)
+          OR t.assigned_to IN (?)
+          OR EXISTS (SELECT 1 FROM ticket_assignees ta_team WHERE ta_team.ticket_id = t.id AND ta_team.user_id IN (?))
+        )`;
+        params.push(req.user.id, req.user.id, req.user.id, ts.memberIds, ts.memberIds);
+      } else {
+        where += ` AND (
+          t.assigned_to = ? OR t.reported_by = ?
+          OR EXISTS (SELECT 1 FROM ticket_assignees ta_self WHERE ta_self.ticket_id = t.id AND ta_self.user_id = ?)
+        )`;
+        params.push(req.user.id, req.user.id, req.user.id);
+      }
     }
 
     const [rows] = await db.query(
@@ -413,7 +516,8 @@ exports.getOne = async (req, res) => {
 
     // Non-admin access check. Allow the assignee, the reporter, a collaborator,
     // or a team head whose member is the assignee/collaborator (matches list).
-    if (!req.user.is_admin && ticket.assigned_to !== req.user.id && ticket.reported_by !== req.user.id) {
+    const visOne = await resolveTicketVisibility(req.user);
+    if (!visOne.seeAll && ticket.assigned_to !== req.user.id && ticket.reported_by !== req.user.id) {
       let allowed = await isTicketAssignee(ticket.id, req.user.id);
       if (!allowed) {
         const teamScope = await getTeamScopeForHead(req.user.id);
@@ -435,7 +539,7 @@ exports.getOne = async (req, res) => {
     }
 
     // If ticket belongs to a paused or skipped cycle, non-admin users cannot view it
-    if (!req.user.is_admin && ticket.project_id) {
+    if (!visOne.seeAll && ticket.project_id) {
       const ticketDate = ticket.due_date || ticket.created_at;
       const [pausedCycle] = await db.query(
         `SELECT id FROM service_cycles
