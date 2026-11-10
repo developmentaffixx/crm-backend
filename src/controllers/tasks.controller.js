@@ -1,6 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { canApproveTasks, getTeamScopeForHead, isTaskInHeadScope } = require('../middleware/auth');
+const { canApproveTasks, getTeamScopeForHead, isTaskInHeadScope, headNeedsTopApproval } = require('../middleware/auth');
 
 // Build a SQL fragment + params that match tasks assigned to (or created by)
 // any user in `memberIds`. Returns { sql, params } or null when empty.
@@ -600,7 +600,9 @@ exports.create = async (req, res) => {
   try {
     const assignee  = assigned_to || req.user.id;
     const canApprove = req.user.is_admin || (await canApproveTasks(req.user));
-    const isActive  = canApprove ? 1 : 0;
+    // A Head creating a task for themselves needs Admin/CEO approval.
+    const headSelf  = await headNeedsTopApproval(req.user, assignee);
+    const isActive  = canApprove && !headSelf ? 1 : 0;
 
     // ── Pre-flight: validate cycle BEFORE inserting the task ─────────────────
     let linkedCycle = null;
@@ -920,11 +922,14 @@ exports.markDone = async (req, res) => {
       return res.status(400).json({ message: 'Task must be active (is_active=1) to mark as done' });
     }
 
-    const newActiveState = canApprove ? 3 : 2;
+    // A Head marking their own task done needs Admin/CEO approval.
+    const headSelf = await headNeedsTopApproval(req.user, task.assigned_to);
+    const closesDirectly = canApprove && !headSelf;
+    const newActiveState = closesDirectly ? 3 : 2;
     await db.query("UPDATE tasks SET is_active = ?, status = 'done', closing_statement = ? WHERE id = ?", [newActiveState, closing_statement.trim(), task.id]);
 
-    await logActivity(task.id, req.user.id, canApprove ? 'approved' : 'marked_done', {
-      note: canApprove ? `Task completed and closed: ${closing_statement.trim()}` : closing_statement.trim()
+    await logActivity(task.id, req.user.id, closesDirectly ? 'approved' : 'marked_done', {
+      note: closesDirectly ? `Task completed and closed: ${closing_statement.trim()}` : closing_statement.trim()
     });
 
     const [updated] = await db.query('SELECT * FROM tasks WHERE id = ?', [task.id]);

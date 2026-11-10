@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireAdminOrSubmenu } = require('../middleware/auth');
 const ctrl = require('../controllers/dashboard.controller');
 const advCtrl = require('../controllers/dashboardAdvanced.controller');
+
+// Admin OR anyone granted "Dashboard 4 (CEO)" — used for the business widgets
+// shown on the CEO dashboard.
+const adminOrCeo = requireAdminOrSubmenu('dashboard', 'dashboard_ceo');
 
 // All routes require authentication
 router.use(authenticate);
@@ -30,19 +34,19 @@ router.get('/member/monthly-calendar', advCtrl.getMemberMonthlyCalendar);
 router.get('/admin', requireAdmin, ctrl.adminStats);
 router.get('/charts/team-attendance', requireAdmin, ctrl.chartsTeamAttendance);
 router.get('/charts/team-productivity', requireAdmin, ctrl.chartsTeamProductivity);
-router.get('/charts/revenue', requireAdmin, ctrl.chartsRevenue);
-router.get('/charts/leads-pipeline', requireAdmin, ctrl.chartsLeadsPipeline);
+router.get('/charts/revenue', adminOrCeo, ctrl.chartsRevenue);
+router.get('/charts/leads-pipeline', adminOrCeo, ctrl.chartsLeadsPipeline);
 
 // ── Advanced Admin routes ─────────────────────────────────────────────────────
 router.get('/admin/approvals', requireAdmin, advCtrl.getAdminApprovals);
-router.get('/admin/overdue', requireAdmin, advCtrl.getAdminOverdue);
+router.get('/admin/overdue', adminOrCeo, advCtrl.getAdminOverdue);
 router.get('/admin/workload', requireAdmin, advCtrl.getAdminWorkload);
-router.get('/admin/top-performers', requireAdmin, advCtrl.getAdminTopPerformers);
-router.get('/admin/top-revenue-clients', requireAdmin, advCtrl.getAdminTopRevenueClients);
-router.get('/admin/project-health', requireAdmin, advCtrl.getAdminProjectHealth);
-router.get('/admin/expense-breakdown', requireAdmin, advCtrl.getAdminExpenseBreakdown);
-router.get('/admin/lead-funnel', requireAdmin, advCtrl.getAdminLeadFunnel);
-router.get('/admin/cash-forecast', requireAdmin, advCtrl.getAdminCashForecast);
+router.get('/admin/top-performers', adminOrCeo, advCtrl.getAdminTopPerformers);
+router.get('/admin/top-revenue-clients', adminOrCeo, advCtrl.getAdminTopRevenueClients);
+router.get('/admin/project-health', adminOrCeo, advCtrl.getAdminProjectHealth);
+router.get('/admin/expense-breakdown', adminOrCeo, advCtrl.getAdminExpenseBreakdown);
+router.get('/admin/lead-funnel', adminOrCeo, advCtrl.getAdminLeadFunnel);
+router.get('/admin/cash-forecast', adminOrCeo, advCtrl.getAdminCashForecast);
 router.get('/admin/trends', requireAdmin, advCtrl.getAdminTrends);
 
 module.exports = router;

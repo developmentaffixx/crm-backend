@@ -3,7 +3,7 @@ const router  = express.Router();
 const { body, param } = require('express-validator');
 const {
   authenticate, requireAdmin, requireAdminOrTaskApprove,
-  canApproveTasks, approveOrTeamHeadGuard,
+  canApproveTasks, approveOrTeamHeadGuard, getHeadUserIds,
 } = require('../middleware/auth');
 const db = require('../config/db');
 const approvalsController = require('../controllers/approvals.controller');
@@ -39,8 +39,36 @@ async function closeOwnerIds(req) {
   return [r.requested_by, r.assigned_to, r.created_by].filter(Boolean);
 }
 
-const extensionGuard = approveOrTeamHeadGuard(canApproveTasks, extensionOwnerIds);
-const closeGuard     = approveOrTeamHeadGuard(canApproveTasks, closeOwnerIds);
+// Restricted = the request was raised by a Head on their own task → only
+// Admin / CEO may action it.
+async function extensionIsHeadSelf(req) {
+  const [rows] = await db.query(
+    `SELECT er.requested_by, t.assigned_to
+       FROM task_deadline_extension_requests er
+       LEFT JOIN tasks t ON t.id = er.task_id
+      WHERE er.id = ? AND er.deleted = 0`,
+    [req.params.id]
+  );
+  if (rows.length === 0) return false;
+  const r = rows[0];
+  return r.requested_by === r.assigned_to && (await getHeadUserIds()).has(r.requested_by);
+}
+
+async function closeIsHeadSelf(req) {
+  const [rows] = await db.query(
+    `SELECT cr.requested_by, t.assigned_to
+       FROM task_close_requests cr
+       LEFT JOIN tasks t ON t.id = cr.task_id
+      WHERE cr.id = ? AND cr.deleted = 0`,
+    [req.params.id]
+  );
+  if (rows.length === 0) return false;
+  const r = rows[0];
+  return r.requested_by === r.assigned_to && (await getHeadUserIds()).has(r.requested_by);
+}
+
+const extensionGuard = approveOrTeamHeadGuard(canApproveTasks, extensionOwnerIds, extensionIsHeadSelf);
+const closeGuard     = approveOrTeamHeadGuard(canApproveTasks, closeOwnerIds, closeIsHeadSelf);
 
 // ── Extension Requests ──────────────────────────────────────────────────────
 

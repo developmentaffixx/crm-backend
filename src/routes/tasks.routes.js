@@ -3,7 +3,7 @@ const router  = express.Router();
 const { body, param } = require('express-validator');
 const {
   authenticate, requireAdmin, requireAdminOrTaskApprove,
-  canApproveTasks, approveOrTeamHeadGuard,
+  canApproveTasks, approveOrTeamHeadGuard, getHeadUserIds,
 } = require('../middleware/auth');
 const db = require('../config/db');
 const tasksController = require('../controllers/tasks.controller');
@@ -21,7 +21,22 @@ async function taskOwnerIds(req) {
   if (rows.length === 0) return [];
   return [rows[0].assigned_to, rows[0].created_by].filter(Boolean);
 }
-const taskApproveGuard = approveOrTeamHeadGuard(canApproveTasks, taskOwnerIds);
+// A Head's own pending task (self-created or self-completed) can only be
+// actioned by Admin / CEO.
+async function taskIsHeadSelfAction(req) {
+  const [rows] = await db.query(
+    'SELECT assigned_to, created_by, is_active FROM tasks WHERE id = ? AND deleted = 0',
+    [req.params.id]
+  );
+  if (rows.length === 0) return false;
+  const t = rows[0];
+  const heads = await getHeadUserIds();
+  if (!heads.has(t.assigned_to)) return false;
+  if (t.is_active === 0) return t.created_by === t.assigned_to;
+  if (t.is_active === 2) return true;
+  return false;
+}
+const taskApproveGuard = approveOrTeamHeadGuard(canApproveTasks, taskOwnerIds, taskIsHeadSelfAction);
 
 // GET  /api/tasks          — list tasks (filtered by role, paginated, searchable, sortable)
 router.get('/', tasksController.list);

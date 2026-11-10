@@ -1,6 +1,9 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { canApproveTasks, canApproveTickets, getTeamScopeForHead } = require('../middleware/auth');
+const {
+  canApproveTasks, canApproveTickets, getTeamScopeForHead,
+  isTopApprover, isCeoUser, getHeadUserIds, headNeedsTopApproval,
+} = require('../middleware/auth');
 
 // Helper: Log to task_activity_log
 async function logActivity(taskId, userId, action, { field_name, old_value, new_value, note } = {}) {
@@ -13,6 +16,15 @@ async function logActivity(taskId, userId, action, { field_name, old_value, new_
   } catch (err) {
     console.error('Activity log error:', err);
   }
+}
+
+// A forward request raised by a Head on a task assigned to themselves must be
+// approved by Admin / CEO (instead of the recipient simply accepting).
+async function forwardNeedsTopApproval(fwd) {
+  const [rows] = await db.query('SELECT assigned_to FROM tasks WHERE id = ?', [fwd.task_id]);
+  if (rows.length === 0) return false;
+  if (rows[0].assigned_to !== fwd.forwarded_by) return false;
+  return (await getHeadUserIds()).has(fwd.forwarded_by);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,7 +62,9 @@ exports.createExtension = async (req, res) => {
       return res.status(409).json({ message: 'A pending extension request already exists for this task' });
     }
 
-    const canApprove = req.user.is_admin || (await canApproveTasks(req.user));
+    // A Head requesting an extension on their own task needs Admin/CEO approval.
+    const headSelf = await headNeedsTopApproval(req.user, task.assigned_to);
+    const canApprove = !headSelf && (req.user.is_admin || (await canApproveTasks(req.user)));
     const initialStatus = canApprove ? 'approved' : 'pending';
 
     const [result] = await db.query(
@@ -449,7 +463,11 @@ exports.acceptForward = async (req, res) => {
 
     const fwd = rows[0];
 
-    if (fwd.forwarded_to !== req.user.id && !req.user.is_admin) {
+    if (await forwardNeedsTopApproval(fwd)) {
+      if (!(await isTopApprover(req.user))) {
+        return res.status(403).json({ message: 'This forward request needs approval from the CEO' });
+      }
+    } else if (fwd.forwarded_to !== req.user.id && !req.user.is_admin) {
       return res.status(403).json({ message: 'Only the recipient can accept this request' });
     }
 
@@ -487,7 +505,11 @@ exports.rejectForward = async (req, res) => {
 
     const fwd = rows[0];
 
-    if (fwd.forwarded_to !== req.user.id && !req.user.is_admin) {
+    if (await forwardNeedsTopApproval(fwd)) {
+      if (!(await isTopApprover(req.user))) {
+        return res.status(403).json({ message: 'This forward request needs approval from the CEO' });
+      }
+    } else if (fwd.forwarded_to !== req.user.id && !req.user.is_admin) {
       return res.status(403).json({ message: 'Only the recipient can reject this request' });
     }
 
@@ -553,17 +575,22 @@ exports.cancelForward = async (req, res) => {
 exports.getApprovalsPage = async (req, res) => {
   try {
     const isAdmin = req.user.is_admin;
-    const canApprove = isAdmin || (await canApproveTasks(req.user));
+    // Admin or CEO: sees every task-related approval item (CEO approves Heads' own actions).
+    const isCeo = await isCeoUser(req.user);
+    const isTop = req.user.is_admin || isCeo; // view scope: Admin & CEO see everything
+    const canApprove = isTop || (await canApproveTasks(req.user));
     const userId  = req.user.id;
 
-    // Admin can pass ?member_id=X to scope the view to a specific member's requests.
-    const filterMemberId = isAdmin && req.query.member_id ? parseInt(req.query.member_id, 10) : null;
+    // Admin/CEO can pass ?member_id=X to scope the view to a specific member's requests.
+    const filterMemberId = isTop && req.query.member_id ? parseInt(req.query.member_id, 10) : null;
 
     // Always resolve team scope — a team head who also has can_approve via their
     // role should still be treated as a scoped approver (their team only), not
     // as a global approver. Admins are the only ones who see everything.
     const teamScope = !isAdmin ? await getTeamScopeForHead(userId) : { isHead: false, memberIds: [] };
-    const isHeadScope = teamScope.isHead && teamScope.memberIds.length > 0;
+    // A head's own items are excluded here: those go to Admin/CEO, not to the head.
+    const taskScopeIds = teamScope.memberIds.filter(id => id !== userId);
+    const isHeadScope = teamScope.isHead && taskScopeIds.length > 0;
 
     let pendingTasksWhere = "t.deleted = 0 AND t.is_active IN (0, 2)";
     let extWhere          = "er.deleted = 0";
@@ -587,8 +614,8 @@ exports.getApprovalsPage = async (req, res) => {
         )
       )`;
 
-    if (isAdmin && filterMemberId) {
-      // Admin filtered to a specific member: scope all queries to that user.
+    if (isTop && filterMemberId) {
+      // Admin/CEO filtered to a specific member: scope all queries to that user.
       pendingTasksWhere += ' AND (t.assigned_to = ? OR t.created_by = ?)';
       pendingTasksParams = [filterMemberId, filterMemberId];
       extWhere += ' AND er.requested_by = ?';
@@ -597,27 +624,27 @@ exports.getApprovalsPage = async (req, res) => {
       fwdParams = [filterMemberId, filterMemberId];
       clsWhere += ' AND cr.requested_by = ?';
       clsParams = [filterMemberId];
-    } else if (isAdmin) {
-      // Admin default view: hide tasks assigned to plain team members — show heads/teamless only.
+    } else if (isTop) {
+      // Admin/CEO default view: hide tasks assigned to plain team members — show heads/teamless only.
       pendingTasksWhere += ` AND ${excludeMembersFragment}`;
       // For ext/fwd/cls: join back to the task to apply the same assignee filter.
       extWhere += ` AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND ${excludeMembersFragment.replace(/\bt\./g, 'te.')})`;
       fwdWhere += ` AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND ${excludeMembersFragment.replace(/\bt\./g, 'tf.')})`;
       clsWhere += ` AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND ${excludeMembersFragment.replace(/\bt\./g, 'tc.')})`;
-    } else if (!isAdmin) {
+    } else if (!isTop) {
       if (isHeadScope) {
-        // Head: scope by the task's assignee being a team member.
+        // Head: scope by the task's assignee being a team member (excluding the head).
         // This applies even if the head has can_approve via their role —
         // a head is a scoped approver for their team only, not globally.
-        const mp = teamScope.memberIds.map(() => '?').join(',');
+        const mp = taskScopeIds.map(() => '?').join(',');
         pendingTasksWhere += ` AND t.assigned_to IN (${mp})`;
-        pendingTasksParams = [...teamScope.memberIds];
+        pendingTasksParams = [...taskScopeIds];
         extWhere += ` AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND te.assigned_to IN (${mp}))`;
-        extParams = [...teamScope.memberIds];
+        extParams = [...taskScopeIds];
         fwdWhere += ` AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND tf.assigned_to IN (${mp}))`;
-        fwdParams = [...teamScope.memberIds];
+        fwdParams = [...taskScopeIds];
         clsWhere += ` AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${mp}))`;
-        clsParams = [...teamScope.memberIds];
+        clsParams = [...taskScopeIds];
       } else {
         // Plain user (no team head role): only their own items.
         pendingTasksWhere += ' AND (t.created_by = ? OR t.assigned_to = ?)';
@@ -637,6 +664,7 @@ exports.getApprovalsPage = async (req, res) => {
 
     const [pendingTasks] = await db.query(
       `SELECT t.id, t.task_id_code, t.title, t.is_active, t.deadline, t.priority,
+              t.assigned_to AS assigned_to_id, t.created_by,
               (SELECT p.title FROM project_tasks pt JOIN projects p ON p.id = pt.project_id AND p.deleted = 0 WHERE pt.task_id = t.id LIMIT 1) AS project_name,
               CONCAT(u.first_name, ' ', u.last_name) AS assigned_to_name
        FROM tasks t
@@ -767,14 +795,43 @@ exports.getApprovalsPage = async (req, res) => {
       ticketExtParams
     );
 
+    // Flag items that are a Head's own action — only Admin/CEO can action these.
+    const headIds = await getHeadUserIds();
+    const taskAssignee = {};
+    if (extensions.length || forwards.length || closeRequests.length) {
+      const ids = [...new Set([...extensions, ...forwards, ...closeRequests].map(r => r.task_id))];
+      const [ta] = await db.query('SELECT id, assigned_to FROM tasks WHERE id IN (?)', [ids]);
+      ta.forEach(r => { taskAssignee[r.id] = r.assigned_to; });
+    }
+    const flag = (rows, requesterKey) => rows.map(r => ({
+      ...r,
+      requires_top_approval: headIds.has(r[requesterKey]) && taskAssignee[r.task_id] === r[requesterKey],
+    }));
+    const flaggedTasks = pendingTasks.map(t => ({
+      ...t,
+      requires_top_approval: headIds.has(t.assigned_to_id) && (t.is_active === 2 || t.created_by === t.assigned_to_id),
+    }));
+    let outTasks = flaggedTasks;
+    let outExt = flag(extensions, 'requested_by');
+    let outFwd = flag(forwards, 'forwarded_by');
+    let outCls = flag(closeRequests, 'requested_by');
+    if (!isTop && isHeadScope) {
+      // A head cannot action another head's own requests — hide them.
+      outTasks = outTasks.filter(r => !r.requires_top_approval);
+      outExt = outExt.filter(r => !r.requires_top_approval);
+      outFwd = outFwd.filter(r => !r.requires_top_approval);
+      outCls = outCls.filter(r => !r.requires_top_approval);
+    }
+
     return res.json({
-      pending_tasks: pendingTasks,
-      extension_requests: extensions,
-      forward_requests: forwards,
-      close_requests: closeRequests,
+      pending_tasks: outTasks,
+      extension_requests: outExt,
+      forward_requests: outFwd,
+      close_requests: outCls,
       pending_tickets: pendingTickets,
       ticket_extension_requests: ticketExtensions,
       can_approve_tickets: canApproveTicket,
+      is_top_approver: isCeo,
     });
   } catch (err) {
     console.error('Approvals page error:', err);
@@ -800,8 +857,11 @@ exports.getBadgeCount = async (req, res) => {
 
     // Always resolve team scope — mirrors the fix in getApprovalsPage.
     // A head is always scoped to their team; only admins see everything.
+    const isTop = req.user.is_admin || (await isCeoUser(req.user));
     const teamScope = !isAdmin ? await getTeamScopeForHead(userId) : { isHead: false, memberIds: [] };
-    const taskHeadScope   = !isAdmin && teamScope.isHead && teamScope.memberIds.length > 0;
+    // Head's own items go to Admin/CEO, so exclude the head from their own task scope.
+    const taskScopeIds = teamScope.memberIds.filter(id => id !== userId);
+    const taskHeadScope   = !isTop && teamScope.isHead && taskScopeIds.length > 0;
     const ticketHeadScope = !isAdmin && teamScope.isHead && teamScope.memberIds.length > 0;
     const mp = teamScope.memberIds.length ? teamScope.memberIds.map(() => '?').join(',') : '';
 
@@ -809,7 +869,7 @@ exports.getBadgeCount = async (req, res) => {
     let ticketCount = 0;
 
     // ── Task-related items (scoped by task approval permission) ──
-    if (isAdmin) {
+    if (isTop) {
       const [[{ task_count }]] = await db.query(
         "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2)"
       );
@@ -824,22 +884,23 @@ exports.getBadgeCount = async (req, res) => {
       );
       taskCount += task_count + ext_count + fwd_count + cls_count;
     } else if (taskHeadScope) {
-      // Head: scope by the task's assignee being a team member.
-      const ids = teamScope.memberIds;
+      // Head: scope by the task's assignee being a team member (excluding the head).
+      const ids = taskScopeIds;
+      const taskMp = ids.map(() => '?').join(',');
       const [[{ task_count }]] = await db.query(
-        `SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND assigned_to IN (${mp})`,
+        `SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND assigned_to IN (${taskMp})`,
         [...ids]
       );
       const [[{ ext_count }]] = await db.query(
-        `SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests er WHERE er.deleted = 0 AND er.status = 'pending' AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND te.assigned_to IN (${mp}))`,
+        `SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests er WHERE er.deleted = 0 AND er.status = 'pending' AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND te.assigned_to IN (${taskMp}))`,
         [...ids]
       );
       const [[{ fwd_count }]] = await db.query(
-        `SELECT COUNT(*) AS fwd_count FROM task_forward_requests fr WHERE fr.deleted = 0 AND fr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND tf.assigned_to IN (${mp}))`,
+        `SELECT COUNT(*) AS fwd_count FROM task_forward_requests fr WHERE fr.deleted = 0 AND fr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND tf.assigned_to IN (${taskMp}))`,
         [...ids]
       );
       const [[{ cls_count }]] = await db.query(
-        `SELECT COUNT(*) AS cls_count FROM task_close_requests cr WHERE cr.deleted = 0 AND cr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${mp}))`,
+        `SELECT COUNT(*) AS cls_count FROM task_close_requests cr WHERE cr.deleted = 0 AND cr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${taskMp}))`,
         [...ids]
       );
       taskCount += task_count + ext_count + fwd_count + cls_count;

@@ -74,6 +74,7 @@ const smmDocumentsRoutes     = require('./src/routes/smmDocuments.routes');
 const pmDashboardRoutes      = require('./src/routes/pmDashboard.routes');
 const hrDashboardRoutes      = require('./src/routes/hrDashboard.routes');
 const financeDashboardRoutes = require('./src/routes/financeDashboard.routes');
+const ceoDashboardRoutes     = require('./src/routes/ceoDashboard.routes');
 const salesMeetingsRoutes    = require('./src/routes/salesMeetings.routes');
 
 const app    = express();
@@ -179,6 +180,7 @@ app.use('/api/smm-documents',          smmDocumentsRoutes);
 app.use('/api/pm-dashboard',           pmDashboardRoutes);
 app.use('/api/hr-dashboard',           hrDashboardRoutes);
 app.use('/api/finance-dashboard',      financeDashboardRoutes);
+app.use('/api/ceo-dashboard',          ceoDashboardRoutes);
 app.use('/api/sales-meetings',         salesMeetingsRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)

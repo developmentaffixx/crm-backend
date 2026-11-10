@@ -53,6 +53,47 @@ function requireAdmin(req, res, next) {
 }
 
 /**
+ * Resolves a user's submenu access level (0 = none, 1 = own, 2 = all).
+ * User-level override (user_submenu_permissions) wins over the role baseline
+ * (role_submenu_permissions). Checked live from DB, not from the token.
+ */
+async function getSubmenuAccess(userId, module, submenu) {
+  try {
+    const [userSub] = await db.query(
+      'SELECT can_access FROM user_submenu_permissions WHERE user_id = ? AND module = ? AND submenu = ?',
+      [userId, module, submenu]
+    );
+    if (userSub.length > 0) return userSub[0].can_access || 0;
+
+    const [userRole] = await db.query('SELECT role_id FROM users WHERE id = ?', [userId]);
+    if (userRole.length > 0 && userRole[0].role_id) {
+      const [roleSub] = await db.query(
+        'SELECT can_access FROM role_submenu_permissions WHERE role_id = ? AND module = ? AND submenu = ?',
+        [userRole[0].role_id, module, submenu]
+      );
+      if (roleSub.length > 0) return roleSub[0].can_access || 0;
+    }
+  } catch (err) {
+    console.error('getSubmenuAccess error:', err.message);
+  }
+  return 0;
+}
+
+/**
+ * Middleware factory: allows admins, or users whose effective access to the
+ * given submenu is >= 1. e.g. requireAdminOrSubmenu('dashboard', 'dashboard_ceo')
+ */
+function requireAdminOrSubmenu(module, submenu) {
+  return async (req, res, next) => {
+    if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+    if (req.user.is_admin) return next();
+    const level = await getSubmenuAccess(req.user.id, module, submenu);
+    if (level >= 1) return next();
+    return res.status(403).json({ message: 'Access denied' });
+  };
+}
+
+/**
  * Checks if user has task approval permission (admin or can_approve on tasks module).
  */
 async function canApproveTasks(user) {
@@ -439,6 +480,55 @@ async function isTaskInHeadScope(user, task) {
 }
 
 /**
+ * True if the user holds the "CEO" role (a separate role from Admin).
+ */
+async function isCeoUser(user) {
+  if (!user) return false;
+  try {
+    const [rows] = await db.query(
+      `SELECT r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = ? LIMIT 1`,
+      [user.id]
+    );
+    return rows.length > 0 && /^\s*ceo\s*$/i.test(rows[0].name || '');
+  } catch (err) {
+    console.error('isCeoUser error:', err);
+    return false;
+  }
+}
+
+/** Admin or CEO — the only people who can approve a Head's own task actions. */
+async function isTopApprover(user) {
+  return isCeoUser(user);
+}
+
+/** Set of user ids that head at least one (non-deleted) team. */
+async function getHeadUserIds() {
+  try {
+    const [rows] = await db.query(
+      `SELECT DISTINCT tm.user_id
+         FROM team_members tm
+         JOIN teams t ON t.id = tm.team_id AND t.deleted = 0
+        WHERE tm.role = 'head'`
+    );
+    return new Set(rows.map(r => r.user_id));
+  } catch (err) {
+    console.error('getHeadUserIds error:', err);
+    return new Set();
+  }
+}
+
+/**
+ * True when `user` is a Head acting on a task assigned to themselves and is
+ * not Admin/CEO — i.e. the action must go through Admin/CEO approval.
+ */
+async function headNeedsTopApproval(user, assigneeId) {
+  if (!user || !assigneeId || Number(user.id) !== Number(assigneeId)) return false;
+  if (user.is_admin || (await isCeoUser(user))) return false;
+  const heads = await getHeadUserIds();
+  return heads.has(Number(user.id));
+}
+
+/**
  * Factory for an approval guard that allows:
  *   - admins and global approvers (via `canApproveFn`), OR
  *   - a team head, but only when the record being actioned belongs to one of
@@ -447,10 +537,17 @@ async function isTaskInHeadScope(user, task) {
  * @param {(user)=>Promise<boolean>} canApproveFn  e.g. canApproveTasks / canApproveTickets
  * @param {(req)=>Promise<number[]>} ownerIdsFn    resolves the user id(s) that own the targeted record
  */
-function approveOrTeamHeadGuard(canApproveFn, ownerIdsFn) {
+function approveOrTeamHeadGuard(canApproveFn, ownerIdsFn, restrictedFn) {
   return async function (req, res, next) {
     if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
     try {
+      // Head's own actions (create / extension / done / forward) can only be
+      // actioned by an Admin or CEO — never by a head or a regular approver.
+      if (restrictedFn && (await restrictedFn(req))) {
+        if (await isTopApprover(req.user)) return next();
+        return res.status(403).json({ message: 'This request needs approval from the CEO' });
+      }
+
       if (req.user.is_admin || (await canApproveFn(req.user))) return next();
 
       // Not a global approver — allow only if a head of the record's owner(s).
@@ -471,6 +568,8 @@ function approveOrTeamHeadGuard(canApproveFn, ownerIdsFn) {
 module.exports = {
   authenticate,
   requireAdmin,
+  getSubmenuAccess,
+  requireAdminOrSubmenu,
   canApproveTasks,
   requireAdminOrTaskApprove,
   canApproveTickets,
@@ -480,6 +579,10 @@ module.exports = {
   isHeadOfUser,
   isTaskInHeadScope,
   approveOrTeamHeadGuard,
+  isCeoUser,
+  isTopApprover,
+  getHeadUserIds,
+  headNeedsTopApproval,
   canEditProject,
   canViewProject,
   canApproveProjects,
