@@ -287,7 +287,10 @@ exports.update = async (req, res) => {
       req.body.status = 'pending_approval';
     }
 
-    const allowed = ['campaign_name', 'platform', 'objective', 'budget', 'start_date', 'end_date', 'assignment_type', 'assigned_to', 'status', 'notes'];
+    // Approval/rework remarks come in a separate field so they don't overwrite campaign notes
+    const remarks = req.body.remarks ?? req.body.notes ?? null;
+
+    const allowed = ['project_id', 'campaign_name', 'platform', 'objective', 'budget', 'start_date', 'end_date', 'assignment_type', 'assigned_to', 'status', 'notes'];
     const updates = {};
     allowed.forEach(f => {
       if (req.body[f] !== undefined) {
@@ -331,7 +334,7 @@ exports.update = async (req, res) => {
           if (histAction) {
             await db.query(
               `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-              ['ads', req.params.id, histAction, updates.notes || null, req.user.id]
+              ['ads', req.params.id, histAction, remarks || null, req.user.id]
             );
           }
         } catch (e) { /* table may not exist */ }
@@ -374,13 +377,13 @@ exports.update = async (req, res) => {
         } else if (updates.status === 'rejected') {
           await db.query(
             `UPDATE content_calendar_ads SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
-            [updates.notes || 'Rejected', slotId]
+            [remarks || 'Rejected', slotId]
           );
           if (campaign.created_by) {
             await db.query(
               `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
                VALUES (?, ?, 'slot_rejected', 'ad', ?, 'Your ad slot was rejected', ?, '/social/ads-planning')`,
-              [campaign.created_by, req.user.id, slotId, `Reason: ${updates.notes || 'Please re-edit'}`]
+              [campaign.created_by, req.user.id, slotId, `Reason: ${remarks || 'Please re-edit'}`]
             );
             res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_rejected' });
           }
