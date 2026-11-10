@@ -1,5 +1,39 @@
 const db = require('../config/db');
 
+/**
+ * Can the current user modify (edit) this campaign?
+ * Mirrors the visibility rules used in `list` so anything a user can see
+ * and open for editing can also be saved.
+ */
+async function canModifyCampaign(req, campaign) {
+  if (req.user.is_admin) return true;
+  if (req.socialAccessLevel >= 2) return true;               // SMM lead — all campaigns
+  if (req.userCanApprove || req.userCanSmmApprove) return true; // approvers act on any campaign
+
+  const uid = Number(req.user.id);
+  if (Number(campaign.created_by) === uid) return true;
+  if (campaign.assigned_to && Number(campaign.assigned_to) === uid) return true;
+
+  // Project member (same rule as list visibility)
+  if (campaign.project_id) {
+    const [pm] = await db.query(
+      'SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ? LIMIT 1',
+      [campaign.project_id, uid]
+    );
+    if (pm.length > 0) return true;
+  }
+
+  // Person who assigned the linked calendar ad slot
+  const slotId = campaign.linked_calendar_ad_id || campaign.calendar_slot_id;
+  if (slotId) {
+    try {
+      const [slot] = await db.query('SELECT assigned_by FROM content_calendar_ads WHERE id = ?', [slotId]);
+      if (slot.length > 0 && Number(slot[0].assigned_by) === uid) return true;
+    } catch (e) { /* ignore */ }
+  }
+  return false;
+}
+
 // ─── LIST ────────────────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
@@ -241,8 +275,8 @@ exports.update = async (req, res) => {
     const [existing] = await db.query('SELECT * FROM ad_campaigns WHERE id = ? AND deleted = 0', [req.params.id]);
     if (existing.length === 0) return res.status(404).json({ message: 'Campaign not found' });
 
-    if (!req.user.is_admin && existing[0].created_by !== req.user.id && existing[0].assigned_to !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+    if (!(await canModifyCampaign(req, existing[0]))) {
+      return res.status(403).json({ message: 'You do not have permission to edit this campaign' });
     }
 
     const campaign = existing[0];
@@ -370,7 +404,7 @@ exports.remove = async (req, res) => {
     const [existing] = await db.query('SELECT * FROM ad_campaigns WHERE id = ? AND deleted = 0', [req.params.id]);
     if (existing.length === 0) return res.status(404).json({ message: 'Campaign not found' });
 
-    if (!req.user.is_admin && existing[0].created_by !== req.user.id) {
+    if (!req.user.is_admin && req.socialAccessLevel < 2 && !req.userCanDelete && Number(existing[0].created_by) !== Number(req.user.id)) {
       return res.status(403).json({ message: 'Access denied' });
     }
 

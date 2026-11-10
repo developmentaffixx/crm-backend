@@ -99,8 +99,8 @@ exports.removeAvatar = async (req, res) => {
   try {
     const [current] = await db.query('SELECT avatar_url FROM users WHERE id = ?', [req.user.id]);
     if (current[0]?.avatar_url) {
-      const oldPath = path.join(__dirname, '../../', current[0].avatar_url);
-      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      const oldPublicId = extractPublicId(current[0].avatar_url);
+      if (oldPublicId) await deleteFromCloudinary(oldPublicId, 'image');
     }
     await db.query("UPDATE users SET avatar_url = '' WHERE id = ?", [req.user.id]);
     return res.json({ message: 'Avatar removed' });
