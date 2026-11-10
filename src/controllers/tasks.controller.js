@@ -390,6 +390,12 @@ exports.list = async (req, res) => {
       summaryParams.push(assigned_to, assigned_to);
     }
 
+    // Apply project filter to summary counts as well
+    if (project_id) {
+      summaryWhere += ' AND EXISTS (SELECT 1 FROM project_tasks pt_fs WHERE pt_fs.task_id = t.id AND pt_fs.project_id = ?)';
+      summaryParams.push(project_id);
+    }
+
     // Mirror the team_id filter so tab counts match the filtered table.
     if (team_id) {
       const tid = parseInt(team_id, 10);
