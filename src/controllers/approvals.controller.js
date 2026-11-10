@@ -465,7 +465,7 @@ exports.acceptForward = async (req, res) => {
 
     if (await forwardNeedsTopApproval(fwd)) {
       if (!(await isTopApprover(req.user))) {
-        return res.status(403).json({ message: 'This forward request needs approval from the CEO' });
+        return res.status(403).json({ message: 'This forward request needs approval from Admin or CEO' });
       }
     } else if (fwd.forwarded_to !== req.user.id && !req.user.is_admin) {
       return res.status(403).json({ message: 'Only the recipient can accept this request' });
@@ -507,7 +507,7 @@ exports.rejectForward = async (req, res) => {
 
     if (await forwardNeedsTopApproval(fwd)) {
       if (!(await isTopApprover(req.user))) {
-        return res.status(403).json({ message: 'This forward request needs approval from the CEO' });
+        return res.status(403).json({ message: 'This forward request needs approval from Admin or CEO' });
       }
     } else if (fwd.forwarded_to !== req.user.id && !req.user.is_admin) {
       return res.status(403).json({ message: 'Only the recipient can reject this request' });
@@ -831,7 +831,7 @@ exports.getApprovalsPage = async (req, res) => {
       pending_tickets: pendingTickets,
       ticket_extension_requests: ticketExtensions,
       can_approve_tickets: canApproveTicket,
-      is_top_approver: isCeo,
+      is_top_approver: isTop,
     });
   } catch (err) {
     console.error('Approvals page error:', err);

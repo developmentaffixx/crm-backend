@@ -498,6 +498,8 @@ async function isCeoUser(user) {
 
 /** Admin or CEO — the only people who can approve a Head's own task actions. */
 async function isTopApprover(user) {
+  if (!user) return false;
+  if (user.is_admin) return true;
   return isCeoUser(user);
 }
 
@@ -523,7 +525,7 @@ async function getHeadUserIds() {
  */
 async function headNeedsTopApproval(user, assigneeId) {
   if (!user || !assigneeId || Number(user.id) !== Number(assigneeId)) return false;
-  if (user.is_admin || (await isCeoUser(user))) return false;
+  if (await isTopApprover(user)) return false;
   const heads = await getHeadUserIds();
   return heads.has(Number(user.id));
 }
@@ -545,7 +547,7 @@ function approveOrTeamHeadGuard(canApproveFn, ownerIdsFn, restrictedFn) {
       // actioned by an Admin or CEO — never by a head or a regular approver.
       if (restrictedFn && (await restrictedFn(req))) {
         if (await isTopApprover(req.user)) return next();
-        return res.status(403).json({ message: 'This request needs approval from the CEO' });
+        return res.status(403).json({ message: 'This request needs approval from Admin or CEO' });
       }
 
       if (req.user.is_admin || (await canApproveFn(req.user))) return next();
