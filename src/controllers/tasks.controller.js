@@ -1,6 +1,6 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
-const { canApproveTasks, getTeamScopeForHead, isTaskInHeadScope, headNeedsTopApproval } = require('../middleware/auth');
+const { canApproveTasks, getTeamScopeForHead, isTaskInHeadScope, headNeedsTopApproval, isCeoUser } = require('../middleware/auth');
 
 // Build a SQL fragment + params that match tasks assigned to (or created by)
 // any user in `memberIds`. Returns { sql, params } or null when empty.
@@ -59,6 +59,105 @@ async function syncAssignees(taskId, primaryUserId, collaboratorIds = []) {
     }
   }
 }
+
+/**
+ * GET /api/tasks/filter-options
+ * Role-aware options for the Tasks page Filter popover:
+ *   - Admin / CEO / View=All / approver -> scope 'all'  : all projects, all teams, all users
+ *   - Team head                          -> scope 'head' : projects of the head + team members,
+ *                                                          their own team(s), their team members
+ *   - Member                             -> scope 'member': only projects they are assigned to
+ */
+exports.filterOptions = async (req, res) => {
+  try {
+    const uid = req.user.id;
+    let scope = 'member';
+
+    if (req.user.is_admin || (await isCeoUser(req.user))) {
+      scope = 'all';
+    } else {
+      let canView = 0, canApprove = 0;
+      const [ov] = await db.query(
+        'SELECT can_view, can_approve FROM user_permissions WHERE user_id = ? AND module = ?',
+        [uid, 'tasks']
+      );
+      if (ov.length > 0) {
+        canView = ov[0].can_view; canApprove = ov[0].can_approve;
+      } else {
+        const [ur] = await db.query('SELECT role_id FROM users WHERE id = ?', [uid]);
+        if (ur.length > 0 && ur[0].role_id) {
+          const [rp] = await db.query(
+            'SELECT can_view, can_approve FROM role_permissions WHERE role_id = ? AND module = ?',
+            [ur[0].role_id, 'tasks']
+          );
+          if (rp.length > 0) { canView = rp[0].can_view; canApprove = rp[0].can_approve; }
+        }
+      }
+      if (canView >= 2 || canApprove) scope = 'all';
+    }
+
+    let teamScope = { isHead: false, teamIds: [], memberIds: [] };
+    if (scope !== 'all') {
+      teamScope = await getTeamScopeForHead(uid);
+      if (teamScope.isHead && teamScope.memberIds.length > 0) scope = 'head';
+    }
+
+    // ── Projects ──
+    let projects;
+    if (scope === 'all') {
+      [projects] = await db.query(
+        'SELECT id, title FROM projects WHERE deleted = 0 ORDER BY title ASC'
+      );
+    } else {
+      const ids = scope === 'head' ? teamScope.memberIds : [uid];
+      [projects] = await db.query(
+        `SELECT DISTINCT p.id, p.title
+           FROM projects p
+          WHERE p.deleted = 0
+            AND (
+              p.created_by IN (?)
+              OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id IN (?))
+              OR EXISTS (SELECT 1 FROM project_service_members psm
+                           JOIN project_services ps ON ps.id = psm.project_service_id
+                          WHERE ps.project_id = p.id AND psm.user_id IN (?))
+            )
+          ORDER BY p.title ASC`,
+        [ids, ids, ids]
+      );
+    }
+
+    // ── Teams ──
+    let teams = [];
+    if (scope === 'all') {
+      [teams] = await db.query('SELECT id, name FROM teams WHERE deleted = 0 ORDER BY name ASC');
+    } else if (scope === 'head') {
+      [teams] = await db.query(
+        'SELECT id, name FROM teams WHERE deleted = 0 AND id IN (?) ORDER BY name ASC',
+        [teamScope.teamIds]
+      );
+    }
+
+    // ── Users (Assigned To) ──
+    let users = [];
+    if (scope === 'all') {
+      [users] = await db.query(
+        `SELECT id, first_name, last_name, avatar_url FROM users
+          WHERE deleted = 0 AND is_active = 1 ORDER BY first_name, last_name`
+      );
+    } else if (scope === 'head') {
+      [users] = await db.query(
+        `SELECT id, first_name, last_name, avatar_url FROM users
+          WHERE id IN (?) AND deleted = 0 ORDER BY first_name, last_name`,
+        [teamScope.memberIds]
+      );
+    }
+
+    return res.json({ scope, projects, teams, users });
+  } catch (err) {
+    console.error('Task filter options error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
 
 /**
  * GET /api/tasks/filter-users

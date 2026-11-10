@@ -44,6 +44,9 @@ router.get('/', tasksController.list);
 // GET  /api/tasks/filter-users   — users the viewer may filter by (team-aware)
 router.get('/filter-users', tasksController.filterUsers);
 
+// GET  /api/tasks/filter-options — role-aware projects / teams / users for the Filter popover
+router.get('/filter-options', tasksController.filterOptions);
+
 // GET  /api/tasks/pinned          — get current user's pinned tasks
 router.get('/pinned', tasksController.getPinnedTasks);
 
