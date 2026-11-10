@@ -366,6 +366,143 @@ exports.getUnifiedNotifications = async (req, res) => {
       }
     }
 
+    // ─── 10. Approval requests awaiting action (tasks + tickets) ─────────────────
+    // Admin / CEO: everything raised by Heads (plain members' items are handled by
+    // their Head, same as the Approvals page). Head: their team members' items.
+    try {
+      const { isCeoUser, getTeamScopeForHead, getHeadUserIds } = require('../middleware/auth');
+      const isTop = isAdmin || (await isCeoUser(req.user));
+      let scopeIds = [];
+      if (!isTop) {
+        const ts = await getTeamScopeForHead(userId);
+        if (ts.isHead) scopeIds = ts.memberIds.filter(id => id !== userId);
+      }
+
+      if (isTop || scopeIds.length > 0) {
+        // [sql fragment, params] limiting rows to the viewer's approval scope
+        const scope = (alias) => isTop
+          ? [`(${alias}.assigned_to IS NULL OR NOT EXISTS (
+                SELECT 1 FROM team_members tm_x
+                JOIN teams t_x ON t_x.id = tm_x.team_id AND t_x.deleted = 0
+                WHERE tm_x.user_id = ${alias}.assigned_to AND tm_x.role = 'member'))`, []]
+          : [`${alias}.assigned_to IN (?)`, [scopeIds]];
+        const push = (n) => notifications.push({ priority: 'medium', days_overdue: 0, ...n });
+
+        // Pending task creation / completion
+        const [tS, tP] = scope('t');
+        const [pendTasks] = await db.query(
+          `SELECT t.id, t.task_id_code, t.title, t.is_active, t.created_at,
+                  CONCAT(u.first_name, ' ', u.last_name) AS assignee
+             FROM tasks t LEFT JOIN users u ON u.id = t.assigned_to
+            WHERE t.deleted = 0 AND t.is_active IN (0, 2) AND ${tS}
+            ORDER BY t.created_at DESC LIMIT 15`, tP);
+        pendTasks.forEach(r => push({
+          id: `approval-task-${r.id}`, category: 'approval',
+          title: r.title,
+          subtitle: `${r.task_id_code || ''} • ${r.assignee || 'Unassigned'}`,
+          message: r.is_active === 0 ? 'New task awaiting approval' : 'Task completion awaiting approval',
+          link: '/approvals', date: r.created_at,
+        }));
+
+        // Task extension requests
+        const [eS, eP] = scope('te');
+        const [exts] = await db.query(
+          `SELECT er.id, er.created_at, te.title, te.task_id_code,
+                  CONCAT(u.first_name, ' ', u.last_name) AS requester
+             FROM task_deadline_extension_requests er
+             JOIN tasks te ON te.id = er.task_id
+             LEFT JOIN users u ON u.id = er.requested_by
+            WHERE er.deleted = 0 AND er.status = 'pending' AND ${eS}
+            ORDER BY er.created_at DESC LIMIT 15`, eP);
+        exts.forEach(r => push({
+          id: `approval-ext-${r.id}`, category: 'approval',
+          title: r.title,
+          subtitle: `${r.task_id_code || ''} • ${r.requester || ''}`,
+          message: 'Deadline extension request',
+          link: '/approvals', date: r.created_at,
+        }));
+
+        // Task close requests
+        const [cS, cP] = scope('tc');
+        const [closes] = await db.query(
+          `SELECT cr.id, cr.created_at, tc.title, tc.task_id_code,
+                  CONCAT(u.first_name, ' ', u.last_name) AS requester
+             FROM task_close_requests cr
+             JOIN tasks tc ON tc.id = cr.task_id
+             LEFT JOIN users u ON u.id = cr.requested_by
+            WHERE cr.deleted = 0 AND cr.status = 'pending' AND ${cS}
+            ORDER BY cr.created_at DESC LIMIT 15`, cP);
+        closes.forEach(r => push({
+          id: `approval-close-${r.id}`, category: 'approval',
+          title: r.title,
+          subtitle: `${r.task_id_code || ''} • ${r.requester || ''}`,
+          message: 'Task close request',
+          link: '/approvals', date: r.created_at,
+        }));
+
+        // Forward requests raised by a Head on their own task (Admin / CEO only)
+        if (isTop) {
+          const heads = [...(await getHeadUserIds())];
+          if (heads.length > 0) {
+            const [fwds] = await db.query(
+              `SELECT fr.id, fr.created_at, tf.title, tf.task_id_code,
+                      CONCAT(u1.first_name, ' ', u1.last_name) AS forwarded_by_name,
+                      CONCAT(u2.first_name, ' ', u2.last_name) AS forwarded_to_name
+                 FROM task_forward_requests fr
+                 JOIN tasks tf ON tf.id = fr.task_id
+                 LEFT JOIN users u1 ON u1.id = fr.forwarded_by
+                 LEFT JOIN users u2 ON u2.id = fr.forwarded_to
+                WHERE fr.deleted = 0 AND fr.status = 'pending'
+                  AND fr.forwarded_by IN (?) AND tf.assigned_to = fr.forwarded_by
+                ORDER BY fr.created_at DESC LIMIT 15`, [heads]);
+            fwds.forEach(r => push({
+              id: `approval-fwd-${r.id}`, category: 'approval',
+              title: r.title,
+              subtitle: `${r.task_id_code || ''} • ${r.forwarded_by_name} → ${r.forwarded_to_name}`,
+              message: 'Forward request awaiting approval',
+              link: '/approvals', date: r.created_at,
+            }));
+          }
+        }
+
+        // Ticket completion approvals
+        const [kS, kP] = scope('tk');
+        const [pendTickets] = await db.query(
+          `SELECT tk.id, tk.title, tk.marked_done_at,
+                  CONCAT(u.first_name, ' ', u.last_name) AS assignee
+             FROM tickets tk LEFT JOIN users u ON u.id = tk.assigned_to
+            WHERE tk.deleted = 0 AND tk.status = 'pending_done' AND ${kS}
+            ORDER BY tk.marked_done_at DESC LIMIT 15`, kP);
+        pendTickets.forEach(r => push({
+          id: `approval-ticket-${r.id}`, category: 'approval',
+          title: r.title,
+          subtitle: `Ticket • ${r.assignee || 'Unassigned'}`,
+          message: 'Ticket completion awaiting approval',
+          link: '/tickets', date: r.marked_done_at,
+        }));
+
+        // Ticket extension requests
+        const [xS, xP] = scope('tkx');
+        const [tExts] = await db.query(
+          `SELECT ter.id, ter.created_at, tkx.title,
+                  CONCAT(u.first_name, ' ', u.last_name) AS requester
+             FROM ticket_deadline_extension_requests ter
+             JOIN tickets tkx ON tkx.id = ter.ticket_id
+             LEFT JOIN users u ON u.id = ter.requested_by
+            WHERE ter.deleted = 0 AND ter.status = 'pending' AND ${xS}
+            ORDER BY ter.created_at DESC LIMIT 15`, xP);
+        tExts.forEach(r => push({
+          id: `approval-ticket-ext-${r.id}`, category: 'approval',
+          title: r.title,
+          subtitle: `Ticket • ${r.requester || ''}`,
+          message: 'Ticket deadline extension request',
+          link: '/tickets', date: r.created_at,
+        }));
+      }
+    } catch (apprErr) {
+      console.error('Approval notifications error:', apprErr.message);
+    }
+
     // ─── Sort: high priority first, then by date ────────────────────────────────
     const priorityOrder = { high: 0, medium: 1, low: 2 };
     notifications.sort((a, b) => {
@@ -390,6 +527,7 @@ exports.getUnifiedNotifications = async (req, res) => {
         announcement: notifications.filter(n => n.category === 'announcement').length,
         task_comment: notifications.filter(n => n.category === 'task_comment').length,
         smm_notification: notifications.filter(n => n.category === 'smm_notification').length,
+        approval: notifications.filter(n => n.category === 'approval').length,
       },
     };
 

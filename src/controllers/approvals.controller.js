@@ -860,6 +860,13 @@ exports.getApprovalsPage = async (req, res) => {
 // BADGE COUNT
 // ─────────────────────────────────────────────────────────────────────────────
 
+// SQL fragment: hide rows assigned to plain team members (their Head handles those).
+// Same default view as the Approvals page for Admin / CEO, so badge == list.
+const notPlainMember = (col) => `(${col} IS NULL OR NOT EXISTS (
+  SELECT 1 FROM team_members tm_b
+  JOIN teams t_b ON t_b.id = tm_b.team_id AND t_b.deleted = 0
+  WHERE tm_b.user_id = ${col} AND tm_b.role = 'member'))`;
+
 /**
  * GET /api/approvals/badge
  * Admin / Task Approver: total pending items across all users.
@@ -888,16 +895,16 @@ exports.getBadgeCount = async (req, res) => {
     // ── Task-related items (scoped by task approval permission) ──
     if (isTop) {
       const [[{ task_count }]] = await db.query(
-        "SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2)"
+        `SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND ${notPlainMember('assigned_to')}`
       );
       const [[{ ext_count }]] = await db.query(
-        "SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'"
+        `SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests er WHERE er.deleted = 0 AND er.status = 'pending' AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND ${notPlainMember('te.assigned_to')})`
       );
       const [[{ fwd_count }]] = await db.query(
-        "SELECT COUNT(*) AS fwd_count FROM task_forward_requests WHERE deleted = 0 AND status = 'pending'"
+        `SELECT COUNT(*) AS fwd_count FROM task_forward_requests fr WHERE fr.deleted = 0 AND fr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND ${notPlainMember('tf.assigned_to')})`
       );
       const [[{ cls_count }]] = await db.query(
-        "SELECT COUNT(*) AS cls_count FROM task_close_requests WHERE deleted = 0 AND status = 'pending'"
+        `SELECT COUNT(*) AS cls_count FROM task_close_requests cr WHERE cr.deleted = 0 AND cr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND ${notPlainMember('tc.assigned_to')})`
       );
       taskCount += task_count + ext_count + fwd_count + cls_count;
     } else if (taskHeadScope) {
@@ -945,9 +952,9 @@ exports.getBadgeCount = async (req, res) => {
     // ── Ticket-related items (scoped by ticket approval permission) ──
     let ticketPendingSql, ticketPendingParams, ticketExtSql, ticketExtParams;
     if (isTop) {
-      ticketPendingSql = "SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done'";
+      ticketPendingSql = `SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND ${notPlainMember('assigned_to')}`;
       ticketPendingParams = [];
-      ticketExtSql = "SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending'";
+      ticketExtSql = `SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests ter WHERE ter.deleted = 0 AND ter.status = 'pending' AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND ${notPlainMember('tke.assigned_to')})`;
       ticketExtParams = [];
     } else if (ticketHeadScope) {
       ticketPendingSql = `SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND assigned_to IN (${mp})`;
