@@ -53,12 +53,12 @@ exports.createExtension = async (req, res) => {
     return res.status(400).json({ message: 'Please select a delay type (Client side, Team side or General)' });
   }
   let delayReasons = [];
-  if (delayType === 'general') {
-    const letters = (rawReason.match(/[a-zA-Z]/g) || []).length;
-    if (letters < 30) {
-      return res.status(400).json({ message: 'Reason must contain at least 30 letters' });
-    }
-  } else {
+  // Every delay type requires a written reason of at least 30 letters.
+  const letters = (rawReason.match(/[a-zA-Z]/g) || []).length;
+  if (letters < 30) {
+    return res.status(400).json({ message: 'Reason must contain at least 30 letters' });
+  }
+  if (delayType !== 'general') {
     const allowed = delayType === 'client' ? CLIENT_OPTIONS : TEAM_OPTIONS;
     const selected = Array.isArray(req.body.delay_reasons) ? req.body.delay_reasons : [];
     delayReasons = [...new Set(selected.filter(o => allowed.includes(o)))];
@@ -71,7 +71,7 @@ exports.createExtension = async (req, res) => {
   const reason = rawReason;
   const reasonSummary = delayType === 'general'
     ? `General — ${rawReason}`
-    : `${typeLabel}: ${delayReasons.join(', ')}${rawReason ? ' — ' + rawReason : ''}`;
+    : `${typeLabel}: ${delayReasons.join(', ')} — ${rawReason}`;
 
   try {
     // Verify task exists and is active
