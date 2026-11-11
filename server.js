@@ -230,6 +230,9 @@ server.listen(PORT, () => {
 
   // ── Ensure CEO Reminder tables exist (auto-migrate on startup) ─────────────
   require('./src/config/ensureReminderTables')();
+
+  // ── Ensure Sales Meetings table exists (Revenue → Meetings) ────────────────
+  require('./src/config/ensureSalesMeetingsTable')();
   require('./src/config/ensureExtensionColumns')();
 
   // ── One-time: Ensure bank_account_name column exists in company_settings ───

@@ -215,6 +215,34 @@ exports.getOverview = async (req, res) => {
     const ap = apprRows?.[0] || {};
 
     // ═════════════════════════════════════════════════════════════════════════
+    // 6b. CONFIRMED SALES MEETINGS — Revenue → Meetings (pre_confirmed = 1),
+    //     upcoming (today onwards) and not yet finished (outcome = 'pending')
+    // ═════════════════════════════════════════════════════════════════════════
+    const smCountRows = await safeQuery(
+      `SELECT
+         SUM(meeting_date = CURDATE())                                         AS today,
+         SUM(meeting_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 6 DAY)) AS next_7_days,
+         COUNT(*)                                                              AS upcoming
+       FROM sales_meetings
+       WHERE deleted = 0 AND pre_confirmed = 1 AND outcome = 'pending'
+         AND meeting_date >= CURDATE()`
+    );
+    const smList = await safeQuery(
+      `SELECT sm.id, sm.title, sm.meeting_date, sm.slot, sm.mode, sm.pre_confirmed_at,
+              COALESCE(l.business_name, l.name) AS client_name,
+              l.lead_stage,
+              CONCAT(u.first_name, ' ', u.last_name) AS booked_by
+         FROM sales_meetings sm
+         LEFT JOIN leads l ON l.id = sm.lead_id
+         LEFT JOIN users u ON u.id = sm.created_by
+        WHERE sm.deleted = 0 AND sm.pre_confirmed = 1 AND sm.outcome = 'pending'
+          AND sm.meeting_date >= CURDATE()
+        ORDER BY sm.meeting_date ASC, FIELD(sm.slot, 'morning', 'afternoon', 'evening')
+        LIMIT 10`
+    ) || [];
+    const smc = smCountRows?.[0] || {};
+
+    // ═════════════════════════════════════════════════════════════════════════
     // 7. MONTHLY TREND — last 6 months (including current)
     // ═════════════════════════════════════════════════════════════════════════
     const trendRevenue = await safeQuery(
@@ -312,6 +340,12 @@ exports.getOverview = async (req, res) => {
           reimbursements: int(ap.reimbursements),
           total: int(ap.tasks) + int(ap.leaves) + int(ap.reimbursements),
         },
+      },
+      sales_meetings: {
+        today: int(smc.today),
+        next_7_days: int(smc.next_7_days),
+        upcoming: int(smc.upcoming),
+        list: smList,
       },
       monthly_trend,
     });
