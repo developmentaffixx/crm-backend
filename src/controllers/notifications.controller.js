@@ -503,6 +503,55 @@ exports.getUnifiedNotifications = async (req, res) => {
       console.error('Approval notifications error:', apprErr.message);
     }
 
+    // ─── 10. Reminders from CEO (only the recipient sees them) ──────────────────
+    try {
+      const [remRows] = await db.query(
+        `SELECT id, title, type, priority, status, due_at, followup_count, delivered_at,
+                (due_at IS NOT NULL AND due_at < NOW()) AS overdue,
+                TIMESTAMPDIFF(DAY, due_at, NOW()) AS days_late
+           FROM ceo_reminders
+          WHERE deleted = 0 AND recipient_user_id = ?
+            AND status IN ('pending','viewed','acknowledged','in_progress')
+          ORDER BY FIELD(priority, 'critical','high','medium','low'), (due_at IS NULL), due_at ASC
+          LIMIT 20`,
+        [userId]
+      );
+
+      const undelivered = remRows.filter(r => !r.delivered_at).map(r => r.id);
+      if (undelivered.length) {
+        await db.query('UPDATE ceo_reminders SET delivered_at = NOW() WHERE id IN (?) AND delivered_at IS NULL', [undelivered]);
+      }
+
+      const typeLabel = {
+        task: 'Task', ticket: 'Ticket', deadline: 'Deadline', meeting: 'Meeting',
+        discussion: 'Discussion', follow_up: 'Follow-up', general: 'General',
+      };
+      remRows.forEach(r => {
+        const overdue = !!r.overdue;
+        const due = r.due_at
+          ? new Date(String(r.due_at).replace(' ', 'T')).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+          : null;
+        notifications.push({
+          // follow-up count in the id makes a follow-up resurface even if dismissed
+          id: `ceo-rem-${r.id}-${r.followup_count}`,
+          category: 'ceo_reminder',
+          priority: overdue || ['critical', 'high'].includes(r.priority) ? 'high' : r.priority === 'medium' ? 'medium' : 'low',
+          title: `Reminder from CEO: ${r.title}`,
+          subtitle: `${typeLabel[r.type] || 'Reminder'} · ${r.status.replace('_', ' ')}`,
+          message: overdue ? 'Overdue' : due ? `Due ${due}` : 'No due date',
+          link: '/dashboard?reminders=1',
+          date: r.due_at,
+          days_overdue: overdue ? Math.max(0, r.days_late || 0) : 0,
+          // Not yet acknowledged → can't be dismissed from the bell
+          sticky: r.status === 'pending' || r.status === 'viewed',
+        });
+      });
+    } catch (remErr) {
+      if (remErr.code !== 'ER_NO_SUCH_TABLE') {
+        console.error('CEO reminders notifications error:', remErr.message);
+      }
+    }
+
     // ─── Sort: high priority first, then by date ────────────────────────────────
     const priorityOrder = { high: 0, medium: 1, low: 2 };
     notifications.sort((a, b) => {
@@ -528,6 +577,7 @@ exports.getUnifiedNotifications = async (req, res) => {
         task_comment: notifications.filter(n => n.category === 'task_comment').length,
         smm_notification: notifications.filter(n => n.category === 'smm_notification').length,
         approval: notifications.filter(n => n.category === 'approval').length,
+        ceo_reminder: notifications.filter(n => n.category === 'ceo_reminder').length,
       },
     };
 

@@ -75,6 +75,7 @@ const pmDashboardRoutes      = require('./src/routes/pmDashboard.routes');
 const hrDashboardRoutes      = require('./src/routes/hrDashboard.routes');
 const financeDashboardRoutes = require('./src/routes/financeDashboard.routes');
 const ceoDashboardRoutes     = require('./src/routes/ceoDashboard.routes');
+const ceoRemindersRoutes     = require('./src/routes/ceoReminders.routes');
 const salesMeetingsRoutes    = require('./src/routes/salesMeetings.routes');
 
 const app    = express();
@@ -181,6 +182,7 @@ app.use('/api/pm-dashboard',           pmDashboardRoutes);
 app.use('/api/hr-dashboard',           hrDashboardRoutes);
 app.use('/api/finance-dashboard',      financeDashboardRoutes);
 app.use('/api/ceo-dashboard',          ceoDashboardRoutes);
+app.use('/api/ceo-reminders',          ceoRemindersRoutes);
 app.use('/api/sales-meetings',         salesMeetingsRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
@@ -225,6 +227,9 @@ server.listen(PORT, () => {
 
   // ── Ensure Team Management tables exist (auto-migrate on startup) ──────────
   require('./src/config/ensureTeamTables')();
+
+  // ── Ensure CEO Reminder tables exist (auto-migrate on startup) ─────────────
+  require('./src/config/ensureReminderTables')();
   require('./src/config/ensureExtensionColumns')();
 
   // ── One-time: Ensure bank_account_name column exists in company_settings ───
@@ -278,4 +283,8 @@ server.listen(PORT, () => {
   // ── Start Cycle Activation Cron (06:00 IST daily) ───────────────────────────
   const { startCycleActivationCron } = require('./src/jobs/cycleActivationCron');
   startCycleActivationCron();
+
+  // ── Start CEO Reminders Cron (every 5 min: due-soon + overdue alerts) ──────
+  const { startCeoRemindersCron } = require('./src/jobs/ceoRemindersCron');
+  startCeoRemindersCron();
 });
