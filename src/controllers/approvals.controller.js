@@ -666,14 +666,14 @@ exports.getApprovalsPage = async (req, res) => {
         // This applies even if the head has can_approve via their role —
         // a head is a scoped approver for their team only, not globally.
         const mp = taskScopeIds.map(() => '?').join(',');
-        pendingTasksWhere += ` AND t.assigned_to IN (${mp})`;
-        pendingTasksParams = [...taskScopeIds];
-        extWhere += ` AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND te.assigned_to IN (${mp}))`;
-        extParams = [...taskScopeIds];
-        fwdWhere += ` AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND tf.assigned_to IN (${mp}))`;
-        fwdParams = [...taskScopeIds];
-        clsWhere += ` AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${mp}))`;
-        clsParams = [...taskScopeIds];
+        pendingTasksWhere += ` AND (t.assigned_to IN (${mp}) OR t.assigned_to = ? OR t.created_by = ?)`;
+        pendingTasksParams = [...taskScopeIds, userId, userId];
+        extWhere += ` AND (er.requested_by = ? OR EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND te.assigned_to IN (${mp})))`;
+        extParams = [userId, ...taskScopeIds];
+        fwdWhere += ` AND (fr.forwarded_by = ? OR fr.forwarded_to = ? OR EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND tf.assigned_to IN (${mp})))`;
+        fwdParams = [userId, userId, ...taskScopeIds];
+        clsWhere += ` AND (cr.requested_by = ? OR EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${mp})))`;
+        clsParams = [userId, ...taskScopeIds];
       } else {
         // Plain user (no team head role): only their own items.
         pendingTasksWhere += ' AND (t.created_by = ? OR t.assigned_to = ?)';
@@ -768,8 +768,8 @@ exports.getApprovalsPage = async (req, res) => {
       )`;
     } else if (!isAdmin) {
       if (ticketHeadScope) {
-        pendingTicketsWhere += ` AND tk.assigned_to IN (${tmp})`;
-        pendingTicketsParams = [...ticketScopeIds];
+        pendingTicketsWhere += ` AND (tk.assigned_to IN (${tmp}) OR tk.assigned_to = ? OR tk.reported_by = ?)`;
+        pendingTicketsParams = [...ticketScopeIds, userId, userId];
       } else {
         pendingTicketsWhere += ' AND (tk.assigned_to = ? OR tk.reported_by = ?)';
         pendingTicketsParams = [userId, userId];
@@ -809,8 +809,8 @@ exports.getApprovalsPage = async (req, res) => {
       )`;
     } else if (!isAdmin) {
       if (ticketHeadScope) {
-        ticketExtWhere += ` AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${tmp}))`;
-        ticketExtParams = [...ticketScopeIds];
+        ticketExtWhere += ` AND (ter.requested_by = ? OR EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${tmp})))`;
+        ticketExtParams = [userId, ...ticketScopeIds];
       } else {
         ticketExtWhere += ' AND ter.requested_by = ?';
         ticketExtParams = [userId];
@@ -857,16 +857,16 @@ exports.getApprovalsPage = async (req, res) => {
       requires_top_approval: headIds.has(r.requested_by) && r.ticket_assigned_to === r.requested_by,
     }));
     if (!isTop && ticketHeadScope) {
-      outTickets = outTickets.filter(r => !r.requires_top_approval);
-      outTicketExt = outTicketExt.filter(r => !r.requires_top_approval);
+      outTickets = outTickets.filter(r => !r.requires_top_approval || r.assigned_to_id === userId);
+      outTicketExt = outTicketExt.filter(r => !r.requires_top_approval || r.requested_by === userId);
     }
 
     if (!isTop && isHeadScope) {
       // A head cannot action another head's own requests — hide them.
-      outTasks = outTasks.filter(r => !r.requires_top_approval);
-      outExt = outExt.filter(r => !r.requires_top_approval);
-      outFwd = outFwd.filter(r => !r.requires_top_approval);
-      outCls = outCls.filter(r => !r.requires_top_approval);
+      outTasks = outTasks.filter(r => !r.requires_top_approval || r.assigned_to_id === userId);
+      outExt = outExt.filter(r => !r.requires_top_approval || r.requested_by === userId);
+      outFwd = outFwd.filter(r => !r.requires_top_approval || r.forwarded_by === userId);
+      outCls = outCls.filter(r => !r.requires_top_approval || r.requested_by === userId);
     }
 
     return res.json({
@@ -941,20 +941,20 @@ exports.getBadgeCount = async (req, res) => {
       const ids = taskScopeIds;
       const taskMp = ids.map(() => '?').join(',');
       const [[{ task_count }]] = await db.query(
-        `SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND assigned_to IN (${taskMp})`,
-        [...ids]
+        `SELECT COUNT(*) AS task_count FROM tasks WHERE deleted = 0 AND is_active IN (0, 2) AND (assigned_to IN (${taskMp}) OR assigned_to = ? OR created_by = ?)`,
+        [...ids, userId, userId]
       );
       const [[{ ext_count }]] = await db.query(
-        `SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests er WHERE er.deleted = 0 AND er.status = 'pending' AND EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND te.assigned_to IN (${taskMp}))`,
-        [...ids]
+        `SELECT COUNT(*) AS ext_count FROM task_deadline_extension_requests er WHERE er.deleted = 0 AND er.status = 'pending' AND (er.requested_by = ? OR EXISTS (SELECT 1 FROM tasks te WHERE te.id = er.task_id AND te.assigned_to IN (${taskMp})))`,
+        [userId, ...ids]
       );
       const [[{ fwd_count }]] = await db.query(
-        `SELECT COUNT(*) AS fwd_count FROM task_forward_requests fr WHERE fr.deleted = 0 AND fr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND tf.assigned_to IN (${taskMp}))`,
-        [...ids]
+        `SELECT COUNT(*) AS fwd_count FROM task_forward_requests fr WHERE fr.deleted = 0 AND fr.status = 'pending' AND (fr.forwarded_by = ? OR fr.forwarded_to = ? OR EXISTS (SELECT 1 FROM tasks tf WHERE tf.id = fr.task_id AND tf.assigned_to IN (${taskMp})))`,
+        [userId, userId, ...ids]
       );
       const [[{ cls_count }]] = await db.query(
-        `SELECT COUNT(*) AS cls_count FROM task_close_requests cr WHERE cr.deleted = 0 AND cr.status = 'pending' AND EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${taskMp}))`,
-        [...ids]
+        `SELECT COUNT(*) AS cls_count FROM task_close_requests cr WHERE cr.deleted = 0 AND cr.status = 'pending' AND (cr.requested_by = ? OR EXISTS (SELECT 1 FROM tasks tc WHERE tc.id = cr.task_id AND tc.assigned_to IN (${taskMp})))`,
+        [userId, ...ids]
       );
       taskCount += task_count + ext_count + fwd_count + cls_count;
     } else {
@@ -986,10 +986,10 @@ exports.getBadgeCount = async (req, res) => {
       ticketExtSql = `SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests ter WHERE ter.deleted = 0 AND ter.status = 'pending' AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND ${notPlainMember('tke.assigned_to')})`;
       ticketExtParams = [];
     } else if (ticketHeadScope) {
-      ticketPendingSql = `SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND assigned_to IN (${mp})`;
-      ticketPendingParams = [...taskScopeIds];
-      ticketExtSql = `SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests ter WHERE ter.deleted = 0 AND ter.status = 'pending' AND EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${mp}))`;
-      ticketExtParams = [...taskScopeIds];
+      ticketPendingSql = `SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to IN (${mp}) OR assigned_to = ? OR reported_by = ?)`;
+      ticketPendingParams = [...taskScopeIds, userId, userId];
+      ticketExtSql = `SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests ter WHERE ter.deleted = 0 AND ter.status = 'pending' AND (ter.requested_by = ? OR EXISTS (SELECT 1 FROM tickets tke WHERE tke.id = ter.ticket_id AND tke.assigned_to IN (${mp})))`;
+      ticketExtParams = [userId, ...taskScopeIds];
     } else {      ticketPendingSql = "SELECT COUNT(*) AS c FROM tickets WHERE deleted = 0 AND status = 'pending_done' AND (assigned_to = ? OR reported_by = ?)";
       ticketPendingParams = [userId, userId];
       ticketExtSql = "SELECT COUNT(*) AS c FROM ticket_deadline_extension_requests WHERE deleted = 0 AND status = 'pending' AND requested_by = ?";
