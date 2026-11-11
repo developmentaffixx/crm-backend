@@ -38,7 +38,36 @@ exports.createExtension = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array(), message: errors.array()[0]?.msg });
 
-  const { task_id, requested_deadline, reason } = req.body;
+  const { task_id, requested_deadline } = req.body;
+  const rawReason = (req.body.reason || '').trim();
+
+  // ── Delay type + options ──
+  const CLIENT_OPTIONS = ['Shoot Approval', 'Content Approval', 'Calendar Approval', 'Creatives Completion'];
+  const TEAM_OPTIONS = ['Design Delay', 'Editing Delay', 'Source Delay', 'Content Input Delay', 'Internal Approval Delay'];
+  const delayType = ['client', 'team', 'general'].includes(req.body.delay_type) ? req.body.delay_type : null;
+  if (!delayType) {
+    return res.status(400).json({ message: 'Please select a delay type (Client side, Team side or General)' });
+  }
+  let delayReasons = [];
+  if (delayType === 'general') {
+    const letters = (rawReason.match(/[a-zA-Z]/g) || []).length;
+    if (letters < 30) {
+      return res.status(400).json({ message: 'Reason must contain at least 30 letters' });
+    }
+  } else {
+    const allowed = delayType === 'client' ? CLIENT_OPTIONS : TEAM_OPTIONS;
+    const selected = Array.isArray(req.body.delay_reasons) ? req.body.delay_reasons : [];
+    delayReasons = [...new Set(selected.filter(o => allowed.includes(o)))];
+    if (delayReasons.length === 0) {
+      return res.status(400).json({ message: 'Select at least one reason' });
+    }
+  }
+  const typeLabel = delayType === 'client' ? 'Client side' : delayType === 'team' ? 'Team side' : 'General';
+  // Readable summary used in the activity log: "Client side: A, B — note"
+  const reason = rawReason;
+  const reasonSummary = delayType === 'general'
+    ? `General — ${rawReason}`
+    : `${typeLabel}: ${delayReasons.join(', ')}${rawReason ? ' — ' + rawReason : ''}`;
 
   try {
     // Verify task exists and is active
@@ -68,19 +97,19 @@ exports.createExtension = async (req, res) => {
     const initialStatus = canApprove ? 'approved' : 'pending';
 
     const [result] = await db.query(
-      'INSERT INTO task_deadline_extension_requests (task_id, requested_by, requested_deadline, reason, status, actioned_by) VALUES (?, ?, ?, ?, ?, ?)',
-      [task_id, req.user.id, requested_deadline, reason, initialStatus, canApprove ? req.user.id : null]
+      'INSERT INTO task_deadline_extension_requests (task_id, requested_by, requested_deadline, reason, delay_type, delay_reasons, status, actioned_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [task_id, req.user.id, requested_deadline, reason, delayType, JSON.stringify(delayReasons), initialStatus, canApprove ? req.user.id : null]
     );
 
     if (canApprove) {
       await db.query('UPDATE tasks SET deadline = ? WHERE id = ?', [requested_deadline, task_id]);
       await logActivity(task_id, req.user.id, 'extension_approved', {
-        note: `Deadline updated directly by manager to ${new Date(requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${reason ? ' — Reason: ' + reason : ''}`
+        note: `Deadline updated directly by manager to ${new Date(requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} — Reason: ${reasonSummary}`
       });
     } else {
       // Log to task activity
       await logActivity(task_id, req.user.id, 'extension_requested', {
-        note: `Requested new deadline: ${new Date(requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${reason ? ' — Reason: ' + reason : ''}`
+        note: `Requested new deadline: ${new Date(requested_deadline).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} — Reason: ${reasonSummary}`
       });
     }
 

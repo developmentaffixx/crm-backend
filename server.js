@@ -225,6 +225,7 @@ server.listen(PORT, () => {
 
   // ── Ensure Team Management tables exist (auto-migrate on startup) ──────────
   require('./src/config/ensureTeamTables')();
+  require('./src/config/ensureExtensionColumns')();
 
   // ── One-time: Ensure bank_account_name column exists in company_settings ───
   const db = require('./src/config/db');
