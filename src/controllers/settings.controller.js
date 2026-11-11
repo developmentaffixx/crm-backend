@@ -76,6 +76,12 @@ exports.createRole = async (req, res) => {
       [permValues]
     );
 
+    // New roles start with "Delay Request" ON (can be switched off in Roles → Tasks)
+    await db.query(
+      "INSERT IGNORE INTO role_submenu_permissions (role_id, module, submenu, can_access) VALUES (?, 'tasks', 'delay_request', 1)",
+      [roleId]
+    );
+
     await logAudit(db, req.user.id, 'role_created', 'role', roleId, { name }, req.ip);
 
     return res.status(201).json({ message: 'Role created', id: roleId });

@@ -2,7 +2,7 @@ const { validationResult } = require('express-validator');
 const db = require('../config/db');
 const {
   canApproveTasks, canApproveTickets, getTeamScopeForHead,
-  isTopApprover, isCeoUser, getHeadUserIds, headNeedsTopApproval,
+  isTopApprover, isCeoUser, getHeadUserIds, headNeedsTopApproval, getSubmenuAccess,
 } = require('../middleware/auth');
 
 // Helper: Log to task_activity_log
@@ -44,7 +44,11 @@ exports.createExtension = async (req, res) => {
   // ── Delay type + options ──
   const CLIENT_OPTIONS = ['Shoot Approval', 'Content Approval', 'Calendar Approval', 'Creatives Completion'];
   const TEAM_OPTIONS = ['Design Delay', 'Editing Delay', 'Source Delay', 'Content Input Delay', 'Internal Approval Delay'];
-  const delayType = ['client', 'team', 'general'].includes(req.body.delay_type) ? req.body.delay_type : null;
+  // Client / Team delay types need the "Delay Request" permission (Settings → Roles → Tasks).
+  // Without it the request is treated as General (reason with 30+ letters).
+  const canUseDelayTypes = req.user.is_admin || ((await getSubmenuAccess(req.user.id, 'tasks', 'delay_request')) >= 1);
+  const requestedType = ['client', 'team', 'general'].includes(req.body.delay_type) ? req.body.delay_type : null;
+  const delayType = canUseDelayTypes ? requestedType : 'general';
   if (!delayType) {
     return res.status(400).json({ message: 'Please select a delay type (Client side, Team side or General)' });
   }
