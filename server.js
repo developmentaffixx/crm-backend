@@ -290,4 +290,10 @@ server.listen(PORT, () => {
   // ── Start CEO Reminders Cron (every 5 min: due-soon + overdue alerts) ──────
   const { startCeoRemindersCron } = require('./src/jobs/ceoRemindersCron');
   startCeoRemindersCron();
+
+  // ── Ads two-stage approval: schema + approved → active on start date ───────
+  require('./src/helpers/adsWorkflow').ensureAdsWorkflowSchema()
+    .catch(err => console.error('⚠️  Ads workflow schema error (non-fatal):', err.message));
+  const { startAdsActivationCron } = require('./src/jobs/adsActivationCron');
+  startAdsActivationCron();
 });

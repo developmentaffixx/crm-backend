@@ -6,6 +6,7 @@ const db = require('../config/db');
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const { getSocialSubmenuAccess } = require('../middleware/socialAccess');
+const { statusOnApproval, logAdsHistory } = require('../helpers/adsWorkflow');
 
 const TABLE_MAP = {
   post: 'content_calendar_posts',
@@ -22,11 +23,33 @@ async function createSmmNotification(conn, { user_id, triggered_by, type, slot_t
   );
 }
 
+// ─── Helper: approve linked ad campaign (→ 'active' if already started) ──────
+async function syncAdCampaignApproved(slotId, slotStartDate, userId) {
+  try {
+    const [camps] = await db.query(
+      `SELECT id, start_date, status FROM ad_campaigns
+       WHERE (linked_calendar_ad_id = ? OR calendar_slot_id = ?) AND deleted = 0`,
+      [slotId, slotId]
+    );
+    for (const c of camps) {
+      if (['report_pending', 'completed'].includes(c.status)) continue;
+      const next = statusOnApproval(c.start_date || slotStartDate);
+      await db.query('UPDATE ad_campaigns SET status = ? WHERE id = ?', [next, c.id]);
+      try {
+        await db.query('UPDATE ad_campaigns SET approved_by = ?, approved_at = NOW(), approval_remarks = NULL WHERE id = ?', [userId, c.id]);
+      } catch (e) { /* columns not migrated yet */ }
+      await logAdsHistory(c.id, 'approve', 'Approved from Content Calendar', userId);
+    }
+  } catch (syncErr) {
+    console.warn('[approveSlot] Ad campaign sync warning:', syncErr.message);
+  }
+}
+
 // ─── Helper: Get link for slot type ───────────────────────────────────────────
 function getPageLink(slot_type) {
   if (slot_type === 'post') return '/social/write-content';
   if (slot_type === 'shoot') return '/social/shoots';
-  if (slot_type === 'ad') return '/social/ads-planning';
+  if (slot_type === 'ad') return '/social/ads';
   return '/social/content-calendar';
 }
 
@@ -246,6 +269,7 @@ exports.listSlots = async (req, res) => {
                 acmp.campaign_name AS linked_campaign_name,
                 acmp.campaign_id_code AS linked_campaign_code,
                 acmp.status AS linked_campaign_status,
+                acmp.id AS campaign_id_resolved,
                 COALESCE(acmp.objective, ca.campaign_objective) AS campaign_objective_resolved,
                 COALESCE(acmp.budget, ca.budget) AS budget_resolved,
                 acmp.notes AS campaign_notes,
@@ -614,13 +638,19 @@ exports.smmReview = async (req, res) => {
   try {
     const { item_type, item_id, action = 'accept', reason } = req.body;
 
+    if (!item_type || !item_id) {
+      return res.status(400).json({ message: 'item_type and item_id are required' });
+    }
+
+    // Ads use their own single-stage campaign approval (Ads Campaign Approval toggle)
+    if (item_type === 'ad') {
+      if (action === 'rework') return exports.rejectSlot(req, res); // gate checked there
+      return res.status(400).json({ message: 'Ad slots skip SMM review. Use Approve (Ads Campaign Approval) instead.' });
+    }
+
     const canSmm = req.user.is_admin || req.userCanSmmApprove;
     if (!canSmm) {
       return res.status(403).json({ message: 'Only admin or users with SMM Approval permission can review slots' });
-    }
-
-    if (!item_type || !item_id) {
-      return res.status(400).json({ message: 'item_type and item_id are required' });
     }
 
     const table = TABLE_MAP[item_type];
@@ -677,10 +707,16 @@ exports.approveSlot = async (req, res) => {
   try {
     const { item_type, item_id } = req.body;
 
-    // PC/PM approval (final sign-off). Backward-compat: legacy can_approve still works.
-    const canApprove = req.user.is_admin || req.userCanPcpmApprove || req.userCanApprove;
-    if (!canApprove) {
-      return res.status(403).json({ message: 'Only admin or users with PC/PM Approval permission can approve slots' });
+    // Ads → Ads Campaign Approval toggle. Others → PC/PM approval (legacy can_approve still works).
+    if (item_type === 'ad') {
+      if (!(req.user.is_admin || req.userCanAdsCampaignApprove)) {
+        return res.status(403).json({ message: 'Only users with Ads Campaign Approval permission can approve ad slots' });
+      }
+    } else {
+      const canApprove = req.user.is_admin || req.userCanPcpmApprove || req.userCanApprove;
+      if (!canApprove) {
+        return res.status(403).json({ message: 'Only admin or users with PC/PM Approval permission can approve slots' });
+      }
     }
 
     if (!item_type || !item_id) {
@@ -715,17 +751,8 @@ exports.approveSlot = async (req, res) => {
         console.warn('[approveSlot] Write request sync warning:', syncErr.message);
       }
     } else if (item_type === 'ad') {
-      try {
-        await db.query(
-          `UPDATE ad_campaigns
-           SET status = 'approved'
-           WHERE (linked_calendar_ad_id = ? OR calendar_slot_id = ?) AND deleted = 0`,
-          [item_id, item_id]
-        );
-        res.emitSocket('ads:updated', { status: 'approved' });
-      } catch (syncErr) {
-        console.warn('[approveSlot] Ad campaign sync warning:', syncErr.message);
-      }
+      await syncAdCampaignApproved(item_id, rows[0].start_date, req.user.id);
+      res.emitSocket('ads:updated', { status: 'approved' });
     }
 
     // Notify assignee
@@ -757,10 +784,26 @@ exports.rejectSlot = async (req, res) => {
   try {
     const { item_type, item_id, reason, action = 'reject' } = req.body;
 
-    // Either SMM reviewers or PC/PM approvers (or admin) can send a slot back.
-    const canReject = req.user.is_admin || req.userCanSmmApprove || req.userCanPcpmApprove || req.userCanApprove;
-    if (!canReject) {
-      return res.status(403).json({ message: 'Only admin or users with SMM / PC-PM Approval permission can reject or request re-work for slots' });
+    // Ads → Ads Campaign Approval toggle. Others → SMM reviewers or PC/PM approvers (or admin).
+    if (item_type === 'ad') {
+      if (!(req.user.is_admin || req.userCanAdsCampaignApprove)) {
+        return res.status(403).json({ message: 'Only users with Ads Campaign Approval permission can reject or send back ad slots' });
+      }
+      // A campaign that is being closed is reviewed through its report, not the slot
+      try {
+        const [camp] = await db.query(
+          `SELECT status FROM ad_campaigns WHERE (linked_calendar_ad_id = ? OR calendar_slot_id = ?) AND deleted = 0 LIMIT 1`,
+          [item_id, item_id]
+        );
+        if (camp.length && ['report_pending', 'completed'].includes(camp[0].status)) {
+          return res.status(400).json({ message: 'This ad is being closed. Review its closing report on the Ads page instead.' });
+        }
+      } catch (e) { /* ignore */ }
+    } else {
+      const canReject = req.user.is_admin || req.userCanSmmApprove || req.userCanPcpmApprove || req.userCanApprove;
+      if (!canReject) {
+        return res.status(403).json({ message: 'Only admin or users with SMM / PC-PM Approval permission can reject or request re-work for slots' });
+      }
     }
 
     if (!item_type || !item_id) {
@@ -856,11 +899,18 @@ exports.completeSlot = async (req, res) => {
 
     const slot = rows[0];
 
-    // Mark as Done is available to anyone holding EITHER approval toggle
-    // (SMM or PC/PM), the legacy Mark-as-Done permission, or admin.
-    const canComplete = req.user.is_admin || req.userCanComplete || req.userCanSmmApprove || req.userCanPcpmApprove;
-    if (!canComplete) {
-      return res.status(403).json({ message: 'Only admin or users with SMM / PC-PM Approval (or Mark as Done) permission can mark as completed' });
+    if (item_type === 'ad') {
+      // Closing an ad directly = approving its closing report (Stage 2)
+      if (!(req.user.is_admin || req.userCanAdsReportApprove)) {
+        return res.status(403).json({ message: 'Only users with Ads Report Approval permission can close ad slots. Submit Close & Report for approval instead.' });
+      }
+    } else {
+      // Mark as Done is available to anyone holding EITHER approval toggle
+      // (SMM or PC/PM), the legacy Mark-as-Done permission, or admin.
+      const canComplete = req.user.is_admin || req.userCanComplete || req.userCanSmmApprove || req.userCanPcpmApprove;
+      if (!canComplete) {
+        return res.status(403).json({ message: 'Only admin or users with SMM / PC-PM Approval (or Mark as Done) permission can mark as completed' });
+      }
     }
 
     // Must be approved first
@@ -1010,6 +1060,19 @@ exports.remodifySlot = async (req, res) => {
       return res.status(400).json({ message: 'Cannot re-modify a completed slot' });
     }
 
+    // Ads: block once the closing report has been submitted
+    if (item_type === 'ad') {
+      try {
+        const [camp] = await db.query(
+          `SELECT status FROM ad_campaigns WHERE (linked_calendar_ad_id = ? OR calendar_slot_id = ?) AND deleted = 0 LIMIT 1`,
+          [item_id, item_id]
+        );
+        if (camp.length && ['report_pending', 'completed'].includes(camp[0].status)) {
+          return res.status(400).json({ message: 'Cannot re-modify — the closing report has already been submitted' });
+        }
+      } catch (e) { /* ignore */ }
+    }
+
     // Block if the parent plan has already been shared with the client.
     const [planRows] = await db.query(
       'SELECT shared_with_client FROM content_calendar_plans WHERE id = ?',
@@ -1093,10 +1156,13 @@ exports.bulkApprove = async (req, res) => {
     }
 
     let approved = 0, skipped = 0;
+    const canApproveAds = !!(req.user.is_admin || req.userCanAdsCampaignApprove);
 
     for (const { item_type, item_id } of items) {
       const table = TABLE_MAP[item_type];
       if (!table) { skipped++; continue; }
+      // Ad slots need the Ads Campaign Approval toggle
+      if (item_type === 'ad' && !canApproveAds) { skipped++; continue; }
 
       const [rows] = await db.query(`SELECT * FROM ${table} WHERE id = ?`, [item_id]);
       if (rows.length === 0 || rows[0].slot_status !== 'submitted') { skipped++; continue; }
@@ -1118,6 +1184,8 @@ exports.bulkApprove = async (req, res) => {
         } catch (syncErr) {
           console.warn('[bulkApprove] Write request sync warning:', syncErr.message);
         }
+      } else if (item_type === 'ad') {
+        await syncAdCampaignApproved(item_id, rows[0].start_date, req.user.id);
       }
 
       // Notify assignee

@@ -3,6 +3,7 @@ const jwt    = require('jsonwebtoken');
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
 const { sendTemplateEmail } = require('../services/email.service');
+const { loadAdsPerms, mergeAdsPerms, saveAdsPerms } = require('../helpers/adsWorkflow');
 
 // ─── Audit Log Helper ─────────────────────────────────────────────────────────
 async function logAudit(db, userId, action, entityType, entityId, details, ip) {
@@ -265,6 +266,8 @@ exports.updateRolePermissions = async (req, res) => {
           [roleId, module, can_view, can_create, can_edit, can_delete, can_approve]
         );
       }
+      // Ads two-stage approval toggles (stored on the same row)
+      await saveAdsPerms('role_permissions', 'role_id', roleId, module, perm);
     }
 
     await logAudit(db, req.user.id, 'permissions_updated', 'role', roleId, { permissions }, req.ip);
@@ -512,6 +515,10 @@ exports.getUserPermissionOverrides = async (req, res) => {
       };
     });
 
+    // Ads two-stage approval toggles
+    mergeAdsPerms(rolePermissions, await loadAdsPerms('role_permissions', 'role_id', roleId));
+    mergeAdsPerms(userPermissions, await loadAdsPerms('user_permissions', 'user_id', userId));
+
     // Role-level submenu permissions (baseline)
     let roleSubmenuPermissions = {};
     if (roleId) {
@@ -597,6 +604,10 @@ exports.updateUserPermissionOverrides = async (req, res) => {
            VALUES ?`,
           [fallbackValues]
         );
+      }
+      // Ads two-stage approval toggles
+      for (const [module, p] of permEntries) {
+        await saveAdsPerms('user_permissions', 'user_id', userId, module, p);
       }
     }
 

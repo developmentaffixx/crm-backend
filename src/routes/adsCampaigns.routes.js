@@ -14,5 +14,6 @@ router.post('/', adsController.create);
 router.put('/:id', param('id').isInt(), adsController.update);
 router.delete('/:id', param('id').isInt(), adsController.remove);
 router.post('/:id/report', param('id').isInt(), adsController.saveReport);
+router.post('/:id/report/review', param('id').isInt(), adsController.reviewReport);
 
 module.exports = router;

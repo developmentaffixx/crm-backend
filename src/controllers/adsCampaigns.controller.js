@@ -1,4 +1,10 @@
-const db = require('../config/db');
+﻿const db = require('../config/db');
+const {
+  statusOnApproval, activateStartedCampaigns, logAdsHistory, notify,
+} = require('../helpers/adsWorkflow');
+
+const canApproveCampaign = (req) => !!(req.user.is_admin || req.userCanAdsCampaignApprove);
+const canApproveReport   = (req) => !!(req.user.is_admin || req.userCanAdsReportApprove);
 
 /**
  * Mark a content_calendar_ads slot as completed.
@@ -27,6 +33,7 @@ async function canModifyCampaign(req, campaign) {
   if (req.user.is_admin) return true;
   if (req.socialAccessLevel >= 2) return true;               // SMM lead — all campaigns
   if (req.userCanApprove || req.userCanSmmApprove) return true; // approvers act on any campaign
+  if (req.userCanAdsCampaignApprove || req.userCanAdsReportApprove) return true;
 
   const uid = Number(req.user.id);
   if (Number(campaign.created_by) === uid) return true;
@@ -55,6 +62,9 @@ async function canModifyCampaign(req, campaign) {
 // ─── LIST ────────────────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
+    // Keep approved → active promotion current between cron runs (max once a minute)
+    await activateStartedCampaigns({ minIntervalMs: 60 * 1000 });
+
     const { project_id, status, assigned_to, search } = req.query;
     const pageNum  = Math.max(1, parseInt(req.query.page) || 1);
     const limitNum = Math.min(200, Math.max(1, parseInt(req.query.limit) || 20));
@@ -182,6 +192,22 @@ exports.getOne = async (req, res) => {
     // Fetch report if exists
     const [report] = await db.query('SELECT * FROM ad_campaign_reports WHERE campaign_id = ?', [campaign.id]);
     campaign.report = report[0] || null;
+
+    // Approval trail names (columns added by the ads workflow migration)
+    try {
+      const [names] = await db.query(
+        `SELECT CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name,
+                CONCAT(s.first_name, ' ', s.last_name) AS report_submitted_by_name,
+                CONCAT(r.first_name, ' ', r.last_name) AS report_reviewed_by_name
+         FROM ad_campaigns ac
+         LEFT JOIN users a ON a.id = ac.approved_by
+         LEFT JOIN users s ON s.id = ac.report_submitted_by
+         LEFT JOIN users r ON r.id = ac.report_reviewed_by
+         WHERE ac.id = ?`,
+        [campaign.id]
+      );
+      Object.assign(campaign, names[0] || {});
+    } catch (e) { /* columns not migrated yet */ }
 
     return res.json(campaign);
   } catch (err) {
@@ -344,15 +370,54 @@ exports.update = async (req, res) => {
     }
 
     const campaign = existing[0];
+    const current = campaign.status;
+    const isApprover = canApproveCampaign(req);
+    const CLOSED = ['report_pending', 'completed'];
 
-    // Non-admin re-editing after rejection/approval → reset to pending_approval
-    // Admin can set any status directly — don't override
-    if (!req.user.is_admin && ['rejected', 'approved', 'active'].includes(campaign.status)) {
-      req.body.status = 'pending_approval';
+    // ─── Resolve the status transition (Stage 1: campaign approval) ──────────
+    let requested = req.body.status;
+    if (requested === '' || requested === null || requested === current) requested = undefined;
+    delete req.body.status;
+    let nextStatus;
+
+    if (requested) {
+      if (CLOSED.includes(requested)) {
+        return res.status(400).json({ message: 'Use Close & Report to close a campaign. The report then goes for approval.' });
+      }
+      if (CLOSED.includes(current)) {
+        return res.status(400).json({ message: 'This campaign is closed. Review the report instead.' });
+      }
+      if (['approved', 'active', 'rejected', 'paused'].includes(requested)) {
+        if (!isApprover) {
+          return res.status(403).json({ message: 'Only users with Ads Campaign Approval permission can approve, reject or pause campaigns' });
+        }
+        if (requested === 'rejected' && !['pending_approval', 'approved', 'active', 'paused'].includes(current)) {
+          return res.status(400).json({ message: `Cannot reject a campaign that is "${current}"` });
+        }
+        if (requested === 'paused' && !['approved', 'active'].includes(current)) {
+          return res.status(400).json({ message: 'Only approved or active campaigns can be paused' });
+        }
+      }
+      nextStatus = requested;
+      // Approving: go straight to 'active' if the start date has already arrived
+      if (requested === 'approved') {
+        nextStatus = statusOnApproval(req.body.start_date !== undefined ? req.body.start_date : campaign.start_date);
+      }
+    } else {
+      // Plain edit (no status decision)
+      if (CLOSED.includes(current) && !req.user.is_admin) {
+        return res.status(400).json({ message: 'This campaign is closed and can no longer be edited' });
+      }
+      if (current === 'rejected') {
+        nextStatus = 'pending_approval';                       // re-edit → resubmit
+      } else if (['approved', 'active', 'paused'].includes(current) && !isApprover) {
+        nextStatus = 'pending_approval';                       // changes need re-approval
+      }
     }
+    if (nextStatus && nextStatus !== current) req.body.status = nextStatus;
 
     // Approval/rework remarks come in a separate field so they don't overwrite campaign notes
-    const remarks = req.body.remarks ?? req.body.notes ?? null;
+    const remarks = req.body.remarks ?? null;
 
     const allowed = ['project_id', 'campaign_name', 'platform', 'objective', 'budget', 'start_date', 'end_date', 'assignment_type', 'assigned_to', 'status', 'notes'];
     const updates = {};
@@ -367,6 +432,25 @@ exports.update = async (req, res) => {
     if (Object.keys(updates).length > 0) {
       const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
       await db.query(`UPDATE ad_campaigns SET ${setClauses} WHERE id = ?`, [...Object.values(updates), req.params.id]);
+    }
+
+    // Record who approved / rejected (columns from the ads workflow migration)
+    if (updates.status) {
+      try {
+        if (['approved', 'active'].includes(updates.status) && !['approved', 'active', 'paused'].includes(current)) {
+          await db.query(
+            'UPDATE ad_campaigns SET approved_by = ?, approved_at = NOW(), approval_remarks = ? WHERE id = ?',
+            [req.user.id, remarks, req.params.id]
+          );
+        } else if (updates.status === 'rejected') {
+          await db.query(
+            'UPDATE ad_campaigns SET approved_by = NULL, approved_at = NULL, approval_remarks = ? WHERE id = ?',
+            [remarks || 'Rejected', req.params.id]
+          );
+        } else if (updates.status === 'pending_approval') {
+          await db.query('UPDATE ad_campaigns SET approval_remarks = NULL WHERE id = ?', [req.params.id]);
+        }
+      } catch (e) { /* columns not migrated yet */ }
     }
 
     // ─── Sync to calendar slot when status changes ────────────────────────────
@@ -427,7 +511,7 @@ exports.update = async (req, res) => {
           if (campaign.created_by) {
             await db.query(
               `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-               VALUES (?, ?, 'slot_approved', 'ad', ?, 'Your ad slot was approved!', 'Campaign is now live.', '/social/ads-planning')`,
+               VALUES (?, ?, 'slot_approved', 'ad', ?, 'Your ad slot was approved!', 'Campaign is now live.', '/social/ads')`,
               [campaign.created_by, req.user.id, slotId]
             );
             res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_approved' });
@@ -443,7 +527,7 @@ exports.update = async (req, res) => {
           if (campaign.created_by) {
             await db.query(
               `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-               VALUES (?, ?, 'slot_rejected', 'ad', ?, 'Your ad slot was rejected', ?, '/social/ads-planning')`,
+               VALUES (?, ?, 'slot_rejected', 'ad', ?, 'Your ad slot was rejected', ?, '/social/ads')`,
               [campaign.created_by, req.user.id, slotId, `Reason: ${remarks || 'Please re-edit'}`]
             );
             res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_rejected' });
@@ -481,75 +565,231 @@ exports.remove = async (req, res) => {
   }
 };
 
-// ─── SAVE POST-AD REPORT & CLOSE CAMPAIGN ────────────────────────────────────
+
+// ─── Report helpers ──────────────────────────────────────────────────────────
+
+function parseReportBody(body) {
+  const {
+    reach, impressions, clicks, ctr, cpc, cpl, leads, conversions,
+    amount_spent, amount, report, recommendations, best_performing_ad,
+  } = body;
+  const spentVal = (amount_spent !== undefined && amount_spent !== '') ? amount_spent
+    : ((amount !== undefined && amount !== '') ? amount : null);
+  const reportText = report || recommendations || null;
+  return {
+    metrics: [reach || 0, impressions || 0, clicks || 0, ctr || null, cpc || null, cpl || null, leads || 0, conversions || 0],
+    spentVal,
+    reportText,
+    bestAd: best_performing_ad || null,
+  };
+}
+
+async function upsertReport(campaignId, body, userId) {
+  const { metrics, spentVal, reportText, bestAd } = parseReportBody(body);
+  const [existing] = await db.query('SELECT id FROM ad_campaign_reports WHERE campaign_id = ?', [campaignId]);
+  if (existing.length > 0) {
+    await db.query(
+      `UPDATE ad_campaign_reports
+       SET reach=?, impressions=?, clicks=?, ctr=?, cpc=?, cpl=?, leads=?, conversions=?,
+           amount_spent=COALESCE(?, amount_spent), best_performing_ad=COALESCE(?, best_performing_ad), recommendations=COALESCE(?, recommendations)
+       WHERE campaign_id=?`,
+      [...metrics, spentVal, bestAd, reportText, campaignId]
+    );
+  } else {
+    await db.query(
+      `INSERT INTO ad_campaign_reports (campaign_id, reach, impressions, clicks, ctr, cpc, cpl, leads, conversions, amount_spent, best_performing_ad, recommendations, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [campaignId, ...metrics, spentVal, bestAd, reportText, userId]
+    );
+  }
+  const [rows] = await db.query('SELECT * FROM ad_campaign_reports WHERE campaign_id = ?', [campaignId]);
+  return rows[0] || null;
+}
+
+/** Copy the final report onto the calendar slot and mark it completed. */
+async function completeLinkedSlot(campaign, report, userId, res) {
+  const slotId = campaign.linked_calendar_ad_id || campaign.calendar_slot_id;
+  if (!slotId) return;
+  try {
+    await markAdSlotCompleted(slotId, userId);
+    try {
+      await db.query(
+        `UPDATE content_calendar_ads SET amount_spent = COALESCE(?, amount_spent), report_notes = COALESCE(?, report_notes) WHERE id = ?`,
+        [report?.amount_spent ?? null, report?.recommendations || report?.best_performing_ad || null, slotId]
+      );
+    } catch (e) { /* columns may not exist */ }
+    res.emitSocket('content-calendar:slot-completed', { item_type: 'ad', item_id: slotId });
+    res.emitSocket('content-calendar:updated', { slot_id: slotId });
+  } catch (slotErr) {
+    console.warn('Ad slot complete sync warning:', slotErr.message);
+  }
+}
+
+async function slotAssigner(campaign) {
+  const slotId = campaign.linked_calendar_ad_id || campaign.calendar_slot_id;
+  if (!slotId) return null;
+  try {
+    const [rows] = await db.query('SELECT assigned_by FROM content_calendar_ads WHERE id = ?', [slotId]);
+    return rows[0]?.assigned_by || null;
+  } catch (e) { return null; }
+}
+
+// ─── SAVE REPORT / CLOSE & REPORT (Stage 2 submit) ───────────────────────────
+// close_campaign / mark_completed = true  → submit the closing report for approval:
+//   approved | active | paused | report_pending  →  report_pending
+// An already-completed campaign's report can only be edited by a report approver.
 exports.saveReport = async (req, res) => {
   try {
     const campaignId = req.params.id;
-    const [campaign] = await db.query('SELECT * FROM ad_campaigns WHERE id = ? AND deleted = 0', [campaignId]);
-    if (campaign.length === 0) return res.status(404).json({ message: 'Campaign not found' });
+    const [rows] = await db.query('SELECT * FROM ad_campaigns WHERE id = ? AND deleted = 0', [campaignId]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Campaign not found' });
+    const campaign = rows[0];
 
-    const {
-      reach, impressions, clicks, ctr, cpc, cpl, leads, conversions,
-      amount_spent, amount, report, recommendations, best_performing_ad,
-      close_campaign, mark_completed
-    } = req.body;
-
-    const spentVal = (amount_spent !== undefined && amount_spent !== '') ? amount_spent
-      : ((amount !== undefined && amount !== '') ? amount : null);
-    const reportText = report || recommendations || best_performing_ad || null;
-
-    const [existing] = await db.query('SELECT id FROM ad_campaign_reports WHERE campaign_id = ?', [campaignId]);
-
-    if (existing.length > 0) {
-      await db.query(
-        `UPDATE ad_campaign_reports 
-         SET reach=?, impressions=?, clicks=?, ctr=?, cpc=?, cpl=?, leads=?, conversions=?, 
-             amount_spent=COALESCE(?, amount_spent), best_performing_ad=COALESCE(?, best_performing_ad), recommendations=COALESCE(?, recommendations) 
-         WHERE campaign_id=?`,
-        [reach||0, impressions||0, clicks||0, ctr||null, cpc||null, cpl||null, leads||0, conversions||0, spentVal, best_performing_ad||null, reportText, campaignId]
-      );
-    } else {
-      await db.query(
-        `INSERT INTO ad_campaign_reports (campaign_id, reach, impressions, clicks, ctr, cpc, cpl, leads, conversions, amount_spent, best_performing_ad, recommendations, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [campaignId, reach||0, impressions||0, clicks||0, ctr||null, cpc||null, cpl||null, leads||0, conversions||0, spentVal, best_performing_ad||null, reportText, req.user.id]
-      );
+    if (!(await canModifyCampaign(req, campaign))) {
+      return res.status(403).json({ message: 'You do not have permission to report on this campaign' });
     }
 
-    const shouldClose = close_campaign === true || close_campaign === 'true' || mark_completed === true || mark_completed === 'true';
-    if (shouldClose) {
-      await db.query(`UPDATE ad_campaigns SET status = 'completed' WHERE id = ?`, [campaignId]);
+    const { close_campaign, mark_completed } = req.body;
+    const wantsClose = [close_campaign, mark_completed].some(v => v === true || v === 'true');
 
-      const slotId = campaign[0].linked_calendar_ad_id || campaign[0].calendar_slot_id;
-      if (slotId) {
-        try {
-          await markAdSlotCompleted(slotId, req.user.id);
-          try {
-            await db.query(
-              `UPDATE content_calendar_ads SET amount_spent = COALESCE(?, amount_spent), report_notes = COALESCE(?, report_notes) WHERE id = ?`,
-              [spentVal, reportText, slotId]
-            );
-          } catch (e) { /* column may not exist */ }
-
-          res.emitSocket('content-calendar:slot-completed', { item_type: 'ad', item_id: slotId });
-          res.emitSocket('content-calendar:updated', { slot_id: slotId });
-        } catch (slotErr) {
-          console.warn('Ad slot close sync warning:', slotErr.message);
-        }
+    // Completed: report is final — only report approvers may correct it
+    if (campaign.status === 'completed') {
+      if (!canApproveReport(req)) {
+        return res.status(403).json({ message: 'This report is already approved. Only Ads Report approvers can edit it.' });
       }
+      const report = await upsertReport(campaignId, req.body, req.user.id);
+      await completeLinkedSlot(campaign, report, req.user.id, res); // keep slot amounts in sync
+      await logAdsHistory(campaignId, 'report_approve', 'Report edited after approval', req.user.id);
+      res.emitSocket('ads:report-saved', { campaign_id: campaignId, report });
+      res.emitSocket('ads:updated', { id: parseInt(campaignId), status: 'completed' });
+      return res.json({ message: 'Report updated', report, status: 'completed' });
     }
 
-    const [reportRow] = await db.query('SELECT * FROM ad_campaign_reports WHERE campaign_id = ?', [campaignId]);
-    res.emitSocket('ads:report-saved', { campaign_id: campaignId, report: reportRow[0] });
-    res.emitSocket('ads:updated', { id: parseInt(campaignId), status: shouldClose ? 'completed' : campaign[0].status });
+    if (wantsClose && !['approved', 'active', 'paused', 'report_pending'].includes(campaign.status)) {
+      return res.status(400).json({ message: 'The campaign must be approved before it can be closed' });
+    }
+
+    const report = await upsertReport(campaignId, req.body, req.user.id);
+
+    if (!wantsClose) {
+      res.emitSocket('ads:report-saved', { campaign_id: campaignId, report });
+      return res.json({ message: 'Report saved', report, status: campaign.status });
+    }
+
+    // Submit for Stage 2 approval
+    await db.query(`UPDATE ad_campaigns SET status = 'report_pending' WHERE id = ?`, [campaignId]);
+    try {
+      await db.query(
+        `UPDATE ad_campaigns SET report_submitted_by = ?, report_submitted_at = NOW(),
+                report_reviewed_by = NULL, report_reviewed_at = NULL, report_review_remarks = NULL
+         WHERE id = ?`,
+        [req.user.id, campaignId]
+      );
+    } catch (e) { /* columns not migrated yet */ }
+
+    const resubmit = campaign.status === 'report_pending';
+    await logAdsHistory(campaignId, 'report_submit', resubmit ? 'Report updated' : null, req.user.id);
+
+    const assigner = await slotAssigner(campaign);
+    if (assigner && Number(assigner) !== Number(req.user.id)) {
+      await notify({
+        user_id: assigner,
+        triggered_by: req.user.id,
+        type: 'ad_report_submitted',
+        slot_id: campaign.linked_calendar_ad_id || campaign.calendar_slot_id,
+        title: 'Ad closing report submitted',
+        message: `${campaign.campaign_name}: closing report is waiting for approval.`,
+      });
+      res.emitSocket('smm:notification', { user_id: assigner, type: 'ad_report_submitted' });
+    }
+
+    res.emitSocket('ads:report-saved', { campaign_id: campaignId, report });
+    res.emitSocket('ads:updated', { id: parseInt(campaignId), status: 'report_pending' });
 
     return res.json({
-      message: shouldClose ? 'Ad Campaign closed and report saved' : 'Report saved',
-      report: reportRow[0],
-      status: shouldClose ? 'completed' : campaign[0].status
+      message: 'Report submitted for approval',
+      report,
+      status: 'report_pending',
     });
   } catch (err) {
     console.error('Ads report save error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── REVIEW CLOSING REPORT (Stage 2 approval) ────────────────────────────────
+// POST /api/ads-campaigns/:id/report/review   { action: 'approve' | 'reject', remarks }
+//   approve → campaign 'completed', calendar slot 'completed'
+//   reject  → campaign back to 'active' (or 'approved' if not started) with remarks
+exports.reviewReport = async (req, res) => {
+  try {
+    if (!canApproveReport(req)) {
+      return res.status(403).json({ message: 'Only users with Ads Report Approval permission can review closing reports' });
+    }
+
+    const campaignId = req.params.id;
+    const { action, remarks } = req.body;
+    if (!['approve', 'reject'].includes(action)) {
+      return res.status(400).json({ message: "action must be 'approve' or 'reject'" });
+    }
+    const note = typeof remarks === 'string' ? remarks.trim() : '';
+    if (action === 'reject' && !note) {
+      return res.status(400).json({ message: 'Please give a reason for sending the report back' });
+    }
+
+    const [rows] = await db.query('SELECT * FROM ad_campaigns WHERE id = ? AND deleted = 0', [campaignId]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Campaign not found' });
+    const campaign = rows[0];
+
+    if (campaign.status !== 'report_pending') {
+      return res.status(400).json({ message: `Only reports pending approval can be reviewed. Current status: "${campaign.status}"` });
+    }
+
+    const [repRows] = await db.query('SELECT * FROM ad_campaign_reports WHERE campaign_id = ?', [campaignId]);
+    const report = repRows[0] || null;
+
+    let newStatus;
+    if (action === 'approve') {
+      newStatus = 'completed';
+      await db.query(`UPDATE ad_campaigns SET status = 'completed' WHERE id = ?`, [campaignId]);
+      await completeLinkedSlot(campaign, report, req.user.id, res);
+    } else {
+      newStatus = statusOnApproval(campaign.start_date); // back to running so it can be re-closed
+      await db.query('UPDATE ad_campaigns SET status = ? WHERE id = ?', [newStatus, campaignId]);
+    }
+
+    try {
+      await db.query(
+        `UPDATE ad_campaigns SET report_reviewed_by = ?, report_reviewed_at = NOW(), report_review_remarks = ? WHERE id = ?`,
+        [req.user.id, note || null, campaignId]
+      );
+    } catch (e) { /* columns not migrated yet */ }
+
+    await logAdsHistory(campaignId, action === 'approve' ? 'report_approve' : 'report_reject', note || null, req.user.id);
+
+    // Notify whoever submitted the report (fallback: campaign creator)
+    const submitter = campaign.report_submitted_by || campaign.created_by;
+    if (submitter && Number(submitter) !== Number(req.user.id)) {
+      await notify({
+        user_id: submitter,
+        triggered_by: req.user.id,
+        type: action === 'approve' ? 'ad_report_approved' : 'ad_report_rejected',
+        slot_id: campaign.linked_calendar_ad_id || campaign.calendar_slot_id,
+        title: action === 'approve' ? 'Ad closing report approved' : 'Ad closing report sent back',
+        message: action === 'approve'
+          ? `${campaign.campaign_name} is now completed.`
+          : `${campaign.campaign_name}: ${note}. Please update the report and resubmit.`,
+      });
+      res.emitSocket('smm:notification', { user_id: submitter, type: action === 'approve' ? 'ad_report_approved' : 'ad_report_rejected' });
+    }
+
+    res.emitSocket('ads:updated', { id: parseInt(campaignId), status: newStatus });
+    return res.json({
+      message: action === 'approve' ? 'Report approved. Campaign completed.' : 'Report sent back for changes',
+      status: newStatus,
+    });
+  } catch (err) {
+    console.error('Ads report review error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

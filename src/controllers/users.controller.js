@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
+const { loadAdsPerms, mergeAdsPerms } = require('../helpers/adsWorkflow');
 
 /**
  * GET /api/users
@@ -254,6 +255,10 @@ exports.myPermissions = async (req, res) => {
       );
       userPermRows = rows;
     }
+    // Ads two-stage approval toggles (role baseline; user rows replace below)
+    mergeAdsPerms(permissions, await loadAdsPerms('role_permissions', 'role_id', roleId));
+    const userAdsPerms = await loadAdsPerms('user_permissions', 'user_id', req.user.id);
+
     const hasUserOverrides = userPermRows.length > 0;
     userPermRows.forEach(p => {
       permissions[p.module] = {
@@ -265,6 +270,8 @@ exports.myPermissions = async (req, res) => {
         can_complete: p.can_complete ?? 0,
         can_smm_approve:  p.can_smm_approve ?? 0,
         can_pcpm_approve: p.can_pcpm_approve ?? 0,
+        can_ads_campaign_approve: userAdsPerms[p.module]?.can_ads_campaign_approve ?? 0,
+        can_ads_report_approve:   userAdsPerms[p.module]?.can_ads_report_approve ?? 0,
       };
     });
 

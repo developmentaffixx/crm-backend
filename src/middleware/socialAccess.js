@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { resolveAdsApprovalFlags } = require('../helpers/adsWorkflow');
 
 /**
  * Middleware factory that checks if the user's role has access to a specific
@@ -21,6 +22,8 @@ function requireSocialAccess(submenu) {
         req.userCanComplete = true;
         req.userCanSmmApprove  = true;
         req.userCanPcpmApprove = true;
+        req.userCanAdsCampaignApprove = true;
+        req.userCanAdsReportApprove   = true;
         return next();
       }
 
@@ -172,6 +175,11 @@ function requireSocialAccess(submenu) {
       req.userCanComplete = canComplete > 0;
       req.userCanSmmApprove  = canSmmApprove > 0;
       req.userCanPcpmApprove = canPcpmApprove > 0;
+
+      // Ads two-stage approval toggles (role baseline → user override)
+      const adsFlags = await resolveAdsApprovalFlags(req.user.id, roleId);
+      req.userCanAdsCampaignApprove = adsFlags.campaign;
+      req.userCanAdsReportApprove   = adsFlags.report;
 
       next();
     } catch (err) {
