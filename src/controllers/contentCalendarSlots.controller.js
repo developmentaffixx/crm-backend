@@ -7,6 +7,7 @@ const db = require('../config/db');
 
 const { getSocialSubmenuAccess } = require('../middleware/socialAccess');
 const { statusOnApproval, logAdsHistory } = require('../helpers/adsWorkflow');
+const { generateShootCode, logShootHistory } = require('../helpers/shootsWorkflow');
 
 const TABLE_MAP = {
   post: 'content_calendar_posts',
@@ -43,6 +44,46 @@ async function syncAdCampaignApproved(slotId, slotStartDate, userId) {
   } catch (syncErr) {
     console.warn('[approveSlot] Ad campaign sync warning:', syncErr.message);
   }
+}
+
+// ─── Helpers: keep linked shoots in step with their calendar slot ────────────
+// Stage 1 is the Shoot Approval toggle, stage 2 (close) the Close Approval toggle.
+const canApproveShootReq = (req) => !!(req.user.is_admin || req.userCanShootApprove);
+const canApproveShootCloseReq = (req) => !!(req.user.is_admin || req.userCanShootCloseApprove);
+
+async function linkedShoots(slotId) {
+  try {
+    const [rows] = await db.query('SELECT * FROM shoots WHERE calendar_slot_id = ? AND deleted = 0', [slotId]);
+    return rows;
+  } catch (e) { return []; }
+}
+
+async function syncShootApproved(slotId, userId) {
+  for (const s of await linkedShoots(slotId)) {
+    if (!['pending_approval', 'rejected', 'draft'].includes(s.status)) continue;
+    try {
+      await db.query(
+        `UPDATE shoots SET status = 'approved', approved_by = ?, approved_at = NOW(), approval_remarks = NULL WHERE id = ?`,
+        [userId, s.id]
+      );
+      await logShootHistory(s.id, 'approve', 'Approved from Content Calendar', userId);
+    } catch (e) { console.warn('[shoot sync] approve warning:', e.message); }
+  }
+}
+
+async function syncShootRejected(slotId, reason, userId, action = 'reject') {
+  for (const s of await linkedShoots(slotId)) {
+    if (!['pending_approval', 'approved'].includes(s.status)) continue;
+    try {
+      await db.query(`UPDATE shoots SET status = 'rejected', approval_remarks = ? WHERE id = ?`, [reason, s.id]);
+      await logShootHistory(s.id, action === 'rework' ? 'rework' : 'reject', `${reason} (Content Calendar)`, userId);
+    } catch (e) { console.warn('[shoot sync] reject warning:', e.message); }
+  }
+}
+
+/** Is any shoot linked to this slot in the close stage (pending_completion / completed)? */
+async function shootIsClosing(slotId) {
+  return (await linkedShoots(slotId)).some(s => ['pending_completion', 'completed'].includes(s.status));
 }
 
 // ─── Helper: Get link for slot type ───────────────────────────────────────────
@@ -206,7 +247,9 @@ exports.listSlots = async (req, res) => {
                 sh.video_clips AS num_videos,
                 sh.photos_clicked AS num_photos,
                 sh.shoot_id_code AS linked_shoot_code,
-                sh.shoot_date AS linked_shoot_date` : ''}
+                sh.shoot_date AS linked_shoot_date,
+                sh.status AS linked_shoot_status,
+                sh.id AS shoot_id_resolved` : ''}
          FROM content_calendar_shoots cs
          LEFT JOIN users u ON u.id = cs.assigned_to
          LEFT JOIN users ab ON ab.id = cs.assigned_by
@@ -234,7 +277,9 @@ exports.listSlots = async (req, res) => {
                 sh.video_clips AS num_videos,
                 sh.photos_clicked AS num_photos,
                 sh.shoot_id_code AS linked_shoot_code,
-                sh.shoot_date AS linked_shoot_date
+                sh.shoot_date AS linked_shoot_date,
+                sh.status AS linked_shoot_status,
+                sh.id AS shoot_id_resolved
            FROM content_calendar_shoots cs
            LEFT JOIN users u ON u.id = cs.assigned_to
            LEFT JOIN users ab ON ab.id = cs.assigned_by
@@ -400,37 +445,25 @@ exports.assignSlot = async (req, res) => {
       );
       const clientId = planInfo[0]?.client_id || null;
 
-      // Generate shoot_id_code
-      const now = new Date();
-      const yy = String(now.getFullYear()).slice(-2);
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      const dd = String(now.getDate()).padStart(2, '0');
-      let clientCode = 'GEN';
-      if (clientId) {
-        const [cRows] = await conn.query('SELECT client_code FROM leads WHERE id = ?', [clientId]);
-        if (cRows.length > 0 && cRows[0].client_code) clientCode = cRows[0].client_code;
-      }
-      const shootPrefix = `SHT-${yy}${mm}${dd}-${clientCode}`;
-      const [lastSht] = await conn.query(
-        `SELECT shoot_id_code FROM shoots WHERE shoot_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
-        [`${shootPrefix}-%`]
-      );
-      let seq = 1;
-      if (lastSht.length > 0 && lastSht[0].shoot_id_code) {
-        const parts = lastSht[0].shoot_id_code.split('-');
-        seq = parseInt(parts[parts.length - 1], 10) + 1;
-      }
-      const shootCode = `${shootPrefix}-${String(seq).padStart(3, '0')}`;
-
-      // Get slot's shoot_date
+      // Slot's shoot_date drives the shoot code and placeholder date
       const [slotRow] = await conn.query(`SELECT shoot_date FROM ${table} WHERE id = ?`, [slotId]);
-      const shootDate = slotRow[0]?.shoot_date || now.toISOString().split('T')[0];
+      const shootDate = slotRow[0]?.shoot_date || new Date().toISOString().split('T')[0];
+      const shootCode = await generateShootCode(conn, clientId, shootDate);
 
-      const [shootResult] = await conn.query(
+      // Placeholder starts as 'draft' (not in the approval queue until the member fills it).
+      // Older schemas without 'draft' fall back to 'pending_approval'.
+      const insertPlaceholder = (status) => conn.query(
         `INSERT INTO shoots (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time, location_type, status, created_by, calendar_slot_id)
-         VALUES (?, ?, 'TBD', ?, '09:00', 'office', 'pending_approval', ?, ?)`,
-        [shootCode, clientId, shootDate, assigned_to, slotId]
+         VALUES (?, ?, 'TBD', ?, '09:00', 'office', ?, ?, ?)`,
+        [shootCode, clientId, shootDate, status, assigned_to, slotId]
       );
+      let shootResult;
+      try {
+        [shootResult] = await insertPlaceholder('draft');
+      } catch (e) {
+        if (e.errno !== 1265 && e.code !== 'WARN_DATA_TRUNCATED' && e.code !== 'ER_TRUNCATED_WRONG_VALUE_FOR_FIELD') throw e;
+        [shootResult] = await insertPlaceholder('pending_approval');
+      }
       linkedItemId = shootResult.insertId;
 
       await conn.query(`UPDATE ${table} SET linked_shoot_ref_id = ? WHERE id = ?`, [linkedItemId, slotId]);
@@ -642,10 +675,14 @@ exports.smmReview = async (req, res) => {
       return res.status(400).json({ message: 'item_type and item_id are required' });
     }
 
-    // Ads use their own single-stage campaign approval (Ads Campaign Approval toggle)
-    if (item_type === 'ad') {
+    // Ads and Shoots use their own single-stage approval toggles (no SMM review)
+    if (item_type === 'ad' || item_type === 'shoot') {
       if (action === 'rework') return exports.rejectSlot(req, res); // gate checked there
-      return res.status(400).json({ message: 'Ad slots skip SMM review. Use Approve (Ads Campaign Approval) instead.' });
+      return res.status(400).json({
+        message: item_type === 'ad'
+          ? 'Ad slots skip SMM review. Use Approve (Ads Campaign Approval) instead.'
+          : 'Shoot slots skip SMM review. Use Approve (Shoot Approval) instead.',
+      });
     }
 
     const canSmm = req.user.is_admin || req.userCanSmmApprove;
@@ -712,6 +749,10 @@ exports.approveSlot = async (req, res) => {
       if (!(req.user.is_admin || req.userCanAdsCampaignApprove)) {
         return res.status(403).json({ message: 'Only users with Ads Campaign Approval permission can approve ad slots' });
       }
+    } else if (item_type === 'shoot') {
+      if (!canApproveShootReq(req)) {
+        return res.status(403).json({ message: 'Only users with Shoot Approval permission can approve shoot slots' });
+      }
     } else {
       const canApprove = req.user.is_admin || req.userCanPcpmApprove || req.userCanApprove;
       if (!canApprove) {
@@ -753,6 +794,9 @@ exports.approveSlot = async (req, res) => {
     } else if (item_type === 'ad') {
       await syncAdCampaignApproved(item_id, rows[0].start_date, req.user.id);
       res.emitSocket('ads:updated', { status: 'approved' });
+    } else if (item_type === 'shoot') {
+      await syncShootApproved(item_id, req.user.id);
+      res.emitSocket('shoots:updated', { calendar_slot_id: item_id, status: 'approved' });
     }
 
     // Notify assignee
@@ -799,6 +843,13 @@ exports.rejectSlot = async (req, res) => {
           return res.status(400).json({ message: 'This ad is being closed. Review its closing report on the Ads page instead.' });
         }
       } catch (e) { /* ignore */ }
+    } else if (item_type === 'shoot') {
+      if (!canApproveShootReq(req)) {
+        return res.status(403).json({ message: 'Only users with Shoot Approval permission can reject or send back shoot slots' });
+      }
+      if (await shootIsClosing(item_id)) {
+        return res.status(400).json({ message: 'This shoot is being closed. Review its close request on the Shoots page instead.' });
+      }
     } else {
       const canReject = req.user.is_admin || req.userCanSmmApprove || req.userCanPcpmApprove || req.userCanApprove;
       if (!canReject) {
@@ -854,6 +905,9 @@ exports.rejectSlot = async (req, res) => {
       } catch (syncErr) {
         console.warn('[rejectSlot] Ad campaign sync warning:', syncErr.message);
       }
+    } else if (item_type === 'shoot') {
+      await syncShootRejected(item_id, reason.trim(), req.user.id, action);
+      res.emitSocket('shoots:updated', { calendar_slot_id: item_id, status: 'rejected' });
     }
 
     // Notify assignee
@@ -904,6 +958,15 @@ exports.completeSlot = async (req, res) => {
       if (!(req.user.is_admin || req.userCanAdsReportApprove)) {
         return res.status(403).json({ message: 'Only users with Ads Report Approval permission can close ad slots. Submit Close & Report for approval instead.' });
       }
+    } else if (item_type === 'shoot') {
+      // Completing a shoot slot = approving the shoot's Close Request (Stage 2)
+      if (!canApproveShootCloseReq(req)) {
+        return res.status(403).json({ message: 'Only users with Shoot Close Approval permission can complete shoot slots' });
+      }
+      const shoots = await linkedShoots(item_id);
+      if (shoots.length && !shoots.some(s => s.status === 'pending_completion')) {
+        return res.status(400).json({ message: 'Submit a Close Request on the Shoots page first. The slot completes when it is approved.' });
+      }
     } else {
       // Mark as Done is available to anyone holding EITHER approval toggle
       // (SMM or PC/PM), the legacy Mark-as-Done permission, or admin.
@@ -936,17 +999,19 @@ exports.completeSlot = async (req, res) => {
           );
         }
       } else if (item_type === 'shoot') {
-        await db.query(
-          `UPDATE shoots SET status = 'completed' WHERE calendar_slot_id = ? AND deleted = 0`,
-          [item_id]
-        );
-        const [linkedShoot] = await db.query('SELECT id FROM shoots WHERE calendar_slot_id = ? AND deleted = 0 LIMIT 1', [item_id]);
-        if (linkedShoot.length > 0) {
+        // Approve the pending close request (keeps completion trail)
+        for (const s of await linkedShoots(item_id)) {
+          if (s.status !== 'pending_completion') continue;
           await db.query(
-            `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-            ['shoots', linkedShoot[0].id, 'approve', 'Marked as completed', userId]
+            `UPDATE shoots SET status = 'completed', completion_approved_by = ?, completion_approved_at = NOW() WHERE id = ?`,
+            [userId, s.id]
           );
+          await logShootHistory(s.id, 'close_approve', 'Close approved from Content Calendar', userId);
         }
+        try {
+          await db.query('UPDATE content_calendar_shoots SET completed_at = NOW(), completed_by = ? WHERE id = ?', [userId, item_id]);
+        } catch (e) { /* columns not migrated yet */ }
+        res.emitSocket('shoots:updated', { calendar_slot_id: item_id, status: 'completed' });
       } else if (item_type === 'ad') {
         const { amount_spent, amount, report, report_notes, recommendations } = req.body;
         const spentVal = (amount_spent !== undefined && amount_spent !== '') ? amount_spent
@@ -1060,6 +1125,11 @@ exports.remodifySlot = async (req, res) => {
       return res.status(400).json({ message: 'Cannot re-modify a completed slot' });
     }
 
+    // Shoots: block once the close request has been submitted
+    if (item_type === 'shoot' && await shootIsClosing(item_id)) {
+      return res.status(400).json({ message: 'Cannot re-modify — the shoot close request has already been submitted' });
+    }
+
     // Ads: block once the closing report has been submitted
     if (item_type === 'ad') {
       try {
@@ -1115,6 +1185,10 @@ exports.remodifySlot = async (req, res) => {
       } catch (syncErr) {
         console.warn('[remodifySlot] Ad campaign sync warning:', syncErr.message);
       }
+    } else if (item_type === 'shoot') {
+      // Reopen the shoot for editing; re-filling resubmits it for approval
+      await syncShootRejected(item_id, reason && reason.trim() ? `Reopened: ${reason.trim()}` : 'Reopened for re-modification', userId, 'rework');
+      res.emitSocket('shoots:updated', { calendar_slot_id: item_id, status: 'rejected' });
     }
 
     // Notify the assigner / SMM that the member is reworking approved content.
@@ -1161,8 +1235,9 @@ exports.bulkApprove = async (req, res) => {
     for (const { item_type, item_id } of items) {
       const table = TABLE_MAP[item_type];
       if (!table) { skipped++; continue; }
-      // Ad slots need the Ads Campaign Approval toggle
+      // Ad slots need the Ads Campaign Approval toggle; shoot slots the Shoot Approval toggle
       if (item_type === 'ad' && !canApproveAds) { skipped++; continue; }
+      if (item_type === 'shoot' && !canApproveShootReq(req)) { skipped++; continue; }
 
       const [rows] = await db.query(`SELECT * FROM ${table} WHERE id = ?`, [item_id]);
       if (rows.length === 0 || rows[0].slot_status !== 'submitted') { skipped++; continue; }
@@ -1186,6 +1261,8 @@ exports.bulkApprove = async (req, res) => {
         }
       } else if (item_type === 'ad') {
         await syncAdCampaignApproved(item_id, rows[0].start_date, req.user.id);
+      } else if (item_type === 'shoot') {
+        await syncShootApproved(item_id, req.user.id);
       }
 
       // Notify assignee

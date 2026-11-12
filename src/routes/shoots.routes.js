@@ -39,13 +39,12 @@ router.post(
 // PUT  /api/shoots/:id
 router.put('/:id', param('id').isInt(), shootsController.update);
 
-// PUT  /api/shoots/:id/approve (admin)
-router.put(
-  '/:id/approve',
-  param('id').isInt(),
-  [body('action').isIn(['approve', 'reject']).withMessage('Action must be approve or reject')],
-  shootsController.approve
-);
+// PUT  /api/shoots/:id/approve   — Shoot Approval (stage 1) / Close Approval (stage 2) / rework
+// (action is validated in the controller: approve | reject | rework)
+router.put('/:id/approve', param('id').isInt(), shootsController.approve);
+
+// PUT  /api/shoots/:id/footage   — drive link & shoot statement
+router.put('/:id/footage', param('id').isInt(), shootsController.updateFootage);
 
 // DELETE /api/shoots/:id
 router.delete('/:id', param('id').isInt(), shootsController.remove);

@@ -12,6 +12,9 @@
 const db = require('../config/db');
 
 const ADS_PERM_COLS = ['can_ads_campaign_approve', 'can_ads_report_approve'];
+// All submenu-level approval toggles stored on role_permissions / user_permissions
+// (creative_hub row): Ads (2) + Shoots (2). Older schemas may only have the Ads pair.
+const APPROVAL_PERM_COLS = [...ADS_PERM_COLS, 'can_shoot_approve', 'can_shoot_close_approve'];
 
 // ─── Dates ────────────────────────────────────────────────────────────────────
 
@@ -76,79 +79,92 @@ async function activateStartedCampaigns({ minIntervalMs = 0 } = {}) {
  * @param {'role_id'|'user_id'} keyCol
  * @returns {Promise<Record<string, {can_ads_campaign_approve:number, can_ads_report_approve:number}>>}
  */
-async function loadAdsPerms(table, keyCol, id) {
-  if (!id) return {};
-  try {
-    const [rows] = await db.query(
-      `SELECT module, can_ads_campaign_approve, can_ads_report_approve FROM ${table} WHERE ${keyCol} = ?`,
-      [id]
-    );
-    const map = {};
-    rows.forEach(r => {
-      map[r.module] = {
-        can_ads_campaign_approve: Number(r.can_ads_campaign_approve) || 0,
-        can_ads_report_approve: Number(r.can_ads_report_approve) || 0,
-      };
-    });
-    return map;
-  } catch (e) {
-    return {}; // columns not migrated yet
+/**
+ * SELECT the approval toggle columns for a role/user. Tries all four; if the
+ * shoot columns don't exist yet, falls back to the Ads pair. Returns rows.
+ */
+async function selectApprovalCols(table, keyCol, id, extraWhere = '', extraParams = []) {
+  for (const cols of [APPROVAL_PERM_COLS, ADS_PERM_COLS]) {
+    try {
+      const [rows] = await db.query(
+        `SELECT module, ${cols.join(', ')} FROM ${table} WHERE ${keyCol} = ?${extraWhere}`,
+        [id, ...extraParams]
+      );
+      return rows;
+    } catch (e) { /* try the smaller column set */ }
   }
+  return []; // columns not migrated yet
 }
 
-/** Merge ads perm columns into a { module: {...perms} } object (missing → 0). */
+/**
+ * Load the approval toggle columns (Ads + Shoots) for a role or user.
+ * @param {'role_permissions'|'user_permissions'} table
+ * @param {'role_id'|'user_id'} keyCol
+ * @returns {Promise<Record<string, Record<string, number>>>}
+ */
+async function loadAdsPerms(table, keyCol, id) {
+  if (!id) return {};
+  const rows = await selectApprovalCols(table, keyCol, id);
+  const map = {};
+  rows.forEach(r => {
+    map[r.module] = {};
+    APPROVAL_PERM_COLS.forEach(c => { map[r.module][c] = Number(r[c]) || 0; });
+  });
+  return map;
+}
+
+/** Merge approval toggle columns into a { module: {...perms} } object (missing → 0). */
 function mergeAdsPerms(permissions, adsPerms) {
   Object.keys(permissions).forEach(m => {
-    permissions[m] = {
-      ...permissions[m],
-      can_ads_campaign_approve: adsPerms[m]?.can_ads_campaign_approve ?? 0,
-      can_ads_report_approve: adsPerms[m]?.can_ads_report_approve ?? 0,
-    };
+    const extra = {};
+    APPROVAL_PERM_COLS.forEach(c => { extra[c] = adsPerms[m]?.[c] ?? 0; });
+    permissions[m] = { ...permissions[m], ...extra };
   });
   return permissions;
 }
 
-/** Persist the ads perm columns for one (role|user, module) row. Non-fatal. */
+/** Persist the approval toggle columns for one (role|user, module) row. Non-fatal. */
 async function saveAdsPerms(table, keyCol, id, module, perm) {
   if (!perm) return;
-  const campaign = parseInt(perm.can_ads_campaign_approve ?? 0, 10) ? 1 : 0;
-  const report = parseInt(perm.can_ads_report_approve ?? 0, 10) ? 1 : 0;
-  try {
-    await db.query(
-      `UPDATE ${table} SET can_ads_campaign_approve = ?, can_ads_report_approve = ? WHERE ${keyCol} = ? AND module = ?`,
-      [campaign, report, id, module]
-    );
-  } catch (e) {
-    console.warn(`saveAdsPerms (${table}) warning:`, e.message);
+  const val = (c) => (parseInt(perm[c] ?? 0, 10) ? 1 : 0);
+  for (const cols of [APPROVAL_PERM_COLS, ADS_PERM_COLS]) {
+    try {
+      await db.query(
+        `UPDATE ${table} SET ${cols.map(c => `${c} = ?`).join(', ')} WHERE ${keyCol} = ? AND module = ?`,
+        [...cols.map(val), id, module]
+      );
+      return;
+    } catch (e) { /* try the smaller column set */ }
   }
+  console.warn(`saveAdsPerms (${table}) warning: approval columns missing`);
 }
 
 /**
- * Resolve the two ads approval flags for a user (role baseline → user override).
+ * Resolve the approval flags for a user (role baseline → user override).
  * Mirrors requireSocialAccess: a user_permissions row for the module wins.
+ * Returns { campaign, report } for Ads and { shoot, shootClose } for Shoots.
  */
 async function resolveAdsApprovalFlags(userId, roleId) {
-  const flags = { campaign: false, report: false };
-  try {
-    if (roleId) {
-      const [r] = await db.query(
-        `SELECT can_ads_campaign_approve, can_ads_report_approve FROM role_permissions WHERE role_id = ? AND module = 'creative_hub'`,
-        [roleId]
-      );
-      if (r.length) {
-        flags.campaign = Number(r[0].can_ads_campaign_approve) > 0;
-        flags.report = Number(r[0].can_ads_report_approve) > 0;
-      }
-    }
-    const [u] = await db.query(
-      `SELECT can_ads_campaign_approve, can_ads_report_approve FROM user_permissions WHERE user_id = ? AND module = 'creative_hub'`,
-      [userId]
-    );
-    if (u.length) {
-      if (u[0].can_ads_campaign_approve !== null && u[0].can_ads_campaign_approve !== undefined) flags.campaign = Number(u[0].can_ads_campaign_approve) > 0;
-      if (u[0].can_ads_report_approve !== null && u[0].can_ads_report_approve !== undefined) flags.report = Number(u[0].can_ads_report_approve) > 0;
-    }
-  } catch (e) { /* columns not migrated yet → no ads approvers except admin */ }
+  const flags = { campaign: false, report: false, shoot: false, shootClose: false };
+  const KEY = {
+    can_ads_campaign_approve: 'campaign',
+    can_ads_report_approve: 'report',
+    can_shoot_approve: 'shoot',
+    can_shoot_close_approve: 'shootClose',
+  };
+  const apply = (row, onlyIfSet) => {
+    Object.entries(KEY).forEach(([col, key]) => {
+      if (!(col in row)) return;
+      if (onlyIfSet && (row[col] === null || row[col] === undefined)) return;
+      flags[key] = Number(row[col]) > 0;
+    });
+  };
+  if (roleId) {
+    const r = await selectApprovalCols('role_permissions', 'role_id', roleId, " AND module = 'creative_hub'");
+    if (r.length) apply(r[0], false);
+  }
+  const u = await selectApprovalCols('user_permissions', 'user_id', userId, " AND module = 'creative_hub'");
+  if (u.length) apply(u[0], true);
   return flags;
 }
 
@@ -170,6 +186,11 @@ async function ensureAdsWorkflowSchema() {
     "ALTER TABLE role_permissions ADD COLUMN IF NOT EXISTS can_ads_report_approve TINYINT(1) NOT NULL DEFAULT 0",
     "ALTER TABLE user_permissions ADD COLUMN IF NOT EXISTS can_ads_campaign_approve TINYINT(1) NOT NULL DEFAULT 0",
     "ALTER TABLE user_permissions ADD COLUMN IF NOT EXISTS can_ads_report_approve TINYINT(1) NOT NULL DEFAULT 0",
+    // Shoots two-stage approval toggles
+    "ALTER TABLE role_permissions ADD COLUMN IF NOT EXISTS can_shoot_approve TINYINT(1) NOT NULL DEFAULT 0",
+    "ALTER TABLE role_permissions ADD COLUMN IF NOT EXISTS can_shoot_close_approve TINYINT(1) NOT NULL DEFAULT 0",
+    "ALTER TABLE user_permissions ADD COLUMN IF NOT EXISTS can_shoot_approve TINYINT(1) NOT NULL DEFAULT 0",
+    "ALTER TABLE user_permissions ADD COLUMN IF NOT EXISTS can_shoot_close_approve TINYINT(1) NOT NULL DEFAULT 0",
     // Campaign approval + report review tracking
     `ALTER TABLE ad_campaigns
        ADD COLUMN IF NOT EXISTS approved_by INT UNSIGNED DEFAULT NULL,
@@ -203,10 +224,11 @@ async function ensureAdsWorkflowSchema() {
   // smm_approval_history.action needs the report actions (+ 'complete', already used by code)
   try {
     const t = await columnType('smm_approval_history', 'action');
-    if (t && t.startsWith('enum(') && !t.includes("'report_submit'")) {
+    if (t && t.startsWith('enum(') && !t.includes("'close_request'")) {
       await db.query(
         `ALTER TABLE smm_approval_history MODIFY COLUMN action
-         ENUM('approve','reject','rework','submit','resubmit','complete','report_submit','report_approve','report_reject') NOT NULL`
+         ENUM('approve','reject','rework','submit','resubmit','complete','report_submit','report_approve','report_reject',
+              'close_request','close_approve','close_reject') NOT NULL`
       );
     }
   } catch (e) { console.error('⚠️  smm_approval_history.action enum (non-fatal):', e.message); }
@@ -238,6 +260,7 @@ async function notify({ user_id, triggered_by, type, slot_id = null, title, mess
 
 module.exports = {
   ADS_PERM_COLS,
+  APPROVAL_PERM_COLS,
   todayIST,
   toDateStr,
   statusOnApproval,

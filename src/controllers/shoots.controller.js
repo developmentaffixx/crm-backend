@@ -1,14 +1,61 @@
 const { validationResult } = require('express-validator');
 const db = require('../config/db');
+const {
+  parseIds, crewToJson, generateShootCode, logShootHistory, notifyShoot, setSlotStatus,
+} = require('../helpers/shootsWorkflow');
 
 const toNull = (val) => (val === '' || val === undefined || val === null) ? null : val;
 const toInt = (val) => { const n = parseInt(val); return isNaN(n) ? null : n; };
 
+// ─── Permission helpers ───────────────────────────────────────────────────────
+// Stage 1 (shoot request) → Shoot Approval toggle; Stage 2 (close request) → Close Approval toggle.
+const canApproveShoot = (req) => !!(req.user.is_admin || req.userCanShootApprove);
+const canApproveClose = (req) => !!(req.user.is_admin || req.userCanShootCloseApprove);
+/** Can see every shoot (not just own / crew). */
+const canSeeAllShoots = (req) => !!(req.user.is_admin || req.socialAccessLevel >= 2 || canApproveShoot(req) || canApproveClose(req));
+
+const DETAIL_SELECT = `
+  SELECT s.*,
+         l.business_name AS client_brand_name,
+         CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
+         CONCAT(um.first_name, ' ', um.last_name) AS shoot_manager_name,
+         CONCAT(ua.first_name, ' ', ua.last_name) AS approved_by_name,
+         CONCAT(uca.first_name, ' ', uca.last_name) AS completion_approved_by_name
+  FROM shoots s
+  LEFT JOIN leads l ON l.id = s.client_brand_id
+  LEFT JOIN users uc ON uc.id = s.created_by
+  LEFT JOIN users um ON um.id = s.shoot_manager_id
+  LEFT JOIN users ua ON ua.id = s.approved_by
+  LEFT JOIN users uca ON uca.id = s.completion_approved_by`;
+
+async function fetchShootDetail(id) {
+  const [rows] = await db.query(`${DETAIL_SELECT} WHERE s.id = ?`, [id]);
+  return rows[0] || null;
+}
+
+/** Notify the calendar slot's assigner (if any). */
+async function notifySlotAssigner(slotId, triggeredBy, payload, res) {
+  if (!slotId) return;
+  try {
+    const [slot] = await db.query('SELECT assigned_by FROM content_calendar_shoots WHERE id = ?', [slotId]);
+    const to = slot[0]?.assigned_by;
+    if (await notifyShoot({ user_id: to, triggered_by: triggeredBy, slot_id: slotId, ...payload })) {
+      res.emitSocket('smm:notification', { user_id: to, type: payload.type });
+    }
+  } catch (e) { /* non-fatal */ }
+}
+
+async function notifyUser(userId, triggeredBy, payload, res) {
+  if (await notifyShoot({ user_id: userId, triggered_by: triggeredBy, ...payload })) {
+    res.emitSocket('smm:notification', { user_id: userId, type: payload.type });
+  }
+}
+
 /**
  * Ensure an approved DIRECT shoot (one created from the Shoots page, with no
  * calendar_slot_id) appears on the Content Calendar. Attaches to the client's
- * current-month content plan (creating that plan if none exists), inserts a
- * content_calendar_shoots slot in the 'approved' state, and links it both ways.
+ * month plan (creating that plan if none exists), inserts a content_calendar_shoots
+ * slot in the 'approved' state, and links it both ways.
  * Returns the new calendar slot id, or null if it couldn't be placed.
  */
 async function ensureCalendarSlotForDirectShoot(shoot, actingUserId) {
@@ -16,11 +63,9 @@ async function ensureCalendarSlotForDirectShoot(shoot, actingUserId) {
     if (shoot.calendar_slot_id) return shoot.calendar_slot_id; // already on calendar
     const clientId = shoot.client_brand_id || null;
 
-    // Month anchor = first day of the shoot's month (fallback: current month)
     const base = shoot.shoot_date ? new Date(shoot.shoot_date) : new Date();
     const planMonth = `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}-01`;
 
-    // Find an existing current-month plan for this client, else create one.
     let planId = null;
     const [existingPlan] = await db.query(
       `SELECT id FROM content_calendar_plans
@@ -40,7 +85,6 @@ async function ensureCalendarSlotForDirectShoot(shoot, actingUserId) {
       planId = planResult.insertId;
     }
 
-    // Create the calendar shoot slot, pre-approved + linked to this shoot.
     const [slotResult] = await db.query(
       `INSERT INTO content_calendar_shoots
         (plan_id, assigned_to, assigned_by, linked_shoot_ref_id, shoot_date, location, description,
@@ -58,130 +102,166 @@ async function ensureCalendarSlotForDirectShoot(shoot, actingUserId) {
       ]
     );
     const slotId = slotResult.insertId;
-
-    // Link the shoot back to its calendar slot.
     await db.query('UPDATE shoots SET calendar_slot_id = ? WHERE id = ?', [slotId, shoot.id]);
     return slotId;
   } catch (err) {
-    console.warn('ensureCalendarSlotForDirectShoot warning:', err.message);
+    console.error('ensureCalendarSlotForDirectShoot failed (shoot not placed on calendar):', err.message);
     return null;
   }
 }
 
+// ─── LIST ────────────────────────────────────────────────────────────────────
 /**
- * GET /api/shoots
+ * GET /api/shoots?search=&status=&page=&limit=
+ * Server-side search, status filter and pagination. `summary` counts are over
+ * the search + scope (ignoring status) so status tabs can show their counts.
  */
 exports.list = async (req, res) => {
   try {
     const { status, search } = req.query;
-    let where = 's.deleted = 0';
-    const params = [];
+    const pageNum  = Math.max(1, parseInt(req.query.page) || 1);
+    const limitNum = Math.min(200, Math.max(1, parseInt(req.query.limit) || 20));
+    const uid = Number(req.user.id);
 
-    if (status) { where += ' AND s.status = ?'; params.push(status); }
-    if (search) {
-      where += ' AND (s.project_campaign_name LIKE ? OR s.city LIKE ? OR l.business_name LIKE ?)';
-      const q = `%${search}%`;
-      params.push(q, q, q);
-    }
+    const joins = `
+      LEFT JOIN leads l ON l.id = s.client_brand_id
+      LEFT JOIN users uc ON uc.id = s.created_by
+      LEFT JOIN users um ON um.id = s.shoot_manager_id`;
 
-    if (!req.user.is_admin) {
-      if (req.socialAccessLevel >= 2) {
-        // SMM lead with full access — see all shoots
-      } else {
-        // Show shoots where user is creator, shoot manager, or filled from their calendar slot
-        where += ` AND (s.created_by = ? OR s.shoot_manager_id = ?)`;
-        params.push(req.user.id, req.user.id);
+    const buildWhere = (withCrewScope) => {
+      let where = 's.deleted = 0';
+      const params = [];
+      const term = typeof search === 'string' ? search.trim() : '';
+      if (term) {
+        const like = `%${term}%`;
+        where += ` AND (s.project_campaign_name LIKE ? OR s.shoot_id_code LIKE ? OR s.city LIKE ?
+                        OR l.business_name LIKE ? OR CONCAT(um.first_name, ' ', um.last_name) LIKE ?)`;
+        params.push(like, like, like, like, like);
       }
-    }
-
-    const [rows] = await db.query(
-      `SELECT s.*,
-              l.business_name AS client_brand_name,
-              CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
-              CONCAT(um.first_name, ' ', um.last_name) AS shoot_manager_name
-       FROM shoots s
-       LEFT JOIN leads l ON l.id = s.client_brand_id
-       LEFT JOIN users uc ON uc.id = s.created_by
-       LEFT JOIN users um ON um.id = s.shoot_manager_id
-       WHERE ${where}
-       ORDER BY s.shoot_date DESC, s.created_at DESC`,
-      params
-    );
-
-    const summary = {
-      total: rows.length,
-      pending_approval: rows.filter(r => r.status === 'pending_approval').length,
-      approved: rows.filter(r => r.status === 'approved').length,
-      rejected: rows.filter(r => r.status === 'rejected').length,
-      pending_completion: rows.filter(r => r.status === 'pending_completion').length,
-      completed: rows.filter(r => r.status === 'completed').length,
+      if (!canSeeAllShoots(req)) {
+        if (withCrewScope) {
+          where += ` AND (s.created_by = ? OR s.shoot_manager_id = ?
+                         OR JSON_CONTAINS(COALESCE(s.photographers, '[]'), ?)
+                         OR JSON_CONTAINS(COALESCE(s.videographers, '[]'), ?))`;
+          params.push(uid, uid, String(uid), String(uid));
+        } else {
+          where += ' AND (s.created_by = ? OR s.shoot_manager_id = ?)';
+          params.push(uid, uid);
+        }
+      }
+      return { where, params };
     };
 
-    return res.json({ shoots: rows, summary });
+    const run = async (withCrewScope) => {
+      const { where: baseWhere, params: baseParams } = buildWhere(withCrewScope);
+      let where = baseWhere;
+      const params = [...baseParams];
+      if (status) { where += ' AND s.status = ?'; params.push(status); }
+
+      const [rows] = await db.query(
+        `SELECT s.*,
+                l.business_name AS client_brand_name,
+                CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
+                CONCAT(um.first_name, ' ', um.last_name) AS shoot_manager_name
+         FROM shoots s ${joins}
+         WHERE ${where}
+         ORDER BY s.shoot_date DESC, s.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [...params, limitNum, (pageNum - 1) * limitNum]
+      );
+      const [[{ total }]] = await db.query(`SELECT COUNT(*) AS total FROM shoots s ${joins} WHERE ${where}`, params);
+      const [counts] = await db.query(
+        `SELECT s.status, COUNT(*) AS count FROM shoots s ${joins} WHERE ${baseWhere} GROUP BY s.status`,
+        baseParams
+      );
+      return { rows, total, counts };
+    };
+
+    let result;
+    try {
+      result = await run(true);
+    } catch (e) {
+      // JSON_CONTAINS unsupported / bad JSON → fall back to creator + manager scope
+      console.warn('Shoots list crew scope fallback:', e.message);
+      result = await run(false);
+    }
+
+    const summary = { total: 0, draft: 0, pending_approval: 0, approved: 0, rejected: 0, pending_completion: 0, completed: 0 };
+    result.counts.forEach(r => {
+      summary[r.status] = Number(r.count) || 0;
+      summary.total += Number(r.count) || 0;
+    });
+
+    // Crew as arrays for the client
+    const shoots = result.rows.map(r => ({
+      ...r,
+      photographers: parseIds(r.photographers),
+      videographers: parseIds(r.videographers),
+    }));
+
+    return res.json({ shoots, summary, total: Number(result.total) || 0, page: pageNum, limit: limitNum });
   } catch (err) {
     console.error('Shoots list error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
-/**
- * GET /api/shoots/:id
- */
+// ─── GET ONE ─────────────────────────────────────────────────────────────────
 exports.getOne = async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `SELECT s.*,
-              l.business_name AS client_brand_name,
-              CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
-              CONCAT(um.first_name, ' ', um.last_name) AS shoot_manager_name,
-              CONCAT(ua.first_name, ' ', ua.last_name) AS approved_by_name,
-              CONCAT(uca.first_name, ' ', uca.last_name) AS completion_approved_by_name
-       FROM shoots s
-       LEFT JOIN leads l ON l.id = s.client_brand_id
-       LEFT JOIN users uc ON uc.id = s.created_by
-       LEFT JOIN users um ON um.id = s.shoot_manager_id
-       LEFT JOIN users ua ON ua.id = s.approved_by
-       LEFT JOIN users uca ON uca.id = s.completion_approved_by
-       WHERE s.id = ? AND s.deleted = 0`,
-      [req.params.id]
-    );
+    const shoot = await fetchShootDetail(req.params.id);
+    if (!shoot || shoot.deleted) return res.status(404).json({ message: 'Shoot not found' });
 
-    if (rows.length === 0) return res.status(404).json({ message: 'Shoot not found' });
+    shoot.photographers = parseIds(shoot.photographers);
+    shoot.videographers = parseIds(shoot.videographers);
 
-    const shoot = rows[0];
-    // Access: admin, creator, assigned team members
-    if (!req.user.is_admin && shoot.created_by !== req.user.id) {
-      const photographers = shoot.photographers ? (typeof shoot.photographers === 'string' ? JSON.parse(shoot.photographers) : shoot.photographers) : [];
-      const videographers = shoot.videographers ? (typeof shoot.videographers === 'string' ? JSON.parse(shoot.videographers) : shoot.videographers) : [];
-      const isAssigned = shoot.shoot_manager_id === req.user.id || photographers.includes(req.user.id) || videographers.includes(req.user.id);
-      if (!isAssigned) {
-        return res.status(403).json({ message: 'Access denied' });
-      }
+    // Access: anyone who can see all shoots, the creator, or the crew
+    const uid = Number(req.user.id);
+    const isCrew = Number(shoot.created_by) === uid || Number(shoot.shoot_manager_id) === uid
+      || shoot.photographers.includes(uid) || shoot.videographers.includes(uid);
+    if (!canSeeAllShoots(req) && !isCrew) {
+      return res.status(403).json({ message: 'Access denied' });
     }
 
-    // Parse JSON fields
-    if (shoot.photographers && typeof shoot.photographers === 'string') {
-      shoot.photographers = JSON.parse(shoot.photographers);
-    }
-    if (shoot.videographers && typeof shoot.videographers === 'string') {
-      shoot.videographers = JSON.parse(shoot.videographers);
-    }
-
-    // Fetch photographer and videographer names
-    if (shoot.photographers && shoot.photographers.length > 0) {
-      const [pUsers] = await db.query(
+    const crewIds = [...new Set([...shoot.photographers, ...shoot.videographers])];
+    shoot.photographer_names = [];
+    shoot.videographer_names = [];
+    if (crewIds.length) {
+      const [users] = await db.query(
         `SELECT id, CONCAT(first_name, ' ', last_name) AS name FROM users WHERE id IN (?)`,
-        [shoot.photographers]
+        [crewIds]
       );
-      shoot.photographer_names = pUsers;
+      const byId = Object.fromEntries(users.map(u => [Number(u.id), u]));
+      shoot.photographer_names = shoot.photographers.map(id => byId[id]).filter(Boolean);
+      shoot.videographer_names = shoot.videographers.map(id => byId[id]).filter(Boolean);
     }
-    if (shoot.videographers && shoot.videographers.length > 0) {
-      const [vUsers] = await db.query(
-        `SELECT id, CONCAT(first_name, ' ', last_name) AS name FROM users WHERE id IN (?)`,
-        [shoot.videographers]
+
+    // Close request / footage names (columns from the shoots workflow migration)
+    try {
+      const [names] = await db.query(
+        `SELECT CONCAT(cr.first_name, ' ', cr.last_name) AS close_requested_by_name,
+                CONCAT(fu.first_name, ' ', fu.last_name) AS footage_updated_by_name
+         FROM shoots s
+         LEFT JOIN users cr ON cr.id = s.close_requested_by
+         LEFT JOIN users fu ON fu.id = s.footage_updated_by
+         WHERE s.id = ?`,
+        [shoot.id]
       );
-      shoot.videographer_names = vUsers;
-    }
+      Object.assign(shoot, names[0] || {});
+    } catch (e) { /* columns not migrated yet */ }
+
+    // Approval history (timeline)
+    try {
+      const [history] = await db.query(
+        `SELECT h.action, h.remarks, h.created_at, CONCAT(u.first_name, ' ', u.last_name) AS acted_by_name
+         FROM smm_approval_history h
+         LEFT JOIN users u ON u.id = h.acted_by
+         WHERE h.module = 'shoots' AND h.record_id = ?
+         ORDER BY h.created_at ASC, h.id ASC`,
+        [shoot.id]
+      );
+      shoot.history = history;
+    } catch (e) { shoot.history = []; }
 
     return res.json(shoot);
   } catch (err) {
@@ -190,8 +270,12 @@ exports.getOne = async (req, res) => {
   }
 };
 
+// ─── CREATE / FILL ───────────────────────────────────────────────────────────
 /**
  * POST /api/shoots
+ *  - With calendar_slot_id: the assignee fills their slot. Updates the draft
+ *    placeholder created at assignment (no duplicate) → pending_approval.
+ *  - Without: a direct shoot request (needs Create permission).
  */
 exports.create = async (req, res) => {
   const errors = validationResult(req);
@@ -203,192 +287,123 @@ exports.create = async (req, res) => {
     photographers, videographers, shoot_manager_id,
     calendar_slot_id,
   } = req.body;
+  const uid = Number(req.user.id);
 
   try {
-    // Generate shoot_id_code
-    const shootDateObj = shoot_date ? new Date(shoot_date) : new Date();
-    const yy = String(shootDateObj.getFullYear()).slice(-2);
-    const mm = String(shootDateObj.getMonth() + 1).padStart(2, '0');
-    const dd = String(shootDateObj.getDate()).padStart(2, '0');
-
-    let clientCode = 'GEN';
-    if (toInt(client_brand_id)) {
-      const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [toInt(client_brand_id)]);
-      if (clientRows.length > 0 && clientRows[0].client_code) clientCode = clientRows[0].client_code;
-    }
-    const shootPrefix = `SHT-${yy}${mm}${dd}-${clientCode}`;
-    const [lastShoot] = await db.query(`SELECT shoot_id_code FROM shoots WHERE deleted = 0 ORDER BY id DESC LIMIT 1`);
-    let shootSeq = 1;
-    if (lastShoot.length > 0 && lastShoot[0].shoot_id_code) {
-      const parts = lastShoot[0].shoot_id_code.split('-');
-      const lastNum = parseInt(parts[parts.length - 1], 10);
-      if (!isNaN(lastNum)) shootSeq = lastNum + 1;
-    }
-    const shoot_id_code = `${shootPrefix}-${String(shootSeq).padStart(3, '0')}`;
-
     const slotIdVal = toInt(calendar_slot_id);
 
-    // If a shoot record already exists for this calendar slot (created during assignment),
-    // update it with the filled details instead of creating a duplicate.
-    let insertId;
+    // ── Permission ──
     if (slotIdVal) {
-      try {
-        const [existing] = await db.query(
-          'SELECT id FROM shoots WHERE calendar_slot_id = ? AND deleted = 0 ORDER BY id ASC LIMIT 1',
-          [slotIdVal]
-        );
-        if (existing.length > 0) {
-          insertId = existing[0].id;
-          await db.query(
-            `UPDATE shoots SET
-              client_brand_id = COALESCE(?, client_brand_id),
-              project_campaign_name = COALESCE(?, project_campaign_name),
-              shoot_date = COALESCE(?, shoot_date),
-              reporting_time = COALESCE(?, reporting_time),
-              location_type = COALESCE(?, location_type),
-              exact_address = ?, city = ?, maps_link = ?,
-              photographers = COALESCE(?, photographers),
-              videographers = COALESCE(?, videographers),
-              shoot_manager_id = COALESCE(?, shoot_manager_id),
-              status = 'pending_approval'
-            WHERE id = ?`,
-            [
-              toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
-              location_type, toNull(exact_address), toNull(city), toNull(maps_link),
-              photographers ? JSON.stringify(photographers) : null,
-              videographers ? JSON.stringify(videographers) : null,
-              toInt(shoot_manager_id),
-              insertId,
-            ]
-          );
-
-          // Sync slot to submitted
-          try {
-            await db.query(
-              `UPDATE content_calendar_shoots SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-              [slotIdVal]
-            );
-            res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: slotIdVal });
-
-            const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_shoots WHERE id = ?', [slotIdVal]);
-            if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-              await db.query(
-                `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-                 VALUES (?, ?, 'slot_submitted', 'shoot', ?, 'Shoot slot submitted for approval', 'Shoot details filled. Please review.', '/social/content-calendar')`,
-                [slotInfo[0].assigned_by, req.user.id, slotIdVal]
-              );
-              res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
-            }
-          } catch (syncErr) {
-            console.warn('Shoot slot sync after update:', syncErr.message);
-          }
-
-          const [updated] = await db.query('SELECT * FROM shoots WHERE id = ?', [insertId]);
-          return res.status(201).json(updated[0] || { id: insertId });
-        }
-      } catch (lookupErr) {
-        console.warn('Existing shoot lookup failed, creating new:', lookupErr.message);
+      const [slotRows] = await db.query('SELECT * FROM content_calendar_shoots WHERE id = ?', [slotIdVal]);
+      if (!slotRows.length) return res.status(404).json({ message: 'Calendar slot not found' });
+      const slot = slotRows[0];
+      const mayFill = req.user.is_admin || Number(slot.assigned_to) === uid || canApproveShoot(req) || req.socialAccessLevel >= 2;
+      if (!mayFill) return res.status(403).json({ message: 'Only the assigned member can fill this shoot slot' });
+      if (['approved', 'completed'].includes(slot.slot_status)) {
+        return res.status(400).json({ message: `This slot is already ${slot.slot_status}` });
       }
+    } else if (!(req.user.is_admin || req.userCanCreate || canApproveShoot(req))) {
+      return res.status(403).json({ message: 'You do not have permission to create shoot requests' });
     }
 
-    // Try inserting with calendar_slot_id — fall back without it if column doesn't exist
-    try {
-      const [result] = await db.query(
-        `INSERT INTO shoots 
-          (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
-           location_type, exact_address, city, maps_link,
-           photographers, videographers, shoot_manager_id,
-           calendar_slot_id, status, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
-        [
-          shoot_id_code,
-          toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
-          location_type, toNull(exact_address), toNull(city), toNull(maps_link),
-          photographers ? JSON.stringify(photographers) : null,
-          videographers ? JSON.stringify(videographers) : null,
-          toInt(shoot_manager_id),
-          slotIdVal,
-          req.user.id,
-        ]
+    const crewP = photographers !== undefined ? crewToJson(photographers) : undefined;
+    const crewV = videographers !== undefined ? crewToJson(videographers) : undefined;
+
+    // ── Fill the existing placeholder for this slot (no duplicate) ──
+    if (slotIdVal) {
+      const [existing] = await db.query(
+        'SELECT * FROM shoots WHERE calendar_slot_id = ? AND deleted = 0 ORDER BY id ASC LIMIT 1',
+        [slotIdVal]
       );
-      insertId = result.insertId;
-    } catch (insertErr) {
-      if (insertErr.code === 'ER_BAD_FIELD_ERROR' ||
-          insertErr.errno === 1054 ||
-          String(insertErr.message).includes('calendar_slot_id') ||
-          String(insertErr.sqlMessage || '').includes('calendar_slot_id')) {
-        const [result] = await db.query(
-          `INSERT INTO shoots 
-            (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
-             location_type, exact_address, city, maps_link,
-             photographers, videographers, shoot_manager_id,
-             status, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
+      if (existing.length > 0) {
+        const current = existing[0];
+        if (['approved', 'pending_completion', 'completed'].includes(current.status)) {
+          return res.status(400).json({ message: `This shoot is already ${current.status.replace('_', ' ')}` });
+        }
+        await db.query(
+          `UPDATE shoots SET
+            client_brand_id = COALESCE(?, client_brand_id),
+            project_campaign_name = COALESCE(?, project_campaign_name),
+            shoot_date = COALESCE(?, shoot_date),
+            reporting_time = COALESCE(?, reporting_time),
+            location_type = COALESCE(?, location_type),
+            exact_address = ?, city = ?, maps_link = ?,
+            photographers = COALESCE(?, photographers),
+            videographers = COALESCE(?, videographers),
+            shoot_manager_id = COALESCE(?, shoot_manager_id),
+            approval_remarks = NULL,
+            status = 'pending_approval'
+          WHERE id = ?`,
           [
-            shoot_id_code,
-            toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
-            location_type, toNull(exact_address), toNull(city), toNull(maps_link),
-            photographers ? JSON.stringify(photographers) : null,
-            videographers ? JSON.stringify(videographers) : null,
+            toInt(client_brand_id), toNull(project_campaign_name), toNull(shoot_date), toNull(reporting_time),
+            toNull(location_type), toNull(exact_address), toNull(city), toNull(maps_link),
+            crewP ?? null, crewV ?? null,
             toInt(shoot_manager_id),
-            req.user.id,
+            current.id,
           ]
         );
-        insertId = result.insertId;
-      } else {
-        throw insertErr;
-      }
-    }
-
-    // Sync slot to submitted if linked
-    if (slotIdVal) {
-      try {
-        await db.query(
-          `UPDATE content_calendar_shoots SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-          [slotIdVal]
-        );
+        await setSlotStatus(slotIdVal, 'submitted', uid);
         res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: slotIdVal });
+        await notifySlotAssigner(slotIdVal, uid, {
+          type: 'slot_submitted', title: 'Shoot submitted for approval',
+          message: 'Shoot details filled. Please review.', link: '/social/shoots',
+        }, res);
+        await logShootHistory(current.id, current.status === 'rejected' ? 'resubmit' : 'submit', null, uid);
 
-        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_shoots WHERE id = ?', [slotIdVal]);
-        if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-          await db.query(
-            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-             VALUES (?, ?, 'slot_submitted', 'shoot', ?, 'Shoot slot submitted for approval', 'Shoot details filled. Please review.', '/social/content-calendar')`,
-            [slotInfo[0].assigned_by, req.user.id, slotIdVal]
-          );
-          res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
-        }
-      } catch (slotErr) {
-        console.warn('Shoot slot sync warning:', slotErr.message);
+        const updated = await fetchShootDetail(current.id);
+        res.emitSocket('shoots:updated', updated);
+        return res.status(201).json(updated);
       }
     }
 
-    const [rows] = await db.query(
-      `SELECT s.*, l.business_name AS client_brand_name
-       FROM shoots s LEFT JOIN leads l ON l.id = s.client_brand_id
-       WHERE s.id = ?`,
-      [insertId]
+    // ── New shoot ──
+    const shoot_id_code = await generateShootCode(db, toInt(client_brand_id), shoot_date);
+    const [result] = await db.query(
+      `INSERT INTO shoots
+        (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
+         location_type, exact_address, city, maps_link,
+         photographers, videographers, shoot_manager_id,
+         calendar_slot_id, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
+      [
+        shoot_id_code,
+        toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
+        location_type, toNull(exact_address), toNull(city), toNull(maps_link),
+        crewP ?? null, crewV ?? null,
+        toInt(shoot_manager_id),
+        slotIdVal,
+        uid,
+      ]
     );
+    const insertId = result.insertId;
 
-    res.emitSocket('shoots:created', rows[0]);
+    if (slotIdVal) {
+      try { await db.query('UPDATE content_calendar_shoots SET linked_shoot_ref_id = ? WHERE id = ?', [insertId, slotIdVal]); } catch (e) { /* ignore */ }
+      await setSlotStatus(slotIdVal, 'submitted', uid);
+      res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: slotIdVal });
+      await notifySlotAssigner(slotIdVal, uid, {
+        type: 'slot_submitted', title: 'Shoot submitted for approval',
+        message: 'Shoot details filled. Please review.', link: '/social/shoots',
+      }, res);
+    }
+    await logShootHistory(insertId, 'submit', null, uid);
 
-    // Log submit to history
-    try {
-      await db.query(
-        `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-        ['shoots', insertId, 'submit', null, req.user.id]
-      );
-    } catch (e) { /* table may not exist */ }
-
-    return res.status(201).json(rows[0]);
+    const created = await fetchShootDetail(insertId);
+    res.emitSocket('shoots:created', created);
+    return res.status(201).json(created);
   } catch (err) {
     console.error('Shoots create error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
+// ─── UPDATE / CLOSE REQUEST ──────────────────────────────────────────────────
 /**
  * PUT /api/shoots/:id
+ *  - approved + post_start_time + post_end_time + in_summary (≥30 words) → Close Request (pending_completion)
+ *  - draft / rejected edit → resubmit (pending_approval)
+ *  - approved edit by a non-approver → needs re-approval (pending_approval)
+ * Crew fields are only changed when sent.
  */
 exports.update = async (req, res) => {
   try {
@@ -396,279 +411,287 @@ exports.update = async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: 'Shoot not found' });
 
     const shoot = rows[0];
+    const uid = Number(req.user.id);
+    const isAdmin = !!req.user.is_admin;
+    const isCreator = Number(shoot.created_by) === uid;
+    const approver = canApproveShoot(req);
+    const crewIds = [Number(shoot.shoot_manager_id), ...parseIds(shoot.photographers), ...parseIds(shoot.videographers)];
+    const isCrew = crewIds.includes(uid);
 
-    if (!req.user.is_admin && shoot.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+    const mayEdit = isAdmin || isCreator || approver || (req.userCanEdit && req.socialAccessLevel >= 2);
+    const isCloseRequest = !!(req.body.post_start_time && req.body.post_end_time) && shoot.status === 'approved';
+    // The shoot manager / crew may submit the close request even if they didn't create it
+    if (!mayEdit && !(isCloseRequest && isCrew)) {
+      return res.status(403).json({ message: 'You do not have permission to edit this shoot' });
     }
-
-    // Non-admin cannot edit if completed
-    if (!req.user.is_admin && shoot.status === 'completed') {
+    if (!isAdmin && shoot.status === 'completed') {
       return res.status(403).json({ message: 'Cannot edit a completed shoot' });
     }
-
-    // Non-admin cannot edit if pending_completion (waiting for admin)
-    if (!req.user.is_admin && shoot.status === 'pending_completion') {
-      return res.status(403).json({ message: 'Cannot edit while pending completion approval' });
+    if (!isAdmin && !canApproveClose(req) && shoot.status === 'pending_completion') {
+      return res.status(403).json({ message: 'Cannot edit while the close request is waiting for approval' });
     }
 
     const allowed = [
       'client_brand_id', 'project_campaign_name', 'shoot_date', 'reporting_time',
       'location_type', 'exact_address', 'city', 'maps_link',
       'photographers', 'videographers', 'shoot_manager_id',
-      'post_start_time', 'post_end_time', 'post_duration_minutes', 'in_summary'
+      'post_start_time', 'post_end_time', 'in_summary',
     ];
-
     const updates = {};
     allowed.forEach(f => {
-      if (req.body[f] !== undefined) {
-        if (f === 'photographers' || f === 'videographers') {
-          updates[f] = req.body[f] ? JSON.stringify(req.body[f]) : null;
-        } else {
-          updates[f] = req.body[f] === '' ? null : req.body[f];
-        }
-      }
+      if (req.body[f] === undefined) return;
+      if (f === 'photographers' || f === 'videographers') updates[f] = crewToJson(req.body[f]);
+      else updates[f] = req.body[f] === '' ? null : req.body[f];
     });
-
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
-    // Auto-calculate post_duration_minutes if both post times are provided
+    // Auto-calculate post duration
     if (req.body.post_start_time && req.body.post_end_time) {
-      const [sh, sm] = req.body.post_start_time.split(':').map(Number);
-      const [eh, em] = req.body.post_end_time.split(':').map(Number);
+      const [sh, sm] = String(req.body.post_start_time).split(':').map(Number);
+      const [eh, em] = String(req.body.post_end_time).split(':').map(Number);
       const startMins = sh * 60 + sm;
       const endMins = eh * 60 + em;
       updates.post_duration_minutes = endMins >= startMins ? endMins - startMins : (24 * 60 - startMins) + endMins;
     }
 
-    // If member submits post-duration data and current status is 'approved',
-    // move to pending_completion for admin sign-off (close request)
-    if (req.body.post_start_time && req.body.post_end_time && shoot.status === 'approved') {
-      // Validate in_summary — minimum 30 words
-      const summary = (req.body.in_summary || '').trim();
-      const wordCount = summary.split(/\s+/).filter(Boolean).length;
-      if (wordCount < 30) {
-        return res.status(400).json({ message: 'In Summary must be at least 30 words' });
-      }
-      updates.status = 'pending_completion';
+    // ── Status transition ──
+    let nextStatus = null;
+    if (isCloseRequest) {
+      const words = String(req.body.in_summary || '').trim().split(/\s+/).filter(Boolean).length;
+      if (words < 30) return res.status(400).json({ message: 'In Summary must be at least 30 words' });
+      nextStatus = 'pending_completion';
+    } else if (['draft', 'rejected'].includes(shoot.status)) {
+      nextStatus = 'pending_approval';
+    } else if (shoot.status === 'approved' && !approver) {
+      nextStatus = 'pending_approval';
     }
-
-    // If rejected or approved (re-work), resubmit resets to pending_approval
-    if (['rejected', 'approved'].includes(shoot.status) && !req.user.is_admin) {
-      updates.status = 'pending_approval';
-      // Log resubmit
-      try {
-        await db.query(
-          `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-          ['shoots', req.params.id, 'resubmit', null, req.user.id]
-        );
-      } catch (e) { /* table may not exist */ }
-    }
+    if (nextStatus && nextStatus !== shoot.status) updates.status = nextStatus;
+    if (updates.status === 'pending_approval') updates.approval_remarks = null;
 
     const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-    const values = [...Object.values(updates), req.params.id];
-    await db.query(`UPDATE shoots SET ${setClauses} WHERE id = ?`, values);
+    await db.query(`UPDATE shoots SET ${setClauses} WHERE id = ?`, [...Object.values(updates), req.params.id]);
 
-    // ─── Sync to calendar slot: submit when shoot details are filled ──────────
-    if (shoot.calendar_slot_id && (['rejected', 'approved'].includes(shoot.status) || updates.status === 'pending_approval')) {
-      await db.query(
-        `UPDATE content_calendar_shoots SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL WHERE id = ?`,
-        [shoot.calendar_slot_id]
-      );
-      res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: shoot.calendar_slot_id });
-
-      // Notify the assigner
-      const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_shoots WHERE id = ?', [shoot.calendar_slot_id]);
-      if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-        await db.query(
-          `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-           VALUES (?, ?, 'slot_submitted', 'shoot', ?, 'Shoot slot submitted for approval', 'Shoot details filled. Please review.', '/social/content-calendar')`,
-          [slotInfo[0].assigned_by, req.user.id, shoot.calendar_slot_id]
-        );
-        res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
+    if (updates.status === 'pending_completion') {
+      try {
+        await db.query('UPDATE shoots SET close_requested_by = ?, close_requested_at = NOW(), completion_remarks = NULL WHERE id = ?', [uid, req.params.id]);
+      } catch (e) { /* columns not migrated yet */ }
+      await logShootHistory(shoot.id, 'close_request', null, uid);
+      // Tell whoever approved the shoot, and the slot's assigner
+      await notifyUser(shoot.approved_by, uid, {
+        type: 'shoot_close_requested', slot_id: shoot.calendar_slot_id,
+        title: 'Shoot close request submitted',
+        message: `${shoot.project_campaign_name || shoot.shoot_id_code}: close request is waiting for approval.`,
+      }, res);
+      await notifySlotAssigner(shoot.calendar_slot_id, uid, {
+        type: 'shoot_close_requested', title: 'Shoot close request submitted',
+        message: `${shoot.project_campaign_name || shoot.shoot_id_code}: close request is waiting for approval.`,
+      }, res);
+    } else if (updates.status === 'pending_approval') {
+      await logShootHistory(shoot.id, shoot.status === 'draft' ? 'submit' : 'resubmit', null, uid);
+      if (shoot.calendar_slot_id) {
+        await setSlotStatus(shoot.calendar_slot_id, 'submitted', uid);
+        res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: shoot.calendar_slot_id });
+        await notifySlotAssigner(shoot.calendar_slot_id, uid, {
+          type: 'slot_submitted', title: 'Shoot submitted for approval',
+          message: 'Shoot details updated. Please review.',
+        }, res);
       }
     }
 
-    const [updated] = await db.query(
-      `SELECT s.*, l.business_name AS client_brand_name,
-              CONCAT(um.first_name, ' ', um.last_name) AS shoot_manager_name
-       FROM shoots s
-       LEFT JOIN leads l ON l.id = s.client_brand_id
-       LEFT JOIN users um ON um.id = s.shoot_manager_id
-       WHERE s.id = ?`,
-      [req.params.id]
-    );
-
-    res.emitSocket('shoots:updated', updated[0]);
-    return res.json(updated[0]);
+    const updated = await fetchShootDetail(req.params.id);
+    res.emitSocket('shoots:updated', updated);
+    return res.json(updated);
   } catch (err) {
     console.error('Shoots update error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
+// ─── APPROVE / REJECT / REWORK ───────────────────────────────────────────────
 /**
- * PUT /api/shoots/:id/approve (Admin only — handles both stages)
+ * PUT /api/shoots/:id/approve   { action: 'approve' | 'reject' | 'rework', remarks, crew... }
+ *  Stage 1 (pending_approval)   → Shoot Approval toggle
+ *  Stage 2 (pending_completion) → Close Approval toggle
+ *  Rework  (approved → rejected)→ Shoot Approval toggle
  */
 exports.approve = async (req, res) => {
   try {
-    if (!req.user.is_admin && req.socialAccessLevel < 2) {
-      return res.status(403).json({ message: 'Only admin or SMM leads can approve/reject' });
-    }
-
     const [rows] = await db.query('SELECT * FROM shoots WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Shoot not found' });
 
     const shoot = rows[0];
-    const { action, remarks, photographers, videographers, shoot_manager_id } = req.body; // action: 'approve', 'reject', or 'rework'
+    const uid = Number(req.user.id);
+    const { action, photographers, videographers, shoot_manager_id } = req.body;
+    const remarks = typeof req.body.remarks === 'string' ? req.body.remarks.trim() : '';
+    const label = shoot.project_campaign_name || shoot.shoot_id_code || 'Shoot';
 
     if (!['approve', 'reject', 'rework'].includes(action)) {
       return res.status(400).json({ message: 'Action must be approve, reject, or rework' });
     }
-
-    // Rework: admin sends back approved shoot for re-editing
-    if (action === 'rework') {
-      await db.query(
-        `UPDATE shoots SET status = 'rejected', approval_remarks = ? WHERE id = ?`,
-        [remarks || 'Admin requested re-work. Please update and resubmit.', req.params.id]
-      );
-      // Log history
-      try {
-        await db.query(
-          `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-          ['shoots', req.params.id, 'rework', remarks || 'Admin requested re-work', req.user.id]
-        );
-      } catch (e) { /* table may not exist */ }
-      if (shoot.calendar_slot_id) {
-        await db.query(
-          `UPDATE content_calendar_shoots SET slot_status = 'rejected', rejection_reason = ? WHERE id = ?`,
-          [remarks || 'Admin requested re-work', shoot.calendar_slot_id]
-        );
-      }
-      const [updated] = await db.query('SELECT * FROM shoots WHERE id = ?', [req.params.id]);
-      return res.json(updated[0]);
+    if (shoot.status === 'draft') {
+      return res.status(400).json({ message: 'This shoot has not been filled in yet' });
     }
 
-    // Stage 1: pending_approval
-    if (shoot.status === 'pending_approval') {
+    // ── Rework: send an approved shoot back for re-editing ──
+    if (action === 'rework') {
+      if (!canApproveShoot(req)) {
+        return res.status(403).json({ message: 'Only users with Shoot Approval permission can request re-work' });
+      }
+      if (shoot.status !== 'approved') {
+        return res.status(400).json({ message: 'Only approved shoots can be sent back for re-work' });
+      }
+      const reason = remarks || 'Re-work requested. Please update and resubmit.';
+      await db.query(`UPDATE shoots SET status = 'rejected', approval_remarks = ? WHERE id = ?`, [reason, shoot.id]);
+      await logShootHistory(shoot.id, 'rework', reason, uid);
+      await setSlotStatus(shoot.calendar_slot_id, 'rejected', uid, reason);
+      await notifyUser(shoot.created_by, uid, {
+        type: 'shoot_rework', slot_id: shoot.calendar_slot_id,
+        title: 'Re-work requested for your shoot', message: `${label}: ${reason}`,
+      }, res);
+      if (shoot.calendar_slot_id) res.emitSocket('content-calendar:updated', { slot_id: shoot.calendar_slot_id });
+    }
+    // ── Stage 1: shoot request ──
+    else if (shoot.status === 'pending_approval') {
+      if (!canApproveShoot(req)) {
+        return res.status(403).json({ message: 'Only users with Shoot Approval permission can approve or reject shoot requests' });
+      }
+      if (action === 'reject' && !remarks) {
+        return res.status(400).json({ message: 'Please give a reason for rejecting' });
+      }
       const newStatus = action === 'approve' ? 'approved' : 'rejected';
 
-      // On approval, the Coordinator/Admin may also (re)assign the collaborator
-      // team (manager / photographers / videographers) in the same step.
+      // Approver may (re)assign the crew in the same step
       const collabSet = [];
       const collabVals = [];
       if (action === 'approve') {
         if (shoot_manager_id !== undefined) { collabSet.push('shoot_manager_id = ?'); collabVals.push(toInt(shoot_manager_id)); }
-        if (photographers !== undefined) { collabSet.push('photographers = ?'); collabVals.push(photographers ? JSON.stringify(photographers) : null); }
-        if (videographers !== undefined) { collabSet.push('videographers = ?'); collabVals.push(videographers ? JSON.stringify(videographers) : null); }
+        if (photographers !== undefined) { collabSet.push('photographers = ?'); collabVals.push(crewToJson(photographers)); }
+        if (videographers !== undefined) { collabSet.push('videographers = ?'); collabVals.push(crewToJson(videographers)); }
       }
-
       await db.query(
         `UPDATE shoots SET status = ?, approved_by = ?, approved_at = NOW(), approval_remarks = ?${collabSet.length ? ', ' + collabSet.join(', ') : ''} WHERE id = ?`,
-        [newStatus, req.user.id, remarks || null, ...collabVals, req.params.id]
+        [newStatus, action === 'approve' ? uid : null, remarks || null, ...collabVals, shoot.id]
       );
+      await logShootHistory(shoot.id, action === 'approve' ? 'approve' : 'reject', remarks, uid);
 
-      // Log approval history
-      try {
-        await db.query(
-          `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-          ['shoots', req.params.id, action === 'approve' ? 'approve' : 'reject', remarks || null, req.user.id]
-        );
-      } catch (e) { /* table may not exist */ }
-
-      // ─── Sync to calendar slot ──────────────────────────────────────────────
       if (shoot.calendar_slot_id) {
-        if (action === 'approve') {
-          await db.query(
-            `UPDATE content_calendar_shoots SET slot_status = 'approved', approved_at = NOW(), approved_by = ?, rejection_reason = NULL WHERE id = ?`,
-            [req.user.id, shoot.calendar_slot_id]
-          );
-          if (shoot.created_by) {
-            await db.query(
-              `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-               VALUES (?, ?, 'slot_approved', 'shoot', ?, 'Your shoot slot was approved!', 'Shoot is now live on the calendar.', '/social/shoots')`,
-              [shoot.created_by, req.user.id, shoot.calendar_slot_id]
-            );
-            res.emitSocket('smm:notification', { user_id: shoot.created_by, type: 'slot_approved' });
-          }
-        } else {
-          await db.query(
-            `UPDATE content_calendar_shoots SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
-            [remarks || 'Rejected', shoot.calendar_slot_id]
-          );
-          if (shoot.created_by) {
-            await db.query(
-              `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-               VALUES (?, ?, 'slot_rejected', 'shoot', ?, 'Your shoot slot was rejected', ?, '/social/shoots')`,
-              [shoot.created_by, req.user.id, shoot.calendar_slot_id, `Reason: ${remarks || 'Please re-edit'}`]
-            );
-            res.emitSocket('smm:notification', { user_id: shoot.created_by, type: 'slot_rejected' });
-          }
-        }
+        await setSlotStatus(shoot.calendar_slot_id, action === 'approve' ? 'approved' : 'rejected', uid, remarks);
         res.emitSocket('content-calendar:updated', { slot_id: shoot.calendar_slot_id });
       } else if (action === 'approve') {
-        // ── Direct shoot (no calendar slot yet) → place it on the Content Calendar ──
-        const newSlotId = await ensureCalendarSlotForDirectShoot(shoot, req.user.id);
-        if (newSlotId) {
-          res.emitSocket('content-calendar:updated', { slot_id: newSlotId });
-        }
+        const newSlotId = await ensureCalendarSlotForDirectShoot(shoot, uid);
+        if (newSlotId) res.emitSocket('content-calendar:updated', { slot_id: newSlotId });
       }
+      await notifyUser(shoot.created_by, uid, action === 'approve'
+        ? { type: 'shoot_approved', slot_id: shoot.calendar_slot_id, title: 'Your shoot was approved', message: `${label} is approved.` }
+        : { type: 'shoot_rejected', slot_id: shoot.calendar_slot_id, title: 'Your shoot was rejected', message: `${label}: ${remarks}` }, res);
     }
-    // Stage 2: pending_completion (close request approval)
+    // ── Stage 2: close request ──
     else if (shoot.status === 'pending_completion') {
+      if (!canApproveClose(req)) {
+        return res.status(403).json({ message: 'Only users with Close Approval permission can review close requests' });
+      }
+      if (action === 'rework') {
+        return res.status(400).json({ message: 'Use Reject to send a close request back' });
+      }
+      if (action === 'reject' && !remarks) {
+        return res.status(400).json({ message: 'Please give a reason for sending the close request back' });
+      }
       if (action === 'approve') {
         await db.query(
           `UPDATE shoots SET status = 'completed', completion_approved_by = ?, completion_approved_at = NOW(), completion_remarks = ? WHERE id = ?`,
-          [req.user.id, remarks || null, req.params.id]
+          [uid, remarks || null, shoot.id]
         );
+        await setSlotStatus(shoot.calendar_slot_id, 'completed', uid);
+        if (shoot.calendar_slot_id) res.emitSocket('content-calendar:slot-completed', { item_type: 'shoot', item_id: shoot.calendar_slot_id });
       } else {
-        // Reject sends back to approved so member can re-edit
-        await db.query(
-          `UPDATE shoots SET status = 'approved', completion_remarks = ? WHERE id = ?`,
-          [remarks || null, req.params.id]
-        );
+        await db.query(`UPDATE shoots SET status = 'approved', completion_remarks = ? WHERE id = ?`, [remarks, shoot.id]);
       }
+      await logShootHistory(shoot.id, action === 'approve' ? 'close_approve' : 'close_reject', remarks, uid);
+      const submitter = shoot.close_requested_by || shoot.created_by;
+      await notifyUser(submitter, uid, action === 'approve'
+        ? { type: 'shoot_close_approved', slot_id: shoot.calendar_slot_id, title: 'Shoot close request approved', message: `${label} is now completed.` }
+        : { type: 'shoot_close_rejected', slot_id: shoot.calendar_slot_id, title: 'Shoot close request sent back', message: `${label}: ${remarks}` }, res);
     } else {
-      return res.status(400).json({ message: `Cannot approve/reject a shoot with status: ${shoot.status}` });
+      return res.status(400).json({ message: `Cannot ${action} a shoot with status "${shoot.status}"` });
     }
 
-    const [updated] = await db.query(
-      `SELECT s.*, l.business_name AS client_brand_name,
-              CONCAT(um.first_name, ' ', um.last_name) AS shoot_manager_name,
-              CONCAT(ua.first_name, ' ', ua.last_name) AS approved_by_name,
-              CONCAT(uca.first_name, ' ', uca.last_name) AS completion_approved_by_name
-       FROM shoots s
-       LEFT JOIN leads l ON l.id = s.client_brand_id
-       LEFT JOIN users um ON um.id = s.shoot_manager_id
-       LEFT JOIN users ua ON ua.id = s.approved_by
-       LEFT JOIN users uca ON uca.id = s.completion_approved_by
-       WHERE s.id = ?`,
-      [req.params.id]
-    );
-
-    res.emitSocket('shoots:updated', updated[0]);
-    return res.json(updated[0]);
+    const updated = await fetchShootDetail(shoot.id);
+    res.emitSocket('shoots:updated', updated);
+    return res.json(updated);
   } catch (err) {
     console.error('Shoots approve error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
+// ─── FOOTAGE ─────────────────────────────────────────────────────────────────
 /**
- * DELETE /api/shoots/:id (soft delete)
+ * PUT /api/shoots/:id/footage   { footage_drive_link, shoot_statement }
+ * Crew, creator, approvers or SMM leads record where the footage is stored.
  */
+exports.updateFootage = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT * FROM shoots WHERE id = ? AND deleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Shoot not found' });
+    const shoot = rows[0];
+    const uid = Number(req.user.id);
+
+    const isTeam = getShootCollaboratorIds(shoot).has(uid);
+    if (!(isTeam || canSeeAllShoots(req))) {
+      return res.status(403).json({ message: 'Only the shoot team can update footage details' });
+    }
+    if (!['approved', 'pending_completion', 'completed'].includes(shoot.status)) {
+      return res.status(400).json({ message: 'Footage can be added once the shoot is approved' });
+    }
+
+    const link = typeof req.body.footage_drive_link === 'string' ? req.body.footage_drive_link.trim() : '';
+    const statement = typeof req.body.shoot_statement === 'string' ? req.body.shoot_statement.trim() : '';
+    if (link.length > 2000) return res.status(400).json({ message: 'Drive link is too long' });
+
+    await db.query(
+      `UPDATE shoots SET footage_drive_link = ?, shoot_statement = ?, footage_updated_by = ?, footage_updated_at = NOW() WHERE id = ?`,
+      [link || null, statement || null, uid, shoot.id]
+    );
+
+    const updated = await fetchShootDetail(shoot.id);
+    res.emitSocket('shoots:updated', updated);
+    return res.json(updated);
+  } catch (err) {
+    console.error('Shoots footage error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ─── DELETE (soft) ───────────────────────────────────────────────────────────
 exports.remove = async (req, res) => {
   try {
     const [rows] = await db.query('SELECT * FROM shoots WHERE id = ? AND deleted = 0', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ message: 'Shoot not found' });
+    const shoot = rows[0];
 
-    if (!req.user.is_admin && rows[0].created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Only the creator or admin can delete' });
+    const isCreator = Number(shoot.created_by) === Number(req.user.id);
+    const closed = ['pending_completion', 'completed'].includes(shoot.status);
+    const mayDelete = req.user.is_admin
+      || (!closed && isCreator && ['draft', 'pending_approval', 'rejected'].includes(shoot.status))
+      || (!closed && req.userCanDelete);
+    if (!mayDelete) {
+      return res.status(403).json({
+        message: closed ? 'Closed shoots can only be deleted by an admin' : 'You do not have permission to delete this shoot',
+      });
     }
 
-    await db.query('UPDATE shoots SET deleted = 1 WHERE id = ?', [req.params.id]);
-    res.emitSocket('shoots:deleted', { id: req.params.id });
+    await db.query('UPDATE shoots SET deleted = 1 WHERE id = ?', [shoot.id]);
+    await logShootHistory(shoot.id, 'reject', 'Deleted', req.user.id);
+
+    // Free the calendar slot so it can be filled again
+    if (shoot.calendar_slot_id && shoot.status !== 'completed') {
+      await setSlotStatus(shoot.calendar_slot_id, 'assigned', req.user.id);
+      res.emitSocket('content-calendar:updated', { slot_id: shoot.calendar_slot_id });
+    }
+
+    res.emitSocket('shoots:deleted', { id: shoot.id });
     return res.json({ message: 'Shoot deleted' });
   } catch (err) {
     console.error('Shoots delete error:', err);

@@ -294,6 +294,9 @@ server.listen(PORT, () => {
   // ── Ads two-stage approval: schema + approved → active on start date ───────
   require('./src/helpers/adsWorkflow').ensureAdsWorkflowSchema()
     .catch(err => console.error('⚠️  Ads workflow schema error (non-fatal):', err.message));
+  // ── Shoots two-stage approval: schema (draft status, footage, close request) ─
+  require('./src/helpers/shootsWorkflow').ensureShootsWorkflowSchema()
+    .catch(err => console.error('⚠️  Shoots workflow schema error (non-fatal):', err.message));
   const { startAdsActivationCron } = require('./src/jobs/adsActivationCron');
   startAdsActivationCron();
 });

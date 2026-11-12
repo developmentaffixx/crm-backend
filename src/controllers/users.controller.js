@@ -1,6 +1,6 @@
 const db = require('../config/db');
 const { uploadToCloudinary, deleteFromCloudinary, extractPublicId } = require('../config/cloudinary');
-const { loadAdsPerms, mergeAdsPerms } = require('../helpers/adsWorkflow');
+const { loadAdsPerms, mergeAdsPerms, APPROVAL_PERM_COLS } = require('../helpers/adsWorkflow');
 
 /**
  * GET /api/users
@@ -270,8 +270,8 @@ exports.myPermissions = async (req, res) => {
         can_complete: p.can_complete ?? 0,
         can_smm_approve:  p.can_smm_approve ?? 0,
         can_pcpm_approve: p.can_pcpm_approve ?? 0,
-        can_ads_campaign_approve: userAdsPerms[p.module]?.can_ads_campaign_approve ?? 0,
-        can_ads_report_approve:   userAdsPerms[p.module]?.can_ads_report_approve ?? 0,
+        // Ads + Shoots approval toggles from the user's own row
+        ...Object.fromEntries(APPROVAL_PERM_COLS.map(c => [c, userAdsPerms[p.module]?.[c] ?? 0])),
       };
     });
 

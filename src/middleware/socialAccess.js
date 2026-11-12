@@ -24,6 +24,8 @@ function requireSocialAccess(submenu) {
         req.userCanPcpmApprove = true;
         req.userCanAdsCampaignApprove = true;
         req.userCanAdsReportApprove   = true;
+        req.userCanShootApprove       = true;
+        req.userCanShootCloseApprove  = true;
         return next();
       }
 
@@ -180,6 +182,9 @@ function requireSocialAccess(submenu) {
       const adsFlags = await resolveAdsApprovalFlags(req.user.id, roleId);
       req.userCanAdsCampaignApprove = adsFlags.campaign;
       req.userCanAdsReportApprove   = adsFlags.report;
+      // Shoots two-stage approval toggles
+      req.userCanShootApprove      = adsFlags.shoot;
+      req.userCanShootCloseApprove = adsFlags.shootClose;
 
       next();
     } catch (err) {
