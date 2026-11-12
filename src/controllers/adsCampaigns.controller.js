@@ -1,6 +1,24 @@
 const db = require('../config/db');
 
 /**
+ * Mark a content_calendar_ads slot as completed.
+ * completed_at / completed_by may not exist on older schemas — if they're
+ * missing, fall back to updating slot_status only so the slot never stays
+ * stuck at 'approved' after the campaign is closed.
+ */
+async function markAdSlotCompleted(slotId, userId) {
+  try {
+    await db.query(
+      `UPDATE content_calendar_ads SET slot_status = 'completed', completed_at = NOW(), completed_by = ? WHERE id = ?`,
+      [userId, slotId]
+    );
+  } catch (err) {
+    if (err.code !== 'ER_BAD_FIELD_ERROR' && err.errno !== 1054) throw err;
+    await db.query(`UPDATE content_calendar_ads SET slot_status = 'completed' WHERE id = ?`, [slotId]);
+  }
+}
+
+/**
  * Can the current user modify (edit) this campaign?
  * Mirrors the visibility rules used in `list` so anything a user can see
  * and open for editing can also be saved.
@@ -369,10 +387,7 @@ exports.update = async (req, res) => {
             res.emitSocket('smm:notification', { user_id: campaign.created_by, type: 'slot_approved' });
           }
         } else if (updates.status === 'completed') {
-          await db.query(
-            `UPDATE content_calendar_ads SET slot_status = 'completed', completed_at = NOW(), completed_by = ? WHERE id = ?`,
-            [req.user.id, slotId]
-          );
+          await markAdSlotCompleted(slotId, req.user.id);
           res.emitSocket('content-calendar:slot-completed', { item_type: 'ad', item_id: slotId });
         } else if (updates.status === 'rejected') {
           await db.query(
@@ -462,10 +477,7 @@ exports.saveReport = async (req, res) => {
       const slotId = campaign[0].linked_calendar_ad_id || campaign[0].calendar_slot_id;
       if (slotId) {
         try {
-          await db.query(
-            `UPDATE content_calendar_ads SET slot_status = 'completed', completed_at = NOW(), completed_by = ? WHERE id = ?`,
-            [req.user.id, slotId]
-          );
+          await markAdSlotCompleted(slotId, req.user.id);
           try {
             await db.query(
               `UPDATE content_calendar_ads SET amount_spent = COALESCE(?, amount_spent), report_notes = COALESCE(?, report_notes) WHERE id = ?`,
