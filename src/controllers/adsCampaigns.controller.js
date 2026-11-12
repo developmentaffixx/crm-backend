@@ -55,24 +55,47 @@ async function canModifyCampaign(req, campaign) {
 // ─── LIST ────────────────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
-    const { project_id, status, assigned_to, page = 1, limit = 20 } = req.query;
-    let where = 'ac.deleted = 0';
-    const params = [];
+    const { project_id, status, assigned_to, search } = req.query;
+    const pageNum  = Math.max(1, parseInt(req.query.page) || 1);
+    const limitNum = Math.min(200, Math.max(1, parseInt(req.query.limit) || 20));
+    const isAdmin  = !!req.user.is_admin;
 
-    if (project_id) { where += ' AND ac.project_id = ?'; params.push(project_id); }
-    if (status) { where += ' AND ac.status = ?'; params.push(status); }
-    if (assigned_to) { where += ' AND ac.assigned_to = ?'; params.push(assigned_to); }
+    // Base filters (everything except status) — shared by list, count and summary,
+    // so the status tab counts reflect the current search / project filter.
+    let baseWhere = 'ac.deleted = 0';
+    const baseParams = [];
 
-    if (!req.user.is_admin) {
-      if (req.socialAccessLevel >= 2) {
-        // SMM lead — see all campaigns
-      } else {
-        where += ' AND (ac.created_by = ? OR ac.assigned_to = ? OR pm.user_id IS NOT NULL)';
-        params.push(req.user.id, req.user.id);
-      }
+    if (project_id) { baseWhere += ' AND ac.project_id = ?'; baseParams.push(project_id); }
+    if (assigned_to) { baseWhere += ' AND ac.assigned_to = ?'; baseParams.push(assigned_to); }
+
+    const term = typeof search === 'string' ? search.trim() : '';
+    if (term) {
+      const like = `%${term}%`;
+      baseWhere += ` AND (ac.campaign_name LIKE ? OR ac.campaign_id_code LIKE ? OR ac.objective LIKE ?
+                      OR ac.platform LIKE ? OR p.title LIKE ? OR l.business_name LIKE ?
+                      OR CONCAT(ua.first_name, ' ', ua.last_name) LIKE ?)`;
+      baseParams.push(like, like, like, like, like, like, like);
     }
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    if (!isAdmin && !(req.socialAccessLevel >= 2)) {
+      // Regular users: own, assigned, or project-member campaigns. SMM leads see all.
+      baseWhere += ' AND (ac.created_by = ? OR ac.assigned_to = ? OR pm.user_id IS NOT NULL)';
+      baseParams.push(req.user.id, req.user.id);
+    }
+
+    let where = baseWhere;
+    const params = [...baseParams];
+    if (status) { where += ' AND ac.status = ?'; params.push(status); }
+
+    // Joins needed by filters (search + visibility). pm join is parameterised.
+    const filterJoins = `
+       LEFT JOIN projects p ON p.id = ac.project_id
+       LEFT JOIN leads l ON l.id = p.client_id
+       LEFT JOIN users ua ON ua.id = ac.assigned_to
+       ${!isAdmin ? 'LEFT JOIN project_members pm ON pm.project_id = ac.project_id AND pm.user_id = ?' : ''}`;
+    const joinParams = !isAdmin ? [req.user.id] : [];
+
+    const offset = (pageNum - 1) * limitNum;
 
     const [rows] = await db.query(
       `SELECT ac.*,
@@ -84,27 +107,50 @@ exports.list = async (req, res) => {
               COALESCE(acr.recommendations, acr.best_performing_ad) AS report_notes,
               ca.slot_status AS slot_status
        FROM ad_campaigns ac
-       LEFT JOIN projects p ON p.id = ac.project_id
-       LEFT JOIN leads l ON l.id = p.client_id
-       LEFT JOIN users ua ON ua.id = ac.assigned_to
+       ${filterJoins}
        LEFT JOIN users uc ON uc.id = ac.created_by
        LEFT JOIN ad_campaign_reports acr ON acr.campaign_id = ac.id
        LEFT JOIN content_calendar_ads ca ON (ca.id = ac.linked_calendar_ad_id OR ca.id = ac.calendar_slot_id)
-       ${!req.user.is_admin ? 'LEFT JOIN project_members pm ON pm.project_id = ac.project_id AND pm.user_id = ' + req.user.id : ''}
        WHERE ${where}
        ORDER BY ac.created_at DESC
        LIMIT ? OFFSET ?`,
-      [...params, parseInt(limit), offset]
+      [...joinParams, ...params, limitNum, offset]
     );
 
     const [countResult] = await db.query(
-      `SELECT COUNT(*) AS total FROM ad_campaigns ac
-       ${!req.user.is_admin ? 'LEFT JOIN project_members pm ON pm.project_id = ac.project_id AND pm.user_id = ' + req.user.id : ''}
-       WHERE ${where}`,
-      params
+      `SELECT COUNT(DISTINCT ac.id) AS total FROM ad_campaigns ac ${filterJoins} WHERE ${where}`,
+      [...joinParams, ...params]
     );
 
-    return res.json({ campaigns: rows, total: countResult[0].total, page: parseInt(page), limit: parseInt(limit) });
+    // Summary over base filters (ignores status so tabs can show per-status counts)
+    const [summaryRows] = await db.query(
+      `SELECT ac.status, COUNT(*) AS count,
+              COALESCE(SUM(ac.budget), 0) AS budget,
+              COALESCE(SUM(acr.amount_spent), 0) AS spent
+       FROM (SELECT DISTINCT ac.id, ac.status, ac.budget
+             FROM ad_campaigns ac ${filterJoins}
+             WHERE ${baseWhere}) ac
+       LEFT JOIN ad_campaign_reports acr ON acr.campaign_id = ac.id
+       GROUP BY ac.status`,
+      [...joinParams, ...baseParams]
+    );
+
+    const summary = { total: 0, by_status: {}, total_budget: 0, total_spent: 0 };
+    summaryRows.forEach(r => {
+      const c = Number(r.count) || 0;
+      summary.total += c;
+      summary.by_status[r.status || 'unknown'] = c;
+      summary.total_budget += Number(r.budget) || 0;
+      summary.total_spent  += Number(r.spent)  || 0;
+    });
+
+    return res.json({
+      campaigns: rows,
+      total: Number(countResult[0].total) || 0,
+      page: pageNum,
+      limit: limitNum,
+      summary,
+    });
   } catch (err) {
     console.error('Ads list error:', err);
     return res.status(500).json({ message: 'Server error' });
