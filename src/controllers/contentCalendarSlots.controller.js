@@ -7,7 +7,7 @@ const db = require('../config/db');
 
 const { getSocialSubmenuAccess } = require('../middleware/socialAccess');
 const { statusOnApproval, logAdsHistory } = require('../helpers/adsWorkflow');
-const { generateShootCode, logShootHistory } = require('../helpers/shootsWorkflow');
+const { generateShootCode, logShootHistory, parseIds } = require('../helpers/shootsWorkflow');
 
 const TABLE_MAP = {
   post: 'content_calendar_posts',
@@ -50,6 +50,14 @@ async function syncAdCampaignApproved(slotId, slotStartDate, userId) {
 // Stage 1 is the Shoot Approval toggle, stage 2 (close) the Close Approval toggle.
 const canApproveShootReq = (req) => !!(req.user.is_admin || req.userCanShootApprove);
 const canApproveShootCloseReq = (req) => !!(req.user.is_admin || req.userCanShootCloseApprove);
+
+/** Is the user on the linked shoot's crew (manager / creator / photographer / videographer)? */
+function isShootCrewRow(r, uid) {
+  return Number(r.shoot_manager_id_resolved) === uid
+    || Number(r.shoot_created_by_resolved) === uid
+    || parseIds(r.photographers_resolved).includes(uid)
+    || parseIds(r.videographers_resolved).includes(uid);
+}
 
 async function linkedShoots(slotId) {
   try {
@@ -249,7 +257,11 @@ exports.listSlots = async (req, res) => {
                 sh.shoot_id_code AS linked_shoot_code,
                 sh.shoot_date AS linked_shoot_date,
                 sh.status AS linked_shoot_status,
-                sh.id AS shoot_id_resolved` : ''}
+                sh.id AS shoot_id_resolved,
+                sh.shoot_manager_id AS shoot_manager_id_resolved,
+                sh.created_by AS shoot_created_by_resolved,
+                sh.photographers AS photographers_resolved,
+                sh.videographers AS videographers_resolved` : ''}
          FROM content_calendar_shoots cs
          LEFT JOIN users u ON u.id = cs.assigned_to
          LEFT JOIN users ab ON ab.id = cs.assigned_by
@@ -279,7 +291,11 @@ exports.listSlots = async (req, res) => {
                 sh.shoot_id_code AS linked_shoot_code,
                 sh.shoot_date AS linked_shoot_date,
                 sh.status AS linked_shoot_status,
-                sh.id AS shoot_id_resolved
+                sh.id AS shoot_id_resolved,
+                sh.shoot_manager_id AS shoot_manager_id_resolved,
+                sh.created_by AS shoot_created_by_resolved,
+                sh.photographers AS photographers_resolved,
+                sh.videographers AS videographers_resolved
            FROM content_calendar_shoots cs
            LEFT JOIN users u ON u.id = cs.assigned_to
            LEFT JOIN users ab ON ab.id = cs.assigned_by
@@ -301,7 +317,7 @@ exports.listSlots = async (req, res) => {
           [rows] = await db.query(shootSelect(false), [planIds, ...statusParams, ...assignedParams]);
         }
       }
-      shoots = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'shoot' }));
+      shoots = rows.map(r => ({ ...r, _plan: planMap[r.plan_id], _type: 'shoot', is_shoot_crew: isShootCrewRow(r, Number(userId)) }));
     }
 
     // Fetch ads — pull the linked campaign name/details from ad_campaigns.

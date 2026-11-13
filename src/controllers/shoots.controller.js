@@ -206,6 +206,73 @@ exports.list = async (req, res) => {
   }
 };
 
+// ─── CREW CANDIDATES ─────────────────────────────────────────────────────────
+/**
+ * GET /api/shoots/crew-candidates?include=1,2
+ * Active users with Content Calendar access (Own or All), for the photographer /
+ * videographer pickers — crew punch their shoot from the calendar, so they need
+ * calendar access but not Shoots access. `include` keeps already-picked users.
+ *
+ * Resolution mirrors requireSocialAccess for submenu 'content_calendar':
+ * user override → role submenu → legacy role_social_permissions → inferred from
+ * SM Ops view/edit when nothing is set. Admins always qualify.
+ */
+exports.crewCandidates = async (req, res) => {
+  try {
+    const include = new Set(
+      String(req.query.include || '').split(',').map(n => parseInt(n, 10)).filter(n => !Number.isNaN(n))
+    );
+
+    const [users] = await db.query(
+      `SELECT id, first_name, last_name, role_id, is_admin
+       FROM users WHERE deleted = 0 AND is_active = 1
+       ORDER BY first_name, last_name`
+    );
+
+    const safe = async (sql) => { try { const [r] = await db.query(sql); return r; } catch (e) { return []; } };
+    const userSub = await safe(`SELECT user_id, can_access FROM user_submenu_permissions WHERE module = 'creative_hub' AND submenu = 'content_calendar'`);
+    const roleSub = await safe(`SELECT role_id, can_access FROM role_submenu_permissions WHERE module = 'creative_hub' AND submenu = 'content_calendar'`);
+    const legacy  = await safe(`SELECT role_id, content_calendar AS can_access FROM role_social_permissions`);
+    const rolePerm = await safe(`SELECT role_id, can_view, can_edit FROM role_permissions WHERE module = 'creative_hub'`);
+    const userPerm = await safe(`SELECT user_id, can_view, can_edit FROM user_permissions WHERE module = 'creative_hub'`);
+
+    const toMap = (rows, key) => {
+      const m = new Map();
+      rows.forEach(r => { if (r.can_access !== null && r.can_access !== undefined) m.set(Number(r[key]), Number(r.can_access) || 0); });
+      return m;
+    };
+    const userSubMap = toMap(userSub, 'user_id');
+    const roleSubMap = toMap(roleSub, 'role_id');
+    const legacyMap  = toMap(legacy, 'role_id');
+    const rolePermMap = new Map(rolePerm.map(r => [Number(r.role_id), r]));
+    const userPermMap = new Map(userPerm.map(r => [Number(r.user_id), r]));
+
+    const calendarLevel = (u) => {
+      if (u.is_admin) return 2;
+      const uid = Number(u.id);
+      const rid = Number(u.role_id);
+      if (userSubMap.has(uid)) return userSubMap.get(uid);
+      if (rid && roleSubMap.has(rid)) return roleSubMap.get(rid);
+      if (rid && legacyMap.has(rid)) return legacyMap.get(rid);
+      // Nothing set: infer from SM Ops view / edit (user row overrides role row)
+      const rp = rolePermMap.get(rid) || {};
+      const up = userPermMap.get(uid) || {};
+      const view = Number(up.can_view ?? rp.can_view ?? 0) || 0;
+      const edit = Number(up.can_edit ?? rp.can_edit ?? 0) || 0;
+      return view || (edit ? 2 : 0);
+    };
+
+    const list = users
+      .map(u => ({ id: u.id, first_name: u.first_name, last_name: u.last_name, calendar_access: calendarLevel(u) }))
+      .filter(u => u.calendar_access >= 1 || include.has(Number(u.id)));
+
+    return res.json({ users: list });
+  } catch (err) {
+    console.error('Shoots crew candidates error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // ─── GET ONE ─────────────────────────────────────────────────────────────────
 exports.getOne = async (req, res) => {
   try {
@@ -586,6 +653,28 @@ exports.approve = async (req, res) => {
       await notifyUser(shoot.created_by, uid, action === 'approve'
         ? { type: 'shoot_approved', slot_id: shoot.calendar_slot_id, title: 'Your shoot was approved', message: `${label} is approved.` }
         : { type: 'shoot_rejected', slot_id: shoot.calendar_slot_id, title: 'Your shoot was rejected', message: `${label}: ${remarks}` }, res);
+
+      // Tell the crew they're on this shoot and where to punch (Content Calendar)
+      if (action === 'approve') {
+        const fresh = (await db.query('SELECT shoot_manager_id, photographers, videographers, shoot_date, calendar_slot_id FROM shoots WHERE id = ?', [shoot.id]))[0][0] || {};
+        const crew = new Set([
+          Number(fresh.shoot_manager_id),
+          ...parseIds(fresh.photographers),
+          ...parseIds(fresh.videographers),
+        ].filter(n => n && n !== Number(shoot.created_by)));
+        const dateStr = fresh.shoot_date
+          ? new Date(fresh.shoot_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+          : 'the scheduled date';
+        for (const memberId of crew) {
+          await notifyUser(memberId, uid, {
+            type: 'shoot_crew_assigned',
+            slot_id: fresh.calendar_slot_id || null,
+            title: 'You are on a shoot crew',
+            message: `${shoot.shoot_id_code || label} on ${dateStr}. Open it on the Content Calendar to punch in on the day.`,
+            link: '/social/content-calendar',
+          }, res);
+        }
+      }
     }
     // ── Stage 2: close request ──
     else if (shoot.status === 'pending_completion') {

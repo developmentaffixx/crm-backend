@@ -19,6 +19,47 @@ async function generateNextAdNo(conn) {
   return `AD-${String(next).padStart(3, '0')}`;
 }
 
+// ─── Shoot crew helpers ───────────────────────────────────────────────────────
+// Photographers / videographers often have Calendar access only. They punch
+// their shoot from the calendar, so "Own" scope must include shoots they crew.
+const parseIdList = (v) => {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map(Number);
+  try { const a = JSON.parse(v); return Array.isArray(a) ? a.map(Number) : []; } catch { return []; }
+};
+
+/** Is this user on the shoot's crew (manager / photographer / videographer / creator)? */
+function isOnShootCrew(row, uid) {
+  return Number(row.shoot_manager_id_resolved) === uid
+    || Number(row.shoot_created_by_resolved) === uid
+    || parseIdList(row.photographers_resolved).includes(uid)
+    || parseIdList(row.videographers_resolved).includes(uid);
+}
+
+/** Calendar shoot-slot ids where the user is on the linked shoot's crew. */
+async function crewShootSlotIds(uid) {
+  try {
+    const [rows] = await db.query(
+      `SELECT cs.id AS slot_id, s.shoot_manager_id, s.photographers, s.videographers
+       FROM content_calendar_shoots cs
+       JOIN shoots s ON (s.calendar_slot_id = cs.id OR s.id = cs.linked_shoot_id) AND s.deleted = 0
+       WHERE s.status IN ('approved', 'pending_completion', 'completed')
+         AND (s.shoot_manager_id = ? OR s.photographers IS NOT NULL OR s.videographers IS NOT NULL)`,
+      [uid]
+    );
+    const ids = new Set();
+    rows.forEach(r => {
+      if (Number(r.shoot_manager_id) === uid || parseIdList(r.photographers).includes(uid) || parseIdList(r.videographers).includes(uid)) {
+        ids.add(r.slot_id);
+      }
+    });
+    return [...ids];
+  } catch (e) {
+    console.warn('crewShootSlotIds warning:', e.message);
+    return [];
+  }
+}
+
 // ─── LIST PLANS ───────────────────────────────────────────────────────────────
 
 exports.list = async (req, res) => {
@@ -660,16 +701,17 @@ exports.calendarView = async (req, res) => {
 
     if (client_id) { planWhere += ' AND p.client_id = ?'; planParams.push(client_id); }
     if (project_id) { planWhere += ' AND p.project_id = ?'; planParams.push(project_id); }
-    if (!req.user.is_admin) {
-      if (req.socialAccessLevel >= 2) {
-        // SMM lead with full access — see all plans (no extra filter)
-      } else {
-        // Show plans for projects the user is a member of (or created by them)
-        planWhere += ` AND (p.created_by = ? OR p.project_id IN (
+    // "Own" scope: member/creator plans, plus plans holding a shoot this user is crew on
+    // (so photographers/videographers with Calendar-only access can find & punch their shoot).
+    const ownScope = !req.user.is_admin && !(req.socialAccessLevel >= 2);
+    const uid = Number(req.user.id);
+    const crewSlotIds = ownScope ? await crewShootSlotIds(uid) : [];
+    if (ownScope) {
+      planWhere += ` AND (p.created_by = ? OR p.project_id IN (
           SELECT project_id FROM project_members WHERE user_id = ?
-        ))`;
-        planParams.push(req.user.id, req.user.id);
-      }
+        )${crewSlotIds.length ? ' OR p.id IN (SELECT plan_id FROM content_calendar_shoots WHERE id IN (?))' : ''})`;
+      planParams.push(uid, uid);
+      if (crewSlotIds.length) planParams.push(crewSlotIds);
     }
 
     // Get plan IDs
@@ -835,6 +877,10 @@ exports.calendarView = async (req, res) => {
                 COALESCE(s.video_clips, s2.video_clips) AS num_videos,
                 COALESCE(s.photos_clicked, s2.photos_clicked) AS num_photos,
                 COALESCE(s.status, s2.status) AS shoot_status,
+                COALESCE(s.shoot_manager_id, s2.shoot_manager_id) AS shoot_manager_id_resolved,
+                COALESCE(s.created_by, s2.created_by) AS shoot_created_by_resolved,
+                COALESCE(s.photographers, s2.photographers) AS photographers_resolved,
+                COALESCE(s.videographers, s2.videographers) AS videographers_resolved,
                 CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
          FROM content_calendar_shoots cs
          JOIN content_calendar_plans p ON p.id = cs.plan_id
@@ -871,6 +917,11 @@ exports.calendarView = async (req, res) => {
                   COALESCE(s.video_clips, s2.video_clips) AS num_videos,
                   COALESCE(s.photos_clicked, s2.photos_clicked) AS num_photos,
                   COALESCE(s.status, s2.status) AS shoot_status,
+                  COALESCE(s.id, s2.id) AS linked_shoot_id_resolved,
+                  COALESCE(s.shoot_manager_id, s2.shoot_manager_id) AS shoot_manager_id_resolved,
+                  COALESCE(s.created_by, s2.created_by) AS shoot_created_by_resolved,
+                  COALESCE(s.photographers, s2.photographers) AS photographers_resolved,
+                  COALESCE(s.videographers, s2.videographers) AS videographers_resolved,
                   CONCAT(au.first_name, ' ', au.last_name) AS assigned_to_name
            FROM content_calendar_shoots cs
            JOIN content_calendar_plans p ON p.id = cs.plan_id
@@ -947,6 +998,28 @@ exports.calendarView = async (req, res) => {
         );
         ads = rows;
       } else throw colErr;
+    }
+
+    // Flag the shoots this user is crew on (calendar shows Punch to them)
+    shoots = shoots.map(r => ({ ...r, is_shoot_crew: isOnShootCrew(r, uid) }));
+
+    // Plans reached ONLY through shoot crew: expose just those crew shoots, not the rest of the plan
+    if (ownScope && crewSlotIds.length) {
+      try {
+        const [memberPlans] = await db.query(
+          `SELECT id FROM content_calendar_plans
+           WHERE id IN (?) AND (created_by = ? OR project_id IN (SELECT project_id FROM project_members WHERE user_id = ?))`,
+          [planIds, uid, uid]
+        );
+        const memberSet = new Set(memberPlans.map(r => r.id));
+        const crewSet = new Set(crewSlotIds);
+        const crewOnlyPlans = new Set(planIds.filter(id => !memberSet.has(id)));
+        if (crewOnlyPlans.size) {
+          posts = posts.filter(r => !crewOnlyPlans.has(r.plan_id));
+          ads = ads.filter(r => !crewOnlyPlans.has(r.plan_id));
+          shoots = shoots.filter(r => !crewOnlyPlans.has(r.plan_id) || crewSet.has(r.id));
+        }
+      } catch (e) { console.warn('[calendarView] crew scope filter warning:', e.message); }
     }
 
     const planMap = {};

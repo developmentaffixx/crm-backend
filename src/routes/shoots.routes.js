@@ -21,6 +21,10 @@ router.use(requireSocialAccess('shoot_planning'));
 // GET  /api/shoots
 router.get('/', shootsController.list);
 
+// GET  /api/shoots/crew-candidates — users with Content Calendar access (crew pickers)
+// (must be declared before /:id)
+router.get('/crew-candidates', shootsController.crewCandidates);
+
 // GET  /api/shoots/:id
 router.get('/:id', param('id').isInt(), shootsController.getOne);
 
