@@ -14,7 +14,11 @@ const db = require('../config/db');
 const ADS_PERM_COLS = ['can_ads_campaign_approve', 'can_ads_report_approve'];
 // All submenu-level approval toggles stored on role_permissions / user_permissions
 // (creative_hub row): Ads (2) + Shoots (2). Older schemas may only have the Ads pair.
-const APPROVAL_PERM_COLS = [...ADS_PERM_COLS, 'can_shoot_approve', 'can_shoot_close_approve'];
+const SHOOT_PERM_COLS = ['can_shoot_approve', 'can_shoot_close_approve'];
+const CONTENT_PERM_COLS = ['can_content_smm_approve', 'can_content_pcpm_approve', 'can_content_complete'];
+const APPROVAL_PERM_COLS = [...ADS_PERM_COLS, ...SHOOT_PERM_COLS, ...CONTENT_PERM_COLS];
+// Column sets to try, newest first — older databases may not have every toggle yet
+const PERM_COL_FALLBACKS = [APPROVAL_PERM_COLS, [...ADS_PERM_COLS, ...SHOOT_PERM_COLS], ADS_PERM_COLS];
 
 // ─── Dates ────────────────────────────────────────────────────────────────────
 
@@ -84,7 +88,7 @@ async function activateStartedCampaigns({ minIntervalMs = 0 } = {}) {
  * shoot columns don't exist yet, falls back to the Ads pair. Returns rows.
  */
 async function selectApprovalCols(table, keyCol, id, extraWhere = '', extraParams = []) {
-  for (const cols of [APPROVAL_PERM_COLS, ADS_PERM_COLS]) {
+  for (const cols of PERM_COL_FALLBACKS) {
     try {
       const [rows] = await db.query(
         `SELECT module, ${cols.join(', ')} FROM ${table} WHERE ${keyCol} = ?${extraWhere}`,
@@ -127,7 +131,7 @@ function mergeAdsPerms(permissions, adsPerms) {
 async function saveAdsPerms(table, keyCol, id, module, perm) {
   if (!perm) return;
   const val = (c) => (parseInt(perm[c] ?? 0, 10) ? 1 : 0);
-  for (const cols of [APPROVAL_PERM_COLS, ADS_PERM_COLS]) {
+  for (const cols of PERM_COL_FALLBACKS) {
     try {
       await db.query(
         `UPDATE ${table} SET ${cols.map(c => `${c} = ?`).join(', ')} WHERE ${keyCol} = ? AND module = ?`,
@@ -145,12 +149,18 @@ async function saveAdsPerms(table, keyCol, id, module, perm) {
  * Returns { campaign, report } for Ads and { shoot, shootClose } for Shoots.
  */
 async function resolveAdsApprovalFlags(userId, roleId) {
-  const flags = { campaign: false, report: false, shoot: false, shootClose: false };
+  const flags = {
+    campaign: false, report: false, shoot: false, shootClose: false,
+    contentSmm: false, contentPcpm: false, contentComplete: false,
+  };
   const KEY = {
     can_ads_campaign_approve: 'campaign',
     can_ads_report_approve: 'report',
     can_shoot_approve: 'shoot',
     can_shoot_close_approve: 'shootClose',
+    can_content_smm_approve: 'contentSmm',
+    can_content_pcpm_approve: 'contentPcpm',
+    can_content_complete: 'contentComplete',
   };
   const apply = (row, onlyIfSet) => {
     Object.entries(KEY).forEach(([col, key]) => {

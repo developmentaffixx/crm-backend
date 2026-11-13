@@ -8,6 +8,21 @@ const db = require('../config/db');
 const { getSocialSubmenuAccess } = require('../middleware/socialAccess');
 const { statusOnApproval, logAdsHistory } = require('../helpers/adsWorkflow');
 const { generateShootCode, logShootHistory, parseIds, linkFromPlan } = require('../helpers/shootsWorkflow');
+const contentWf = require('../helpers/contentWorkflow');
+
+/**
+ * Posts: every calendar action goes through the Contents workflow (same rules,
+ * toggles and history as the Contents page). Replies like the other slot endpoints.
+ */
+async function runPostAction(req, res, slotId, action, okMessage, reason) {
+  try {
+    await contentWf.transitionSlot(req, res, slotId, action, { reason });
+    return res.json({ message: okMessage, item_type: 'post', item_id: slotId });
+  } catch (e) {
+    if (e instanceof contentWf.WorkflowError) return res.status(e.status).json({ message: e.message });
+    throw e;
+  }
+}
 
 const TABLE_MAP = {
   post: 'content_calendar_posts',
@@ -415,39 +430,18 @@ exports.assignSlot = async (req, res) => {
     if (item_type === 'post') {
       linkedItemType = 'content_write';
       // Get plan's client_id, project_id, and post's format/platform
-      const [planInfo] = await conn.query(
-        `SELECT p.client_id, p.project_id, cp.format, cp.platform AS post_platform
-         FROM content_calendar_plans p
-         JOIN ${table} cp ON cp.plan_id = p.id WHERE cp.id = ?`, [slotId]
+      // One content row per slot: reuse a live one (re-assignment), else create a Draft
+      const [existingRow] = await conn.query(
+        'SELECT id FROM content_write_requests WHERE calendar_slot_id = ? AND deleted = 0 ORDER BY id ASC LIMIT 1',
+        [slotId]
       );
-      const clientId = planInfo[0]?.client_id || null;
-      const projectId = planInfo[0]?.project_id || null;
-      const postFormat = planInfo[0]?.format || 'static_post';
-      const postPlatform = planInfo[0]?.post_platform || 'Instagram';
-
-      // Generate content_id_code
-      let clientCode = 'GEN';
-      if (clientId) {
-        const [cRows] = await conn.query('SELECT client_code FROM leads WHERE id = ?', [clientId]);
-        if (cRows.length > 0 && cRows[0].client_code) clientCode = cRows[0].client_code;
+      if (existingRow.length) {
+        linkedItemId = existingRow[0].id;
+        await conn.query('UPDATE content_write_requests SET created_by = ? WHERE id = ?', [assigned_to, linkedItemId]);
+      } else {
+        // Draft placeholder with project ▸ service ▸ cycle from the plan; code allocated safely
+        linkedItemId = await contentWf.createDraftForSlot(conn, { slotId, assignedTo: assigned_to });
       }
-      const [lastCnt] = await conn.query(
-        `SELECT content_id_code FROM content_write_requests WHERE content_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
-        [`CNT-${clientCode}-%`]
-      );
-      let seq = 1;
-      if (lastCnt.length > 0 && lastCnt[0].content_id_code) {
-        const parts = lastCnt[0].content_id_code.split('-');
-        seq = parseInt(parts[parts.length - 1], 10) + 1;
-      }
-      const contentCode = `CNT-${clientCode}-${String(seq).padStart(3, '0')}`;
-
-      const [writeResult] = await conn.query(
-        `INSERT INTO content_write_requests (content_id_code, client_brand_id, project_id, platform, content_type, status, created_by, calendar_slot_id)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
-        [contentCode, clientId, projectId, postPlatform, postFormat, assigned_to, slotId]
-      );
-      linkedItemId = writeResult.insertId;
 
       // Link back
       await conn.query(`UPDATE ${table} SET linked_write_id = ? WHERE id = ?`, [linkedItemId, slotId]);
@@ -567,6 +561,9 @@ exports.fillSlot = async (req, res) => {
     if (!item_type || !item_id) {
       return res.status(400).json({ message: 'item_type and item_id are required' });
     }
+    if (item_type === 'post') {
+      return res.status(400).json({ message: 'Write post content on the Contents page (Assigned Slots → Fill Content).' });
+    }
 
     const table = TABLE_MAP[item_type];
     if (!table) return res.status(400).json({ message: 'Invalid item_type' });
@@ -645,6 +642,19 @@ exports.submitSlot = async (req, res) => {
       return res.status(400).json({ message: 'item_type and item_id are required' });
     }
 
+    if (item_type === 'post') {
+      // Posts are submitted from the Contents page so their content is validated
+      try {
+        const row = await contentWf.rowForSlot(db, item_id);
+        if (!row) return res.status(400).json({ message: 'Write the post content on the Contents page first.' });
+        await contentWf.transition(req, res, row.id, 'submit');
+        return res.json({ message: 'Slot submitted for approval', item_type, item_id });
+      } catch (e) {
+        if (e instanceof contentWf.WorkflowError) return res.status(e.status).json({ message: e.message });
+        throw e;
+      }
+    }
+
     const table = TABLE_MAP[item_type];
     if (!table) return res.status(400).json({ message: 'Invalid item_type' });
 
@@ -712,6 +722,13 @@ exports.smmReview = async (req, res) => {
       });
     }
 
+    // Posts → Contents workflow (Contents SMM Review toggle)
+    if (item_type === 'post') {
+      return action === 'rework'
+        ? runPostAction(req, res, item_id, 'send_back', 'Slot sent for re-work', reason)
+        : runPostAction(req, res, item_id, 'smm_accept', 'Slot passed SMM review');
+    }
+
     const canSmm = req.user.is_admin || req.userCanSmmApprove;
     if (!canSmm) {
       return res.status(403).json({ message: 'Only admin or users with SMM Approval permission can review slots' });
@@ -770,6 +787,9 @@ exports.smmReview = async (req, res) => {
 exports.approveSlot = async (req, res) => {
   try {
     const { item_type, item_id } = req.body;
+
+    // Posts → Contents workflow (Contents PC/PM Approval toggle; works from submitted or SMM-reviewed)
+    if (item_type === 'post' && item_id) return runPostAction(req, res, item_id, 'approve', 'Slot approved');
 
     // Ads → Ads Campaign Approval toggle. Others → PC/PM approval (legacy can_approve still works).
     if (item_type === 'ad') {
@@ -854,6 +874,11 @@ exports.approveSlot = async (req, res) => {
 exports.rejectSlot = async (req, res) => {
   try {
     const { item_type, item_id, reason, action = 'reject' } = req.body;
+
+    // Posts → Contents workflow (SMM from pending; PC/PM from pending / SMM reviewed / approved)
+    if (item_type === 'post' && item_id) {
+      return runPostAction(req, res, item_id, 'send_back', action === 'rework' ? 'Slot sent for re-work' : 'Slot rejected', reason);
+    }
 
     // Ads → Ads Campaign Approval toggle. Others → SMM reviewers or PC/PM approvers (or admin).
     if (item_type === 'ad') {
@@ -971,6 +996,9 @@ exports.completeSlot = async (req, res) => {
     if (!item_type || !item_id) {
       return res.status(400).json({ message: 'item_type and item_id are required' });
     }
+
+    // Posts → Contents workflow (Contents Mark as Done toggle)
+    if (item_type === 'post') return runPostAction(req, res, item_id, 'complete', 'Slot marked as completed');
 
     const table = TABLE_MAP[item_type];
     if (!table) return res.status(400).json({ message: 'Invalid item_type' });
@@ -1179,6 +1207,11 @@ exports.remodifySlot = async (req, res) => {
       return res.status(400).json({ message: 'Cannot re-modify — this calendar has already been shared with the client' });
     }
 
+    // Posts → Contents workflow (content → rejected with reason, slot → assigned, history)
+    if (item_type === 'post') {
+      return runPostAction(req, res, item_id, 'remodify', 'Slot reopened for re-modification', reason);
+    }
+
     // Reopen the slot for the assignee to edit again.
     await db.query(
       `UPDATE ${table}
@@ -1262,6 +1295,12 @@ exports.bulkApprove = async (req, res) => {
     for (const { item_type, item_id } of items) {
       const table = TABLE_MAP[item_type];
       if (!table) { skipped++; continue; }
+      // Posts → Contents workflow (PC/PM approval, all rules + history)
+      if (item_type === 'post') {
+        try { await contentWf.transitionSlot(req, res, item_id, 'approve'); approved++; }
+        catch (e) { if (!(e instanceof contentWf.WorkflowError)) console.warn('[bulkApprove] post:', e.message); skipped++; }
+        continue;
+      }
       // Ad slots need the Ads Campaign Approval toggle; shoot slots the Shoot Approval toggle
       if (item_type === 'ad' && !canApproveAds) { skipped++; continue; }
       if (item_type === 'shoot' && !canApproveShootReq(req)) { skipped++; continue; }

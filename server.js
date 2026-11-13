@@ -297,6 +297,9 @@ server.listen(PORT, () => {
   // ── Shoots two-stage approval: schema (draft status, footage, close request) ─
   require('./src/helpers/shootsWorkflow').ensureShootsWorkflowSchema()
     .catch(err => console.error('⚠️  Shoots workflow schema error (non-fatal):', err.message));
+  // ── Contents (posts): SMM → PC/PM → Mark as Done workflow schema ────────────
+  require('./src/helpers/contentWorkflow').ensureContentWorkflowSchema()
+    .catch(err => console.error('⚠️  Contents workflow schema error (non-fatal):', err.message));
   const { startAdsActivationCron } = require('./src/jobs/adsActivationCron');
   startAdsActivationCron();
 });

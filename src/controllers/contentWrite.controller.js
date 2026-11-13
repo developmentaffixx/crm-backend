@@ -1,757 +1,452 @@
-const { validationResult } = require('express-validator');
-const db = require('../config/db');
-
 /**
- * GET /api/content-write
+ * Contents (content writing) — /api/content-write
+ * All status changes go through helpers/contentWorkflow.js (shared with the
+ * Content Calendar), so the page and the calendar can't disagree.
+ * Content is only created from Content Calendar post slots.
+ */
+const db = require('../config/db');
+const wf = require('../helpers/contentWorkflow');
+
+const toInt = (v) => { const n = parseInt(v, 10); return Number.isNaN(n) ? null : n; };
+
+// ─── Schema capability cache (columns added by migrations) ───────────────────
+const colCache = {};
+async function hasColumn(column) {
+  if (colCache[column] !== undefined) return colCache[column];
+  try {
+    const [r] = await db.query(
+      `SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'content_write_requests' AND COLUMN_NAME = ?`,
+      [column]
+    );
+    colCache[column] = r.length > 0;
+  } catch { colCache[column] = false; }
+  return colCache[column];
+}
+
+const send = (res, err) => {
+  if (err instanceof wf.WorkflowError) return res.status(err.status).json({ message: err.message });
+  console.error('Contents error:', err);
+  return res.status(500).json({ message: 'Server error' });
+};
+
+/** Visibility: all rows for approvers / "All" access, else rows you write or created. */
+function scopeClause(req) {
+  if (wf.canSeeAllContent(req)) return { sql: '', params: [] };
+  return { sql: ' AND (cwr.created_by = ? OR ccp.assigned_to = ?)', params: [req.user.id, req.user.id] };
+}
+
+async function canView(req, row, slot) {
+  if (wf.canSeeAllContent(req)) return true;
+  const uid = Number(req.user.id);
+  return Number(row.created_by) === uid || Number(slot?.assigned_to) === uid;
+}
+
+// ─── Shared SELECT ───────────────────────────────────────────────────────────
+async function selectParts() {
+  const hasPosting = await hasColumn('posting_date');
+  const hasLink = await hasColumn('cycle_id');
+  const hasTrail = await hasColumn('smm_reviewed_by');
+  const postingExpr = hasPosting ? 'COALESCE(cwr.posting_date, ccp.posting_date)' : 'ccp.posting_date';
+  const cycleExpr = hasLink ? 'COALESCE(cwr.cycle_id, ccpl.cycle_id)' : 'ccpl.cycle_id';
+  const serviceExpr = hasLink ? 'COALESCE(cwr.project_service_id, sc.project_service_id)' : 'sc.project_service_id';
+  return {
+    postingExpr, cycleExpr, serviceExpr,
+    select: `SELECT cwr.*,
+        l.business_name AS client_brand_name,
+        p.title AS project_title,
+        CONCAT(uc.first_name, ' ', uc.last_name) AS created_by_name,
+        CONCAT(ua.first_name, ' ', ua.last_name) AS approved_by_name,
+        CONCAT(uas.first_name, ' ', uas.last_name) AS assigned_to_name,
+        ${hasTrail ? `CONCAT(us.first_name, ' ', us.last_name) AS smm_reviewed_by_name,
+        CONCAT(ur.first_name, ' ', ur.last_name) AS returned_by_name,
+        CONCAT(ud.first_name, ' ', ud.last_name) AS completed_by_name,` : ''}
+        ccp.id AS slot_id, ccp.slot_status, ccp.assigned_to AS slot_assigned_to, ccp.assigned_by AS slot_assigned_by,
+        ccp.posting_date AS slot_posting_date, ccp.topic AS slot_topic, ccp.format AS slot_format, ccp.platform AS slot_platform,
+        ccp.rejection_reason AS slot_rejection_reason,
+        ${postingExpr} AS effective_posting_date,
+        COALESCE(cwr.content_type, ccp.format) AS content_type,
+        ${cycleExpr} AS cycle_id_resolved,
+        ${serviceExpr} AS project_service_id_resolved,
+        sc.title AS cycle_title, sc.status AS cycle_status, sc.start_date AS cycle_start_date, sc.end_date AS cycle_end_date,
+        sv.name AS service_name,
+        ccpl.shared_with_client AS plan_shared_with_client`,
+    from: `FROM content_write_requests cwr
+        LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
+        LEFT JOIN content_calendar_plans ccpl ON ccpl.id = ccp.plan_id
+        LEFT JOIN service_cycles sc ON sc.id = ${cycleExpr}
+        LEFT JOIN project_services ps ON ps.id = ${serviceExpr}
+        LEFT JOIN services sv ON sv.id = ps.service_id
+        LEFT JOIN leads l ON l.id = cwr.client_brand_id
+        LEFT JOIN projects p ON p.id = cwr.project_id
+        LEFT JOIN users uc ON uc.id = cwr.created_by
+        LEFT JOIN users ua ON ua.id = cwr.approved_by
+        LEFT JOIN users uas ON uas.id = ccp.assigned_to
+        ${hasTrail ? `LEFT JOIN users us ON us.id = cwr.smm_reviewed_by
+        LEFT JOIN users ur ON ur.id = cwr.returned_by
+        LEFT JOIN users ud ON ud.id = cwr.completed_by` : ''}`,
+  };
+}
+
+// ─── LIST ────────────────────────────────────────────────────────────────────
+/**
+ * GET /api/content-write?search=&status=&project_id=&project_service_id=&cycle_id=&sort=&page=&limit=
+ * Server-side filters + pagination. `summary` = counts per status for the same
+ * scope / search / project filters, ignoring the status tab.
  */
 exports.list = async (req, res) => {
   try {
-    const { status, service_type, content_type, search, project_id, cycle_id } = req.query;
+    const { status, search, sort } = req.query;
+    const pageNum = Math.max(1, toInt(req.query.page) || 1);
+    const limitNum = Math.min(200, Math.max(1, toInt(req.query.limit) || 20));
+    const parts = await selectParts();
+
     let where = 'cwr.deleted = 0';
     const params = [];
+    const term = typeof search === 'string' ? search.trim() : '';
+    if (term) {
+      const like = `%${term}%`;
+      where += ` AND (cwr.content_id_code LIKE ? OR cwr.hook_opening_line LIKE ? OR cwr.core_message LIKE ?
+                 OR cwr.caption_content LIKE ? OR l.business_name LIKE ? OR p.title LIKE ?
+                 OR CONCAT(uas.first_name, ' ', uas.last_name) LIKE ? OR CONCAT(uc.first_name, ' ', uc.last_name) LIKE ?)`;
+      params.push(like, like, like, like, like, like, like, like);
+    }
+    const projectId = toInt(req.query.project_id);
+    const serviceId = toInt(req.query.project_service_id);
+    const cycleId = toInt(req.query.cycle_id);
+    if (projectId) { where += ' AND cwr.project_id = ?'; params.push(projectId); }
+    if (serviceId) { where += ` AND ${parts.serviceExpr} = ?`; params.push(serviceId); }
+    if (cycleId) { where += ` AND ${parts.cycleExpr} = ?`; params.push(cycleId); }
+    const scope = scopeClause(req);
+    where += scope.sql;
+    params.push(...scope.params);
 
-    if (status) { where += ' AND cwr.status = ?'; params.push(status); }
-    if (service_type) { where += ' AND cwr.service_type = ?'; params.push(service_type); }
-    if (content_type) { where += ' AND cwr.content_type = ?'; params.push(content_type); }
-    if (project_id) { where += ' AND cwr.project_id = ?'; params.push(project_id); }
-    if (search) {
-      where += ' AND (cwr.hook_opening_line LIKE ? OR cwr.core_message LIKE ? OR l.business_name LIKE ?)';
-      const s = `%${search}%`;
-      params.push(s, s, s);
+    let listWhere = where;
+    const listParams = [...params];
+    if (status) {
+      // "pending" tab also shows legacy in_progress rows
+      if (status === 'pending') listWhere += " AND cwr.status IN ('pending','in_progress')";
+      else { listWhere += ' AND cwr.status = ?'; listParams.push(status); }
     }
 
-    // Non-admin: only see own requests (unless SMM lead with level 2)
-    if (!req.user.is_admin) {
-      if (req.socialAccessLevel >= 2) {
-        // SMM lead — see all
-      } else {
-        where += ' AND cwr.created_by = ?';
-        params.push(req.user.id);
-      }
-    }
-
-    // Fetch cycle info if cycle_id is provided
-    let cycleDateFilter = null;
-    if (cycle_id) {
-      try {
-        const [cycleRows] = await db.query(
-          'SELECT id, start_date, end_date FROM service_cycles WHERE id = ?',
-          [cycle_id]
-        );
-        if (cycleRows.length > 0) {
-          cycleDateFilter = cycleRows[0];
-        }
-      } catch (cErr) {
-        console.warn('Cycle lookup warning:', cErr.message);
-      }
-    }
-
-    // Build the query. `cwr.posting_date` may not exist yet if the migration
-    // hasn't run — fall back to slot-only posting date in that case.
-    const buildListQuery = (hasPostingDate) => {
-      const postingExpr = hasPostingDate
-        ? 'COALESCE(cwr.posting_date, ccp.posting_date)'
-        : 'ccp.posting_date';
-
-      let queryWhere = where;
-      const queryParams = [...params];
-
-      if (cycle_id) {
-        const startDateStr = cycleDateFilter?.start_date
-          ? new Date(cycleDateFilter.start_date).toISOString().split('T')[0]
-          : null;
-        const endDateStr = cycleDateFilter?.end_date
-          ? new Date(cycleDateFilter.end_date).toISOString().split('T')[0]
-          : null;
-
-        if (startDateStr && endDateStr) {
-          queryWhere += ` AND (
-            EXISTS (
-              SELECT 1 FROM content_calendar_posts ccp2
-              JOIN content_calendar_plans p2 ON p2.id = ccp2.plan_id
-              WHERE (ccp2.id = cwr.calendar_slot_id OR ccp2.linked_brief_id = cwr.id)
-                AND p2.cycle_id = ?
-            )
-            OR (${postingExpr} BETWEEN ? AND ?)
-            OR (cwr.deadline BETWEEN ? AND ?)
-          )`;
-          queryParams.push(cycle_id, startDateStr, endDateStr, startDateStr, endDateStr);
-        } else {
-          queryWhere += ` AND EXISTS (
-            SELECT 1 FROM content_calendar_posts ccp2
-            JOIN content_calendar_plans p2 ON p2.id = ccp2.plan_id
-            WHERE (ccp2.id = cwr.calendar_slot_id OR ccp2.linked_brief_id = cwr.id)
-              AND p2.cycle_id = ?
-          )`;
-          queryParams.push(cycle_id);
-        }
-      }
-
-      let orderBy = 'cwr.created_at DESC, cwr.id DESC';
-      if (req.query.sort === 'posting_date_asc') {
-        orderBy = `(${postingExpr} IS NULL) ASC, ${postingExpr} ASC, cwr.created_at DESC`;
-      } else if (req.query.sort === 'posting_date_desc') {
-        orderBy = `(${postingExpr} IS NULL) ASC, ${postingExpr} DESC, cwr.created_at DESC`;
-      } else if (req.query.sort === 'oldest') {
-        orderBy = 'cwr.created_at ASC, cwr.id ASC';
-      }
-
-      const sql = `SELECT cwr.*,
-              l.business_name AS client_brand_name,
-              p.title AS project_title,
-              s.name AS service_name,
-              CONCAT(u_creator.first_name, ' ', u_creator.last_name) AS created_by_name,
-              CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name,
-              ccp.posting_date AS slot_posting_date,
-              ${postingExpr} AS effective_posting_date,
-              COALESCE(cwr.content_type, ccp.format) AS content_type,
-              COALESCE(
-                (SELECT sc2.title FROM content_calendar_posts ccp3
-                 JOIN content_calendar_plans p3 ON p3.id = ccp3.plan_id
-                 JOIN service_cycles sc2 ON sc2.id = p3.cycle_id
-                 WHERE (ccp3.id = cwr.calendar_slot_id OR ccp3.linked_brief_id = cwr.id) LIMIT 1),
-                (SELECT sc3.title FROM service_cycles sc3
-                 WHERE sc3.project_id = cwr.project_id
-                   AND ${postingExpr} BETWEEN sc3.start_date AND sc3.end_date LIMIT 1)
-              ) AS cycle_title
-       FROM content_write_requests cwr
-       LEFT JOIN leads l ON l.id = cwr.client_brand_id
-       LEFT JOIN projects p ON p.id = cwr.project_id
-       LEFT JOIN services s ON s.id = cwr.service_id
-       LEFT JOIN users u_creator ON u_creator.id = cwr.created_by
-       LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
-       LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
-       WHERE ${queryWhere}
-       ORDER BY ${orderBy}`;
-
-      return { sql, params: queryParams };
-    };
-
-    let rows;
-    try {
-      const q = buildListQuery(true);
-      [rows] = await db.query(q.sql, q.params);
-    } catch (qErr) {
-      const errMsg = String(qErr.message || qErr.sqlMessage || '');
-      if (qErr.code === 'ER_BAD_FIELD_ERROR' || qErr.errno === 1054 || errMsg.includes('posting_date')) {
-        const q = buildListQuery(false);
-        [rows] = await db.query(q.sql, q.params);
-      } else {
-        throw qErr;
-      }
-    }
-
-    // Summary counts
-    const summary = {
-      total: rows.length,
-      pending: rows.filter(r => r.status === 'pending').length,
-      approved: rows.filter(r => r.status === 'approved').length,
-      rejected: rows.filter(r => r.status === 'rejected').length,
-      in_progress: rows.filter(r => r.status === 'in_progress').length,
-      completed: rows.filter(r => r.status === 'completed').length,
-    };
-
-    return res.json({ requests: rows, summary });
-  } catch (err) {
-    console.error('Content write list error:', err);
-    return res.status(500).json({ message: 'Server error' });
-  }
-};
-
-
-/**
- * GET /api/content-write/:id
- */
-exports.getOne = async (req, res) => {
-  try {
-    const buildOneQuery = (hasPostingDate) => {
-      const postingExpr = hasPostingDate
-        ? 'COALESCE(cwr.posting_date, ccp.posting_date)'
-        : 'ccp.posting_date';
-      return `SELECT cwr.*,
-              l.business_name AS client_brand_name,
-              p.title AS project_title,
-              s.name AS service_name,
-              CONCAT(u_creator.first_name, ' ', u_creator.last_name) AS created_by_name,
-              CONCAT(u_approver.first_name, ' ', u_approver.last_name) AS approved_by_name,
-              ccp.posting_date AS slot_posting_date,
-              ${postingExpr} AS effective_posting_date
-       FROM content_write_requests cwr
-       LEFT JOIN leads l ON l.id = cwr.client_brand_id
-       LEFT JOIN projects p ON p.id = cwr.project_id
-       LEFT JOIN services s ON s.id = cwr.service_id
-       LEFT JOIN users u_creator ON u_creator.id = cwr.created_by
-       LEFT JOIN users u_approver ON u_approver.id = cwr.approved_by
-       LEFT JOIN content_calendar_posts ccp ON ccp.id = cwr.calendar_slot_id
-       WHERE cwr.id = ? AND cwr.deleted = 0`;
-    };
-
-    let rows;
-    try {
-      [rows] = await db.query(buildOneQuery(true), [req.params.id]);
-    } catch (qErr) {
-      const errMsg = String(qErr.message || qErr.sqlMessage || '');
-      if (qErr.code === 'ER_BAD_FIELD_ERROR' || qErr.errno === 1054 || errMsg.includes('posting_date')) {
-        [rows] = await db.query(buildOneQuery(false), [req.params.id]);
-      } else {
-        throw qErr;
-      }
-    }
-
-    if (rows.length === 0) return res.status(404).json({ message: 'Content request not found' });
-
-    const request = rows[0];
-
-    // Non-admin can only view own requests
-    if (!req.user.is_admin && request.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
-
-    return res.json(request);
-  } catch (err) {
-    console.error('Content write getOne error:', err);
-    return res.status(500).json({ message: 'Server error' });
-  }
-};
-
-/**
- * POST /api/content-write
- */
-exports.create = async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
-  const {
-    client_brand_id, project_id, service_id, platform, content_type,
-    hook_opening_line, core_message, call_to_action,
-    caption_content, creative_suggestion, reference_links,
-    calendar_slot_id, posting_date,
-  } = req.body;
-
-  const toNull = (val) => (val === '' || val === undefined || val === null) ? null : val;
-  const toInt  = (val) => { const n = parseInt(val); return isNaN(n) ? null : n; };
-
-  try {
-    // Resolve client_brand_id from project
-    let resolvedClientBrandId = toInt(client_brand_id);
-    if (toInt(project_id)) {
-      const [projRows] = await db.query('SELECT client_id FROM projects WHERE id = ?', [toInt(project_id)]);
-      if (projRows.length > 0 && projRows[0].client_id) resolvedClientBrandId = projRows[0].client_id;
-    }
-
-    // Generate content_id_code
-    let clientCode = 'GEN';
-    if (resolvedClientBrandId) {
-      const [clientRows] = await db.query('SELECT client_code FROM leads WHERE id = ?', [resolvedClientBrandId]);
-      if (clientRows.length > 0 && clientRows[0].client_code) clientCode = clientRows[0].client_code;
-    }
-    const [lastContent] = await db.query(
-      `SELECT content_id_code FROM content_write_requests WHERE content_id_code LIKE ? ORDER BY id DESC LIMIT 1`,
-      [`CNT-${clientCode}-%`]
-    );
-    let contentSeq = 1;
-    if (lastContent.length > 0 && lastContent[0].content_id_code) {
-      const parts = lastContent[0].content_id_code.split('-');
-      contentSeq = parseInt(parts[parts.length - 1], 10) + 1;
-    }
-    const content_id_code = `CNT-${clientCode}-${String(contentSeq).padStart(3, '0')}`;
-
-    // Try inserting with calendar_slot_id — fall back without it if column doesn't exist
-    let insertId;
-    const slotIdVal = toInt(calendar_slot_id);
-
-    // If a record already exists for this calendar slot (created during assignment),
-    // update it with the filled content instead of creating a duplicate.
-    if (slotIdVal) {
-      try {
-        const [existing] = await db.query(
-          `SELECT id FROM content_write_requests WHERE calendar_slot_id = ? AND deleted = 0 ORDER BY id ASC LIMIT 1`,
-          [slotIdVal]
-        );
-        if (existing.length > 0) {
-          insertId = existing[0].id;
-          await db.query(
-            `UPDATE content_write_requests SET
-              platform = COALESCE(?, platform),
-              content_type = COALESCE(?, content_type),
-              hook_opening_line = ?, core_message = ?, call_to_action = ?,
-              caption_content = ?, creative_suggestion = ?, reference_links = ?,
-              status = 'pending'
-            WHERE id = ?`,
-            [
-              toNull(platform), content_type,
-              toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
-              toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
-              insertId,
-            ]
-          );
-
-          // Persist posting_date
-          const postingDateVal = toNull(posting_date);
-          if (postingDateVal) {
-            try {
-              await db.query('UPDATE content_write_requests SET posting_date = ? WHERE id = ?', [postingDateVal, insertId]);
-            } catch (pdErr) { /* column may not exist */ }
-          }
-
-          // Sync slot to submitted + set linked_brief_id so calendar can read content
-          try {
-            await db.query(
-              `UPDATE content_calendar_posts
-               SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL,
-                   linked_brief_id = ?
-               WHERE id = ?`,
-              [insertId, slotIdVal]
-            );
-            res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: slotIdVal });
-
-            const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [slotIdVal]);
-            if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-              await db.query(
-                `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-                 VALUES (?, ?, 'slot_submitted', 'post', ?, 'Post slot submitted for approval', 'Content has been filled and submitted.', '/social/content-calendar')`,
-                [slotInfo[0].assigned_by, req.user.id, slotIdVal]
-              );
-              res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
-            }
-          } catch (syncErr) {
-            console.warn('Slot sync after update failed:', syncErr.message);
-          }
-
-          return res.status(201).json({ message: 'Content request updated', id: insertId, content_id_code: null });
-        }
-      } catch (lookupErr) {
-        // If lookup fails (e.g., column missing), fall through to normal create
-        console.warn('Existing slot lookup failed, creating new:', lookupErr.message);
-      }
-    }
-
-    try {
-      const [result] = await db.query(
-        `INSERT INTO content_write_requests 
-          (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
-           hook_opening_line, core_message, call_to_action,
-           caption_content, creative_suggestion, reference_links,
-           calendar_slot_id, status, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-        [
-          content_id_code,
-          resolvedClientBrandId, toInt(project_id), toInt(service_id),
-          toNull(platform), content_type,
-          toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
-          toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
-          slotIdVal, req.user.id,
-        ]
-      );
-      insertId = result.insertId;
-    } catch (insertErr) {
-      const errMsg = String(insertErr.message || insertErr.sqlMessage || '');
-      const errCode = insertErr.code || '';
-      const errNo = insertErr.errno || 0;
-
-      // Missing column (calendar_slot_id not in DB yet) — retry without it
-      if (errCode === 'ER_BAD_FIELD_ERROR' || errNo === 1054 ||
-          errMsg.includes('calendar_slot_id')) {
-        const [result] = await db.query(
-          `INSERT INTO content_write_requests 
-            (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
-             hook_opening_line, core_message, call_to_action,
-             caption_content, creative_suggestion, reference_links,
-             status, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-          [
-            content_id_code,
-            resolvedClientBrandId, toInt(project_id), toInt(service_id),
-            toNull(platform), content_type,
-            toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
-            toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
-            req.user.id,
-          ]
-        );
-        insertId = result.insertId;
-
-      // platform NOT NULL constraint — platform column hasn't been made nullable yet
-      } else if ((errCode === 'ER_BAD_NULL_ERROR' || errNo === 1048) &&
-                 errMsg.includes('platform')) {
-        // Insert with a default platform value to bypass the constraint
-        const [result] = await db.query(
-          `INSERT INTO content_write_requests 
-            (content_id_code, client_brand_id, project_id, service_id, platform, content_type,
-             hook_opening_line, core_message, call_to_action,
-             caption_content, creative_suggestion, reference_links,
-             calendar_slot_id, status, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-          [
-            content_id_code,
-            resolvedClientBrandId, toInt(project_id), toInt(service_id),
-            'social_media', // default until migration runs
-            content_type,
-            toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
-            toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
-            slotIdVal, req.user.id,
-          ]
-        );
-        insertId = result.insertId;
-
-      // service_type NOT NULL constraint
-      } else if ((errCode === 'ER_BAD_NULL_ERROR' || errNo === 1048) &&
-                 errMsg.includes('service_type')) {
-        const [result] = await db.query(
-          `INSERT INTO content_write_requests 
-            (content_id_code, client_brand_id, project_id, service_id, platform, service_type, content_type,
-             hook_opening_line, core_message, call_to_action,
-             caption_content, creative_suggestion, reference_links,
-             calendar_slot_id, status, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-          [
-            content_id_code,
-            resolvedClientBrandId, toInt(project_id), toInt(service_id),
-            toNull(platform), 'social_media_management', // default
-            content_type,
-            toNull(hook_opening_line), toNull(core_message), toNull(call_to_action),
-            toNull(caption_content), toNull(creative_suggestion), toNull(reference_links),
-            slotIdVal, req.user.id,
-          ]
-        );
-        insertId = result.insertId;
-
-      } else {
-        throw insertErr;
-      }
-    }
-
-    // Persist posting_date separately so it works regardless of which insert
-    // branch ran, and degrades gracefully if the column doesn't exist yet.
-    const postingDateVal = toNull(posting_date);
-    if (postingDateVal) {
-      try {
-        await db.query('UPDATE content_write_requests SET posting_date = ? WHERE id = ?', [postingDateVal, insertId]);
-      } catch (pdErr) {
-        console.warn('posting_date not set (column may be missing):', pdErr.message);
-      }
-    }
-
-    // Sync slot to submitted + set linked_brief_id so calendar can read content
-    if (slotIdVal) {
-      try {
-        await db.query(
-          `UPDATE content_calendar_posts
-           SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL,
-               linked_brief_id = ?
-           WHERE id = ?`,
-          [insertId, slotIdVal]
-        );
-        res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: slotIdVal });
-
-        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [slotIdVal]);
-        if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-          await db.query(
-            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-             VALUES (?, ?, 'slot_submitted', 'post', ?, 'Post slot submitted for approval', 'Content has been filled and submitted.', '/social/content-calendar')`,
-            [slotInfo[0].assigned_by, req.user.id, slotIdVal]
-          );
-          res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
-        }
-      } catch (slotErr) {
-        // Don't fail the whole request if slot sync fails
-        console.warn('Slot sync warning:', slotErr.message);
-      }
-    }
+    let orderBy = 'cwr.created_at DESC, cwr.id DESC';
+    if (sort === 'posting_date_asc') orderBy = `(${parts.postingExpr} IS NULL) ASC, ${parts.postingExpr} ASC, cwr.id DESC`;
+    else if (sort === 'posting_date_desc') orderBy = `(${parts.postingExpr} IS NULL) ASC, ${parts.postingExpr} DESC, cwr.id DESC`;
+    else if (sort === 'oldest') orderBy = 'cwr.created_at ASC, cwr.id ASC';
 
     const [rows] = await db.query(
-      `SELECT cwr.*, l.business_name AS client_brand_name, p.title AS project_title
-       FROM content_write_requests cwr
-       LEFT JOIN leads l ON l.id = cwr.client_brand_id
-       LEFT JOIN projects p ON p.id = cwr.project_id
-       WHERE cwr.id = ?`,
-      [insertId]
+      `${parts.select} ${parts.from} WHERE ${listWhere} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
+      [...listParams, limitNum, (pageNum - 1) * limitNum]
     );
+    const [[{ total }]] = await db.query(`SELECT COUNT(*) AS total ${parts.from} WHERE ${listWhere}`, listParams);
+    const [counts] = await db.query(`SELECT cwr.status, COUNT(*) AS count ${parts.from} WHERE ${where} GROUP BY cwr.status`, params);
 
-    res.emitSocket('content-write:created', rows[0]);
-
-    // Log submit to history
-    try {
-      await db.query(
-        `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-        ['content_write', insertId, 'submit', null, req.user.id]
-      );
-    } catch (e) { /* table may not exist */ }
-
-    return res.status(201).json(rows[0]);
-  } catch (err) {
-    console.error('Content write create error:', err);
-    return res.status(500).json({
-      message: err.sqlMessage || err.message || 'Server error',
-      detail: err.message,
-      code: err.code,
+    const summary = { total: 0, draft: 0, pending: 0, smm_reviewed: 0, approved: 0, rejected: 0, completed: 0 };
+    counts.forEach(r => {
+      const key = r.status === 'in_progress' ? 'pending' : r.status;
+      summary[key] = (summary[key] || 0) + (Number(r.count) || 0);
+      summary.total += Number(r.count) || 0;
     });
+
+    return res.json({ requests: rows, summary, total: Number(total) || 0, page: pageNum, limit: limitNum });
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+// ─── DETAIL ──────────────────────────────────────────────────────────────────
+async function loadDetail(id) {
+  const parts = await selectParts();
+  const [rows] = await db.query(`${parts.select} ${parts.from} WHERE cwr.id = ? AND cwr.deleted = 0`, [id]);
+  return rows[0] || null;
+}
+
+async function loadHistory(id) {
+  try {
+    const [h] = await db.query(
+      `SELECT h.action, h.remarks, h.created_at, CONCAT(u.first_name, ' ', u.last_name) AS acted_by_name
+       FROM smm_approval_history h LEFT JOIN users u ON u.id = h.acted_by
+       WHERE h.module = 'content_write' AND h.record_id = ?
+       ORDER BY h.created_at ASC, h.id ASC`,
+      [id]
+    );
+    return h;
+  } catch (e) {
+    console.warn('Content history load failed:', e.message);
+    return [];
+  }
+}
+
+exports.getOne = async (req, res) => {
+  try {
+    const row = await loadDetail(req.params.id);
+    if (!row) return res.status(404).json({ message: 'Content not found' });
+    if (!(await canView(req, row, { assigned_to: row.slot_assigned_to }))) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    row.history = await loadHistory(row.id);
+    return res.json(row);
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+exports.getHistory = async (req, res) => {
+  try {
+    const row = await loadDetail(req.params.id);
+    if (!row) return res.status(404).json({ message: 'Content not found' });
+    if (!(await canView(req, row, { assigned_to: row.slot_assigned_to }))) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    // Newest first (legacy consumers)
+    return res.json((await loadHistory(row.id)).reverse());
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+// ─── OPEN A SLOT (Fill Content) ──────────────────────────────────────────────
+/**
+ * POST /api/content-write/slot/:slotId/open
+ * Returns the slot's content row (creating the Draft for old slots). Assignee or admin.
+ */
+exports.openSlot = async (req, res) => {
+  try {
+    const slotId = toInt(req.params.slotId);
+    const [s] = await db.query('SELECT * FROM content_calendar_posts WHERE id = ?', [slotId]);
+    if (!s.length) return res.status(404).json({ message: 'Calendar post slot not found' });
+    const slot = s[0];
+    const uid = Number(req.user.id);
+    const isAssignee = Number(slot.assigned_to) === uid;
+    if (!req.user.is_admin && !isAssignee && !wf.canSeeAllContent(req)) {
+      return res.status(403).json({ message: 'Only the assigned writer can open this post' });
+    }
+    if (!slot.assigned_to) return res.status(400).json({ message: 'Assign this post slot on the Content Calendar first' });
+
+    const row = await wf.ensureRowForSlot(slotId, uid);
+    const detail = await loadDetail(row.id);
+    detail.history = await loadHistory(row.id);
+    return res.json(detail);
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+// ─── SAVE FIELDS ─────────────────────────────────────────────────────────────
+
+/** Write content fields from a request body. Returns true if anything changed. */
+async function saveFields(rowId, body, { autosave = false } = {}) {
+  const sets = [];
+  const vals = [];
+  wf.CONTENT_FIELDS.forEach(f => {
+    if (body[f] === undefined) return;
+    if (f === 'content_type' && !body[f]) return; // never blank the type
+    sets.push(`${f} = ?`);
+    vals.push(body[f] === '' ? null : body[f]);
+  });
+  if (body.posting_date !== undefined && (await hasColumn('posting_date'))) {
+    sets.push('posting_date = ?');
+    vals.push(body.posting_date || null);
+  }
+  if (autosave && (await hasColumn('draft_saved_at'))) sets.push('draft_saved_at = NOW()');
+  if (!sets.length) return false;
+  await db.query(`UPDATE content_write_requests SET ${sets.join(', ')} WHERE id = ?`, [...vals, rowId]);
+  return true;
+}
+
+async function loadForWrite(req, id) {
+  const row = await wf.getRow(db, id);
+  if (!row) throw new wf.WorkflowError(404, 'Content not found');
+  const slot = await wf.slotForRow(db, row);
+  const uid = Number(req.user.id);
+  const isWriter = !!req.user.is_admin || wf.assigneeOf(row, slot) === uid;
+  return { row, slot, isWriter };
+}
+
+/**
+ * PUT /api/content-write/:id/draft — autosave (no status change).
+ * Writer only, while Draft / Pending (not yet reviewed) / Rejected.
+ */
+exports.saveDraft = async (req, res) => {
+  try {
+    const { row, isWriter } = await loadForWrite(req, req.params.id);
+    if (!isWriter) return res.status(403).json({ message: 'Only the assigned writer can edit this content' });
+    if (!['draft', 'pending', 'rejected', 'in_progress'].includes(row.status)) {
+      return res.status(400).json({ message: 'Autosave is only available before the content is reviewed' });
+    }
+    await saveFields(row.id, req.body, { autosave: true });
+    return res.json({ id: row.id, status: row.status, saved_at: new Date().toISOString() });
+  } catch (err) {
+    return send(res, err);
   }
 };
 
 /**
- * PUT /api/content-write/:id
+ * POST /api/content-write/:id/submit — save fields (optional) and submit for approval.
+ * Writer only. Draft / Rejected / Pending / Approved (re-edit) → Pending Approval.
+ */
+exports.submit = async (req, res) => {
+  try {
+    const { row, isWriter } = await loadForWrite(req, req.params.id);
+    if (!isWriter) return res.status(403).json({ message: 'Only the assigned writer can submit this content' });
+    if (row.status === 'smm_reviewed') {
+      return res.status(400).json({ message: 'SMM has already reviewed this. Ask a PC/PM approver to send it back if it needs changes.' });
+    }
+    if (row.status === 'completed') return res.status(400).json({ message: 'Completed content can no longer be edited' });
+    await saveFields(row.id, req.body);
+    await wf.transition(req, res, row.id, 'submit');
+    return res.json(await loadDetail(row.id));
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+/**
+ * PUT /api/content-write/:id — edit.
+ *  - Writer: save + (re)submit for approval
+ *  - PC/PM approver (not the writer): save only, status unchanged (e.g. small fixes before approving)
  */
 exports.update = async (req, res) => {
   try {
-    const [rows] = await db.query('SELECT * FROM content_write_requests WHERE id = ? AND deleted = 0', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ message: 'Content request not found' });
-
-    const request = rows[0];
-
-    // Only creator or admin can update
-    if (!req.user.is_admin && request.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+    const { row, isWriter } = await loadForWrite(req, req.params.id);
+    if (row.status === 'completed' && !req.user.is_admin) {
+      return res.status(400).json({ message: 'Completed content can no longer be edited' });
     }
-
-    // Cannot edit if completed (fully done), but approved can still be re-worked
-    if (!req.user.is_admin && request.status === 'completed') {
-      return res.status(403).json({ message: 'Cannot edit a completed request' });
+    if (isWriter && !wf.canPcpmApprove(req)) return exports.submit(req, res);
+    if (!isWriter && !wf.canPcpmApprove(req)) {
+      return res.status(403).json({ message: 'Only the assigned writer or a PC/PM approver can edit this content' });
     }
-
-    const allowed = [
-      'project_id', 'service_id', 'platform', 'content_type',
-      'hook_opening_line', 'core_message', 'call_to_action',
-      'caption_content', 'creative_suggestion', 'reference_links'
-    ];
-
-    const updates = {};
-    allowed.forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f] === '' ? null : req.body[f]; });
-
-    // posting_date handled separately (guarded) so it degrades gracefully if
-    // the column doesn't exist yet.
-    const hasPostingDate = req.body.posting_date !== undefined;
-    const postingDateVal = req.body.posting_date === '' ? null : req.body.posting_date;
-
-    if (Object.keys(updates).length === 0 && !hasPostingDate) {
-      return res.status(400).json({ message: 'No valid fields to update' });
-    }
-
-    // If user resubmits after rejection OR re-works after approval, reset to pending
-    if (['rejected', 'approved'].includes(request.status)) {
-      updates.status = 'pending';
-      // Log resubmit to history
-      try {
-        await db.query(
-          `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-          ['content_write', req.params.id, 'resubmit', null, req.user.id]
-        );
-      } catch (e) { /* table may not exist */ }
-    }
-
-    if (Object.keys(updates).length > 0) {
-      const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-      const values = [...Object.values(updates), req.params.id];
-      await db.query(`UPDATE content_write_requests SET ${setClauses} WHERE id = ?`, values);
-    }
-
-    if (hasPostingDate) {
-      try {
-        await db.query('UPDATE content_write_requests SET posting_date = ? WHERE id = ?', [postingDateVal, req.params.id]);
-      } catch (pdErr) {
-        console.warn('posting_date not updated (column may be missing):', pdErr.message);
-      }
-    }
-
-    // ─── Sync to calendar slot: auto-submit when content is filled ────────────
-    // Resolve slot ID — prefer calendar_slot_id, fall back to linked_brief_id lookup
-    let syncSlotId = request.calendar_slot_id || null;
-    if (!syncSlotId) {
-      try {
-        const [slotRows] = await db.query(
-          `SELECT id FROM content_calendar_posts WHERE linked_brief_id = ? LIMIT 1`,
-          [req.params.id]
-        );
-        if (slotRows.length > 0) syncSlotId = slotRows[0].id;
-      } catch (lookupErr) {
-        console.warn('[update] Slot lookup by linked_brief_id failed:', lookupErr.message);
-      }
-    }
-
-    if (syncSlotId) {
-      const newStatus = updates.status || request.status;
-      if (newStatus === 'pending') {
-        // Content was filled/re-submitted → mark slot as submitted and ensure linked_brief_id is set
-        await db.query(
-          `UPDATE content_calendar_posts
-           SET slot_status = 'submitted', submitted_at = NOW(), rejection_reason = NULL,
-               linked_brief_id = ?
-           WHERE id = ?`,
-          [req.params.id, syncSlotId]
-        );
-        res.emitSocket('content-calendar:slot-submitted', { item_type: 'post', item_id: syncSlotId });
-
-        // Notify the assigner
-        const [slotInfo] = await db.query('SELECT assigned_by FROM content_calendar_posts WHERE id = ?', [syncSlotId]);
-        if (slotInfo.length > 0 && slotInfo[0].assigned_by) {
-          await db.query(
-            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-             VALUES (?, ?, 'slot_submitted', 'post', ?, 'Post slot submitted for approval', 'Content has been filled and submitted.', '/social/content-calendar')`,
-            [slotInfo[0].assigned_by, req.user.id, syncSlotId]
-          );
-          res.emitSocket('smm:notification', { user_id: slotInfo[0].assigned_by, type: 'slot_submitted' });
-        }
-      }
-    }
-
-    const [updated] = await db.query(
-      `SELECT cwr.*, l.business_name AS client_brand_name, p.title AS project_title
-       FROM content_write_requests cwr
-       LEFT JOIN leads l ON l.id = cwr.client_brand_id
-       LEFT JOIN projects p ON p.id = cwr.project_id
-       WHERE cwr.id = ?`,
-      [req.params.id]
-    );
-
-    res.emitSocket('content-write:updated', updated[0]);
-    return res.json(updated[0]);
+    await saveFields(row.id, req.body);
+    if (isWriter && ['draft', 'rejected'].includes(row.status)) await wf.transition(req, res, row.id, 'submit');
+    const updated = await loadDetail(row.id);
+    res.emitSocket('content-write:updated', updated);
+    return res.json(updated);
   } catch (err) {
-    console.error('Content write update error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return send(res, err);
   }
 };
 
 /**
- * PUT /api/content-write/:id/approve  (Admin only)
+ * POST /api/content-write  (legacy) — fill a calendar slot.
+ * Content can only be created from Content Calendar post slots.
+ */
+exports.create = async (req, res) => {
+  try {
+    const slotId = toInt(req.body.calendar_slot_id);
+    if (!slotId) {
+      return res.status(400).json({ message: 'Content is created from Content Calendar post slots. Open it from Assigned Slots.' });
+    }
+    const [s] = await db.query('SELECT * FROM content_calendar_posts WHERE id = ?', [slotId]);
+    if (!s.length) return res.status(404).json({ message: 'Calendar post slot not found' });
+    if (!req.user.is_admin && Number(s[0].assigned_to) !== Number(req.user.id)) {
+      return res.status(403).json({ message: 'Only the assigned writer can fill this post' });
+    }
+    const row = await wf.ensureRowForSlot(slotId, req.user.id);
+    req.params.id = row.id;
+    return exports.submit(req, res);
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+// ─── REVIEW / DONE / REOPEN ──────────────────────────────────────────────────
+/**
+ * POST /api/content-write/:id/review  { action: 'smm_accept' | 'approve' | 'send_back', remarks }
+ */
+exports.review = async (req, res) => {
+  try {
+    const { action } = req.body;
+    if (!['smm_accept', 'approve', 'send_back'].includes(action)) {
+      return res.status(400).json({ message: "action must be 'smm_accept', 'approve' or 'send_back'" });
+    }
+    await wf.transition(req, res, toInt(req.params.id), action, { reason: req.body.remarks });
+    return res.json(await loadDetail(req.params.id));
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+/**
+ * PUT /api/content-write/:id/approve  (legacy) { action: 'approve' | 'reject', admin_remarks }
+ * approve → PC/PM approve (or SMM accept if you only hold SMM Review); reject → send back.
  */
 exports.approve = async (req, res) => {
   try {
-    if (!req.user.is_admin && req.socialAccessLevel < 2) {
-      return res.status(403).json({ message: 'Only admin or SMM leads can approve/reject requests' });
-    }
-
-    const [rows] = await db.query('SELECT * FROM content_write_requests WHERE id = ? AND deleted = 0', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ message: 'Content request not found' });
-
-    const { action, admin_remarks } = req.body;
-
-    if (!['approve', 'reject'].includes(action)) {
-      return res.status(400).json({ message: 'Action must be approve or reject' });
-    }
-
-    const newStatus = action === 'approve' ? 'approved' : 'rejected';
-
-    await db.query(
-      `UPDATE content_write_requests 
-       SET status = ?, admin_remarks = ?, approved_by = ?, approved_at = NOW()
-       WHERE id = ?`,
-      [newStatus, admin_remarks || null, req.user.id, req.params.id]
-    );
-
-    // Log approval history
-    try {
-      await db.query(
-        `INSERT INTO smm_approval_history (module, record_id, action, remarks, acted_by) VALUES (?, ?, ?, ?, ?)`,
-        ['content_write', req.params.id, action === 'approve' ? 'approve' : 'rework', admin_remarks || null, req.user.id]
-      );
-    } catch (e) { /* table may not exist yet */ }
-
-    // ─── Sync to calendar slot ────────────────────────────────────────────────
-    const request = rows[0];
-
-    // Resolve the slot ID — prefer calendar_slot_id on the write request,
-    // fall back to any calendar post that has linked_brief_id pointing to this request.
-    let slotId = request.calendar_slot_id || null;
-    if (!slotId) {
-      try {
-        const [slotRows] = await db.query(
-          `SELECT id FROM content_calendar_posts WHERE linked_brief_id = ? LIMIT 1`,
-          [req.params.id]
-        );
-        if (slotRows.length > 0) slotId = slotRows[0].id;
-      } catch (lookupErr) {
-        console.warn('[approve] Slot lookup by linked_brief_id failed:', lookupErr.message);
-      }
-    }
-
-    if (slotId) {
-      if (action === 'approve') {
-        await db.query(
-          `UPDATE content_calendar_posts SET slot_status = 'approved', approved_at = NOW(), approved_by = ?, rejection_reason = NULL WHERE id = ?`,
-          [req.user.id, slotId]
-        );
-        // Notify assignee
-        if (request.created_by) {
-          await db.query(
-            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-             VALUES (?, ?, 'slot_approved', 'post', ?, 'Your post slot was approved!', 'Your content is now live on the calendar.', '/social/write-content')`,
-            [request.created_by, req.user.id, slotId]
-          );
-          res.emitSocket('smm:notification', { user_id: request.created_by, type: 'slot_approved' });
-        }
-      } else {
-        await db.query(
-          `UPDATE content_calendar_posts SET slot_status = 'rejected', rejection_reason = ?, approved_at = NULL, approved_by = NULL WHERE id = ?`,
-          [admin_remarks || 'Rejected', slotId]
-        );
-        // Notify assignee
-        if (request.created_by) {
-          await db.query(
-            `INSERT INTO smm_notifications (user_id, triggered_by, type, slot_type, slot_id, title, message, link)
-             VALUES (?, ?, 'slot_rejected', 'post', ?, 'Your post slot was rejected', ?, '/social/write-content')`,
-            [request.created_by, req.user.id, slotId, `Reason: ${admin_remarks || 'Please re-edit'}`]
-          );
-          res.emitSocket('smm:notification', { user_id: request.created_by, type: 'slot_rejected' });
-        }
-      }
-      res.emitSocket('content-calendar:updated', { slot_id: slotId });
-    }
-
-    const [updated] = await db.query(
-      `SELECT cwr.*, l.business_name AS client_brand_name,
-              CONCAT(u.first_name, ' ', u.last_name) AS approved_by_name
-       FROM content_write_requests cwr
-       LEFT JOIN leads l ON l.id = cwr.client_brand_id
-       LEFT JOIN users u ON u.id = cwr.approved_by
-       WHERE cwr.id = ?`,
-      [req.params.id]
-    );
-
-    res.emitSocket('content-write:updated', updated[0]);
-    return res.json(updated[0]);
+    const action = req.body.action === 'approve'
+      ? (wf.canPcpmApprove(req) ? 'approve' : 'smm_accept')
+      : 'send_back';
+    await wf.transition(req, res, toInt(req.params.id), action, { reason: req.body.admin_remarks || req.body.remarks });
+    return res.json(await loadDetail(req.params.id));
   } catch (err) {
-    console.error('Content write approve error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return send(res, err);
   }
 };
 
-/**
- * GET /api/content-write/:id/history — approval/rework history
- */
-exports.getHistory = async (req, res) => {
+/** POST /api/content-write/:id/complete — Mark as Done (approved → completed). */
+exports.complete = async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `SELECT h.*, CONCAT(u.first_name, ' ', u.last_name) AS acted_by_name
-       FROM smm_approval_history h
-       LEFT JOIN users u ON u.id = h.acted_by
-       WHERE h.module = 'content_write' AND h.record_id = ?
-       ORDER BY h.created_at DESC`,
-      [req.params.id]
-    );
-    return res.json(rows);
+    await wf.transition(req, res, toInt(req.params.id), 'complete');
+    return res.json(await loadDetail(req.params.id));
   } catch (err) {
-    // Table may not exist yet
-    return res.json([]);
+    return send(res, err);
   }
 };
 
+/** POST /api/content-write/:id/remodify — writer reopens approved content. */
+exports.remodify = async (req, res) => {
+  try {
+    const detail = await loadDetail(req.params.id);
+    if (!detail) return res.status(404).json({ message: 'Content not found' });
+    if (detail.plan_shared_with_client) {
+      return res.status(400).json({ message: 'This calendar has already been shared with the client' });
+    }
+    await wf.transition(req, res, detail.id, 'remodify', { reason: req.body.reason });
+    return res.json(await loadDetail(detail.id));
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+// ─── DELETE (admin) ──────────────────────────────────────────────────────────
 /**
- * DELETE /api/content-write/:id (soft delete)
+ * DELETE /api/content-write/:id — admin only. Soft-deletes the content and
+ * frees its calendar slot (back to 'assigned', or 'open' if unassigned).
  */
 exports.remove = async (req, res) => {
   try {
-    const [rows] = await db.query('SELECT * FROM content_write_requests WHERE id = ? AND deleted = 0', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ message: 'Content request not found' });
+    if (!req.user.is_admin) return res.status(403).json({ message: 'Only an admin can delete content' });
+    const row = await wf.getRow(db, req.params.id);
+    if (!row) return res.status(404).json({ message: 'Content not found' });
+    const slot = await wf.slotForRow(db, row);
 
-    const request = rows[0];
-    if (!req.user.is_admin && request.created_by !== req.user.id) {
-      return res.status(403).json({ message: 'Only the creator or admin can delete this request' });
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query('UPDATE content_write_requests SET deleted = 1 WHERE id = ?', [row.id]);
+      if (slot && slot.slot_status !== 'completed') {
+        await conn.query(
+          `UPDATE content_calendar_posts
+           SET slot_status = IF(assigned_to IS NULL, 'open', 'assigned'),
+               linked_write_id = IF(linked_write_id = ?, NULL, linked_write_id),
+               linked_brief_id = IF(linked_brief_id = ?, NULL, linked_brief_id),
+               approved_at = NULL, approved_by = NULL, smm_approved_at = NULL, smm_approved_by = NULL,
+               rejection_reason = NULL
+           WHERE id = ?`,
+          [row.id, row.id, slot.id]
+        );
+      }
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
     }
 
-    await db.query('UPDATE content_write_requests SET deleted = 1 WHERE id = ?', [req.params.id]);
-    res.emitSocket('content-write:deleted', { id: req.params.id });
-    return res.json({ message: 'Content request deleted' });
+    await wf.logHistory(row.id, 'reject', 'Deleted by admin', req.user.id);
+    res.emitSocket('content-write:deleted', { id: row.id });
+    if (slot) res.emitSocket('content-calendar:updated', { item_type: 'post', item_id: slot.id });
+    return res.json({ message: 'Content deleted' });
   } catch (err) {
-    console.error('Content write delete error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return send(res, err);
   }
 };

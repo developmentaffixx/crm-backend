@@ -26,6 +26,9 @@ function requireSocialAccess(submenu) {
         req.userCanAdsReportApprove   = true;
         req.userCanShootApprove       = true;
         req.userCanShootCloseApprove  = true;
+        req.userCanContentSmmApprove  = true;
+        req.userCanContentPcpmApprove = true;
+        req.userCanContentComplete    = true;
         return next();
       }
 
@@ -185,6 +188,10 @@ function requireSocialAccess(submenu) {
       // Shoots two-stage approval toggles
       req.userCanShootApprove      = adsFlags.shoot;
       req.userCanShootCloseApprove = adsFlags.shootClose;
+      // Contents (posts) approval toggles
+      req.userCanContentSmmApprove  = adsFlags.contentSmm;
+      req.userCanContentPcpmApprove = adsFlags.contentPcpm;
+      req.userCanContentComplete    = adsFlags.contentComplete;
 
       next();
     } catch (err) {

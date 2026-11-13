@@ -1,49 +1,51 @@
 const express = require('express');
 const router  = express.Router();
-const { body, param } = require('express-validator');
+const { param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const { requireSocialAccess } = require('../middleware/socialAccess');
-const contentWriteController = require('../controllers/contentWrite.controller');
+const c = require('../controllers/contentWrite.controller');
 
-// All routes require authentication
+// All routes require authentication + Contents access
 router.use(authenticate);
 router.use(requireSocialAccess('content_writing'));
 
-// GET  /api/content-write         — list all content write requests
-router.get('/', contentWriteController.list);
+// GET  /api/content-write                 — list (search, status, project ▸ service ▸ cycle, pagination)
+router.get('/', c.list);
 
-// GET  /api/content-write/:id     — get single request
-router.get('/:id', param('id').isInt(), contentWriteController.getOne);
+// POST /api/content-write/slot/:slotId/open — open a calendar post slot to write (creates Draft if missing)
+router.post('/slot/:slotId/open', param('slotId').isInt(), c.openSlot);
 
-// POST /api/content-write         — create new request
-router.post(
-  '/',
-  [
-    body('project_id').notEmpty().withMessage('Project is required'),
-    body('content_type').notEmpty().withMessage('Content type is required'),
-  ],
-  contentWriteController.create
-);
+// GET  /api/content-write/:id             — detail (+ approval history)
+router.get('/:id', param('id').isInt(), c.getOne);
 
-// PUT  /api/content-write/:id     — update request
-router.put(
-  '/:id',
-  param('id').isInt(),
-  contentWriteController.update
-);
+// GET  /api/content-write/:id/history     — approval history
+router.get('/:id/history', param('id').isInt(), c.getHistory);
 
-// PUT  /api/content-write/:id/approve — admin approve/reject
-router.put(
-  '/:id/approve',
-  param('id').isInt(),
-  [body('action').isIn(['approve', 'reject']).withMessage('Action must be approve or reject')],
-  contentWriteController.approve
-);
+// POST /api/content-write                 — legacy fill (requires calendar_slot_id; no direct creation)
+router.post('/', c.create);
 
-// DELETE /api/content-write/:id   — soft delete
-router.delete('/:id', param('id').isInt(), contentWriteController.remove);
+// PUT  /api/content-write/:id/draft       — autosave (no status change)
+router.put('/:id/draft', param('id').isInt(), c.saveDraft);
 
-// GET /api/content-write/:id/history — get approval history
-router.get('/:id/history', param('id').isInt(), contentWriteController.getHistory);
+// POST /api/content-write/:id/submit      — save + submit for approval
+router.post('/:id/submit', param('id').isInt(), c.submit);
+
+// PUT  /api/content-write/:id             — edit (writer: resubmit · PC/PM: save only)
+router.put('/:id', param('id').isInt(), c.update);
+
+// POST /api/content-write/:id/review      — smm_accept | approve | send_back
+router.post('/:id/review', param('id').isInt(), c.review);
+
+// PUT  /api/content-write/:id/approve     — legacy approve / reject
+router.put('/:id/approve', param('id').isInt(), c.approve);
+
+// POST /api/content-write/:id/complete    — Mark as Done
+router.post('/:id/complete', param('id').isInt(), c.complete);
+
+// POST /api/content-write/:id/remodify    — writer reopens approved content
+router.post('/:id/remodify', param('id').isInt(), c.remodify);
+
+// DELETE /api/content-write/:id           — admin only; frees the calendar slot
+router.delete('/:id', param('id').isInt(), c.remove);
 
 module.exports = router;
