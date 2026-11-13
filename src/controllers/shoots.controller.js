@@ -2,6 +2,7 @@ const { validationResult } = require('express-validator');
 const db = require('../config/db');
 const {
   parseIds, crewToJson, generateShootCode, logShootHistory, notifyShoot, setSlotStatus,
+  LinkError, resolveShootLink, linkFromPlan, attachLinkNames,
 } = require('../helpers/shootsWorkflow');
 
 const toNull = (val) => (val === '' || val === undefined || val === null) ? null : val;
@@ -31,6 +32,19 @@ const DETAIL_SELECT = `
 async function fetchShootDetail(id) {
   const [rows] = await db.query(`${DETAIL_SELECT} WHERE s.id = ?`, [id]);
   return rows[0] || null;
+}
+
+/** Store the Project ▸ Service ▸ Cycle link on a shoot (non-fatal if columns are missing). */
+async function saveShootLink(shootId, link) {
+  if (!link || !link.project_id) return;
+  try {
+    await db.query(
+      'UPDATE shoots SET project_id = ?, project_service_id = ?, cycle_id = ? WHERE id = ?',
+      [link.project_id, link.project_service_id, link.cycle_id, shootId]
+    );
+  } catch (e) {
+    console.error('Saving shoot project/service/cycle failed:', e.message);
+  }
 }
 
 /** Notify the calendar slot's assigner (if any). */
@@ -67,7 +81,30 @@ async function ensureCalendarSlotForDirectShoot(shoot, actingUserId) {
     const planMonth = `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}-01`;
 
     let planId = null;
-    const [existingPlan] = await db.query(
+
+    // Preferred: the plan for the shoot's cycle (one plan per cycle), created if missing
+    if (shoot.cycle_id) {
+      const [cyclePlan] = await db.query(
+        'SELECT id FROM content_calendar_plans WHERE cycle_id = ? AND deleted = 0 ORDER BY id ASC LIMIT 1',
+        [shoot.cycle_id]
+      );
+      if (cyclePlan.length > 0) {
+        planId = cyclePlan[0].id;
+      } else {
+        const [cyc] = await db.query('SELECT start_date FROM service_cycles WHERE id = ?', [shoot.cycle_id]);
+        const cs = cyc[0]?.start_date ? new Date(cyc[0].start_date) : base;
+        const cycleMonth = `${cs.getFullYear()}-${String(cs.getMonth() + 1).padStart(2, '0')}-01`;
+        const [planResult] = await db.query(
+          `INSERT INTO content_calendar_plans (client_id, project_id, cycle_id, plan_month, status, created_by)
+           VALUES (?, ?, ?, ?, 'active', ?)`,
+          [clientId, shoot.project_id || null, shoot.cycle_id, cycleMonth, actingUserId]
+        );
+        planId = planResult.insertId;
+      }
+    }
+
+    // Legacy shoots without a cycle: the client's plan for the shoot month
+    const [existingPlan] = planId ? [[{ id: planId }]] : await db.query(
       `SELECT id FROM content_calendar_plans
        WHERE deleted = 0 AND plan_month = ?
          AND ((client_id = ?) OR (? IS NULL AND client_id IS NULL))
@@ -119,6 +156,9 @@ async function ensureCalendarSlotForDirectShoot(shoot, actingUserId) {
 exports.list = async (req, res) => {
   try {
     const { status, search } = req.query;
+    const filterProject = toInt(req.query.project_id);
+    const filterService = toInt(req.query.project_service_id);
+    const filterCycle   = toInt(req.query.cycle_id);
     const pageNum  = Math.max(1, parseInt(req.query.page) || 1);
     const limitNum = Math.min(200, Math.max(1, parseInt(req.query.limit) || 20));
     const uid = Number(req.user.id);
@@ -138,6 +178,10 @@ exports.list = async (req, res) => {
                         OR l.business_name LIKE ? OR CONCAT(um.first_name, ' ', um.last_name) LIKE ?)`;
         params.push(like, like, like, like, like);
       }
+      // Project ▸ Service ▸ Cycle filters
+      if (filterProject) { where += ' AND s.project_id = ?'; params.push(filterProject); }
+      if (filterService) { where += ' AND s.project_service_id = ?'; params.push(filterService); }
+      if (filterCycle)   { where += ' AND s.cycle_id = ?'; params.push(filterCycle); }
       if (!canSeeAllShoots(req)) {
         if (withCrewScope) {
           where += ` AND (s.created_by = ? OR s.shoot_manager_id = ?
@@ -198,6 +242,7 @@ exports.list = async (req, res) => {
       photographers: parseIds(r.photographers),
       videographers: parseIds(r.videographers),
     }));
+    await attachLinkNames(shoots);
 
     return res.json({ shoots, summary, total: Number(result.total) || 0, page: pageNum, limit: limitNum });
   } catch (err) {
@@ -281,6 +326,7 @@ exports.getOne = async (req, res) => {
 
     shoot.photographers = parseIds(shoot.photographers);
     shoot.videographers = parseIds(shoot.videographers);
+    await attachLinkNames(shoot);
 
     // Access: anyone who can see all shoots, the creator, or the crew
     const uid = Number(req.user.id);
@@ -359,11 +405,17 @@ exports.create = async (req, res) => {
   try {
     const slotIdVal = toInt(calendar_slot_id);
 
+    // ── Project ▸ Service ▸ Cycle ──
+    // Slot fills inherit it from the calendar plan; direct shoots must choose it.
+    let link;
+    let slotPlanId = null;
+
     // ── Permission ──
     if (slotIdVal) {
       const [slotRows] = await db.query('SELECT * FROM content_calendar_shoots WHERE id = ?', [slotIdVal]);
       if (!slotRows.length) return res.status(404).json({ message: 'Calendar slot not found' });
       const slot = slotRows[0];
+      slotPlanId = slot.plan_id;
       const mayFill = req.user.is_admin || Number(slot.assigned_to) === uid || canApproveShoot(req) || req.socialAccessLevel >= 2;
       if (!mayFill) return res.status(403).json({ message: 'Only the assigned member can fill this shoot slot' });
       if (['approved', 'completed'].includes(slot.slot_status)) {
@@ -372,6 +424,30 @@ exports.create = async (req, res) => {
     } else if (!(req.user.is_admin || req.userCanCreate || canApproveShoot(req))) {
       return res.status(403).json({ message: 'You do not have permission to create shoot requests' });
     }
+
+    try {
+      if (slotIdVal) {
+        const fromPlan = await linkFromPlan(db, slotPlanId);
+        link = await resolveShootLink(db, {
+          project_id: fromPlan?.project_id ?? req.body.project_id,
+          project_service_id: fromPlan?.project_service_id ?? req.body.project_service_id,
+          cycle_id: fromPlan?.cycle_id ?? req.body.cycle_id,
+        });
+      } else {
+        if (!toInt(req.body.project_id) || !toInt(req.body.project_service_id) || !toInt(req.body.cycle_id)) {
+          return res.status(400).json({ message: 'Please select the project, service and cycle' });
+        }
+        link = await resolveShootLink(db, req.body);
+        if (link.cycle && !['active', 'upcoming'].includes(link.cycle.status)) {
+          return res.status(400).json({ message: `Cycle "${link.cycle.title}" is ${link.cycle.status}. Pick an active or upcoming cycle.` });
+        }
+      }
+    } catch (e) {
+      if (e instanceof LinkError) return res.status(400).json({ message: e.message });
+      throw e;
+    }
+    const linkClientId = toInt(client_brand_id) || link.client_id;
+    const linkName = toNull(project_campaign_name) || link.project_title;
 
     const crewP = photographers !== undefined ? crewToJson(photographers) : undefined;
     const crewV = videographers !== undefined ? crewToJson(videographers) : undefined;
@@ -402,13 +478,14 @@ exports.create = async (req, res) => {
             status = 'pending_approval'
           WHERE id = ?`,
           [
-            toInt(client_brand_id), toNull(project_campaign_name), toNull(shoot_date), toNull(reporting_time),
+            linkClientId, linkName, toNull(shoot_date), toNull(reporting_time),
             toNull(location_type), toNull(exact_address), toNull(city), toNull(maps_link),
             crewP ?? null, crewV ?? null,
             toInt(shoot_manager_id),
             current.id,
           ]
         );
+        await saveShootLink(current.id, link);
         await setSlotStatus(slotIdVal, 'submitted', uid);
         res.emitSocket('content-calendar:slot-submitted', { item_type: 'shoot', item_id: slotIdVal });
         await notifySlotAssigner(slotIdVal, uid, {
@@ -424,7 +501,7 @@ exports.create = async (req, res) => {
     }
 
     // ── New shoot ──
-    const shoot_id_code = await generateShootCode(db, toInt(client_brand_id), shoot_date);
+    const shoot_id_code = await generateShootCode(db, linkClientId, shoot_date);
     const [result] = await db.query(
       `INSERT INTO shoots
         (shoot_id_code, client_brand_id, project_campaign_name, shoot_date, reporting_time,
@@ -434,7 +511,7 @@ exports.create = async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval', ?)`,
       [
         shoot_id_code,
-        toInt(client_brand_id), project_campaign_name, shoot_date, toNull(reporting_time),
+        linkClientId, linkName, shoot_date, toNull(reporting_time),
         location_type, toNull(exact_address), toNull(city), toNull(maps_link),
         crewP ?? null, crewV ?? null,
         toInt(shoot_manager_id),
@@ -443,6 +520,7 @@ exports.create = async (req, res) => {
       ]
     );
     const insertId = result.insertId;
+    await saveShootLink(insertId, link);
 
     if (slotIdVal) {
       try { await db.query('UPDATE content_calendar_shoots SET linked_shoot_ref_id = ? WHERE id = ?', [insertId, slotIdVal]); } catch (e) { /* ignore */ }
@@ -510,7 +588,27 @@ exports.update = async (req, res) => {
       if (f === 'photographers' || f === 'videographers') updates[f] = crewToJson(req.body[f]);
       else updates[f] = req.body[f] === '' ? null : req.body[f];
     });
-    if (Object.keys(updates).length === 0) {
+    // Project ▸ Service ▸ Cycle — only for shoots not yet on the calendar
+    // (calendar shoots inherit it from their plan).
+    let newLink = null;
+    const linkSent = ['project_id', 'project_service_id', 'cycle_id'].some(k => req.body[k] !== undefined);
+    if (linkSent && !shoot.calendar_slot_id && !isCloseRequest) {
+      try {
+        newLink = await resolveShootLink(db, req.body);
+      } catch (e) {
+        if (e instanceof LinkError) return res.status(400).json({ message: e.message });
+        throw e;
+      }
+      if (newLink.project_id && !newLink.cycle_id) {
+        return res.status(400).json({ message: 'Please select the service and cycle' });
+      }
+      if (newLink.cycle && String(newLink.cycle_id) !== String(shoot.cycle_id) && !['active', 'upcoming'].includes(newLink.cycle.status)) {
+        return res.status(400).json({ message: `Cycle "${newLink.cycle.title}" is ${newLink.cycle.status}. Pick an active or upcoming cycle.` });
+      }
+      if (newLink.client_id && req.body.client_brand_id === undefined) updates.client_brand_id = newLink.client_id;
+    }
+
+    if (Object.keys(updates).length === 0 && !newLink) {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
 
@@ -537,8 +635,11 @@ exports.update = async (req, res) => {
     if (nextStatus && nextStatus !== shoot.status) updates.status = nextStatus;
     if (updates.status === 'pending_approval') updates.approval_remarks = null;
 
-    const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
-    await db.query(`UPDATE shoots SET ${setClauses} WHERE id = ?`, [...Object.values(updates), req.params.id]);
+    if (Object.keys(updates).length) {
+      const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+      await db.query(`UPDATE shoots SET ${setClauses} WHERE id = ?`, [...Object.values(updates), req.params.id]);
+    }
+    if (newLink) await saveShootLink(shoot.id, newLink);
 
     if (updates.status === 'pending_completion') {
       try {

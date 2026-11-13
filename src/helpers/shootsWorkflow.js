@@ -69,6 +69,91 @@ async function generateShootCode(q, clientId, shootDate) {
   return `${prefix}-${String(max + 1).padStart(3, '0')}`;
 }
 
+// ─── Project ▸ Service ▸ Cycle ───────────────────────────────────────────────
+
+class LinkError extends Error {}
+
+/**
+ * Validate and normalise a project / service / cycle selection.
+ * - cycle must belong to the project (and to the service, when given)
+ * - service must belong to the project
+ * - the service is inferred from the cycle when not sent
+ * Throws LinkError with a user-facing message on mismatch.
+ * Returns { project_id, project_service_id, cycle_id, client_id, project_title, cycle }.
+ */
+async function resolveShootLink(q, { project_id, project_service_id, cycle_id }) {
+  const toId = (v) => { const n = parseInt(v, 10); return Number.isNaN(n) ? null : n; };
+  const pid = toId(project_id);
+  let sid = toId(project_service_id);
+  const cid = toId(cycle_id);
+  if (!pid) return { project_id: null, project_service_id: null, cycle_id: null, client_id: null, project_title: null, cycle: null };
+
+  const [proj] = await q.query('SELECT id, client_id, title FROM projects WHERE id = ? AND deleted = 0', [pid]);
+  if (!proj.length) throw new LinkError('Selected project was not found');
+
+  if (sid) {
+    const [svc] = await q.query('SELECT id, project_id FROM project_services WHERE id = ?', [sid]);
+    if (!svc.length || Number(svc[0].project_id) !== pid) throw new LinkError('Selected service does not belong to this project');
+  }
+
+  let cycle = null;
+  if (cid) {
+    const [cyc] = await q.query('SELECT id, project_id, project_service_id, title, status, start_date, end_date FROM service_cycles WHERE id = ?', [cid]);
+    if (!cyc.length || Number(cyc[0].project_id) !== pid) throw new LinkError('Selected cycle does not belong to this project');
+    cycle = cyc[0];
+    if (sid && cycle.project_service_id && Number(cycle.project_service_id) !== sid) {
+      throw new LinkError('Selected cycle does not belong to this service');
+    }
+    if (!sid && cycle.project_service_id) sid = Number(cycle.project_service_id);
+  }
+
+  return {
+    project_id: pid, project_service_id: sid, cycle_id: cid,
+    client_id: proj[0].client_id || null, project_title: proj[0].title || null, cycle,
+  };
+}
+
+/** Project / service / cycle of a calendar plan (for shoots created from its slots). */
+async function linkFromPlan(q, planId) {
+  if (!planId) return null;
+  try {
+    const [rows] = await q.query(
+      `SELECT p.project_id, p.cycle_id, sc.project_service_id
+       FROM content_calendar_plans p
+       LEFT JOIN service_cycles sc ON sc.id = p.cycle_id
+       WHERE p.id = ?`,
+      [planId]
+    );
+    return rows[0] || null;
+  } catch (e) { return null; }
+}
+
+/** Attach service / cycle / project names to shoot rows (non-fatal). */
+async function attachLinkNames(rows) {
+  const list = Array.isArray(rows) ? rows : [rows];
+  const cycleIds = [...new Set(list.map(r => r.cycle_id).filter(Boolean))];
+  const svcIds = [...new Set(list.map(r => r.project_service_id).filter(Boolean))];
+  const projIds = [...new Set(list.map(r => r.project_id).filter(Boolean))];
+  try {
+    const cyc = cycleIds.length ? (await db.query('SELECT id, title, status, start_date, end_date FROM service_cycles WHERE id IN (?)', [cycleIds]))[0] : [];
+    const svc = svcIds.length ? (await db.query('SELECT ps.id, s.name FROM project_services ps JOIN services s ON s.id = ps.service_id WHERE ps.id IN (?)', [svcIds]))[0] : [];
+    const prj = projIds.length ? (await db.query('SELECT id, title FROM projects WHERE id IN (?)', [projIds]))[0] : [];
+    const cMap = new Map(cyc.map(c => [Number(c.id), c]));
+    const sMap = new Map(svc.map(s => [Number(s.id), s.name]));
+    const pMap = new Map(prj.map(p => [Number(p.id), p.title]));
+    list.forEach(r => {
+      const c = cMap.get(Number(r.cycle_id));
+      r.cycle_title = c?.title || null;
+      r.cycle_status = c?.status || null;
+      r.cycle_start_date = c?.start_date || null;
+      r.cycle_end_date = c?.end_date || null;
+      r.service_name = sMap.get(Number(r.project_service_id)) || null;
+      r.project_title = pMap.get(Number(r.project_id)) || null;
+    });
+  } catch (e) { /* tables/columns missing — names stay undefined */ }
+  return rows;
+}
+
 // ─── History / notifications (non-fatal) ─────────────────────────────────────
 
 async function logShootHistory(shootId, action, remarks, userId) {
@@ -174,6 +259,14 @@ async function ensureShootsWorkflowSchema() {
        ADD COLUMN IF NOT EXISTS shoot_statement TEXT DEFAULT NULL,
        ADD COLUMN IF NOT EXISTS footage_updated_by INT UNSIGNED DEFAULT NULL,
        ADD COLUMN IF NOT EXISTS footage_updated_at DATETIME DEFAULT NULL`,
+    // Project ▸ Service ▸ Cycle link
+    `ALTER TABLE shoots
+       ADD COLUMN IF NOT EXISTS project_id INT UNSIGNED DEFAULT NULL,
+       ADD COLUMN IF NOT EXISTS project_service_id INT UNSIGNED DEFAULT NULL,
+       ADD COLUMN IF NOT EXISTS cycle_id INT UNSIGNED DEFAULT NULL`,
+    `ALTER TABLE shoots
+       ADD INDEX IF NOT EXISTS idx_shoots_project (project_id),
+       ADD INDEX IF NOT EXISTS idx_shoots_cycle (cycle_id)`,
     `ALTER TABLE content_calendar_shoots
        ADD COLUMN IF NOT EXISTS completed_at DATETIME DEFAULT NULL,
        ADD COLUMN IF NOT EXISTS completed_by INT UNSIGNED DEFAULT NULL`,
@@ -246,4 +339,8 @@ module.exports = {
   setSlotStatus,
   shootsForSlot,
   ensureShootsWorkflowSchema,
+  LinkError,
+  resolveShootLink,
+  linkFromPlan,
+  attachLinkNames,
 };

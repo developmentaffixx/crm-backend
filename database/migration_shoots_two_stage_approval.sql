@@ -71,3 +71,13 @@ WHERE s.status = 'completed' AND cs.slot_status = 'approved';
 --   WHERE module = 'creative_hub' AND can_pcpm_approve = 1;
 -- UPDATE user_permissions SET can_shoot_approve = 1, can_shoot_close_approve = 1
 --   WHERE module = 'creative_hub' AND can_pcpm_approve = 1;
+
+-- 6. Project ▸ Service ▸ Cycle link on shoots (also applied on startup)
+--    Existing shoots are left as they are (no backfill).
+ALTER TABLE shoots
+  ADD COLUMN IF NOT EXISTS project_id         INT UNSIGNED DEFAULT NULL,
+  ADD COLUMN IF NOT EXISTS project_service_id INT UNSIGNED DEFAULT NULL,
+  ADD COLUMN IF NOT EXISTS cycle_id           INT UNSIGNED DEFAULT NULL;
+ALTER TABLE shoots
+  ADD INDEX IF NOT EXISTS idx_shoots_project (project_id),
+  ADD INDEX IF NOT EXISTS idx_shoots_cycle (cycle_id);

@@ -7,7 +7,7 @@ const db = require('../config/db');
 
 const { getSocialSubmenuAccess } = require('../middleware/socialAccess');
 const { statusOnApproval, logAdsHistory } = require('../helpers/adsWorkflow');
-const { generateShootCode, logShootHistory, parseIds } = require('../helpers/shootsWorkflow');
+const { generateShootCode, logShootHistory, parseIds, linkFromPlan } = require('../helpers/shootsWorkflow');
 
 const TABLE_MAP = {
   post: 'content_calendar_posts',
@@ -456,7 +456,7 @@ exports.assignSlot = async (req, res) => {
     if (item_type === 'shoot') {
       linkedItemType = 'shoots';
       const [planInfo] = await conn.query(
-        `SELECT p.client_id FROM content_calendar_plans p
+        `SELECT p.client_id, p.id AS plan_id FROM content_calendar_plans p
          JOIN ${table} cs ON cs.plan_id = p.id WHERE cs.id = ?`, [slotId]
       );
       const clientId = planInfo[0]?.client_id || null;
@@ -481,6 +481,17 @@ exports.assignSlot = async (req, res) => {
         [shootResult] = await insertPlaceholder('pending_approval');
       }
       linkedItemId = shootResult.insertId;
+
+      // Inherit Project ▸ Service ▸ Cycle from the calendar plan
+      const planLink = await linkFromPlan(conn, planInfo[0]?.plan_id || null);
+      if (planLink?.project_id) {
+        try {
+          await conn.query(
+            'UPDATE shoots SET project_id = ?, project_service_id = ?, cycle_id = ? WHERE id = ?',
+            [planLink.project_id, planLink.project_service_id || null, planLink.cycle_id || null, linkedItemId]
+          );
+        } catch (e) { console.warn('Shoot placeholder link warning:', e.message); }
+      }
 
       await conn.query(`UPDATE ${table} SET linked_shoot_ref_id = ? WHERE id = ?`, [linkedItemId, slotId]);
     }
