@@ -78,6 +78,11 @@ exports.list = async (req, res) => {
     if (cycle_id) { where += ' AND p.cycle_id = ?'; params.push(cycle_id); }
     if (month) { where += ' AND p.plan_month = ?'; params.push(month); }
     if (status) { where += ' AND p.status = ?'; params.push(status); }
+    // open_only: plans for active / upcoming cycles (plans without a cycle: current month only)
+    if (req.query.open_only === '1' || req.query.open_only === 'true') {
+      where += ` AND (p.cycle_id IN (SELECT id FROM service_cycles WHERE status IN ('active', 'upcoming'))
+                 OR (p.cycle_id IS NULL AND DATE_FORMAT(p.plan_month, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')))`;
+    }
 
     if (!req.user.is_admin) {
       if (req.socialAccessLevel >= 2) {
@@ -99,6 +104,9 @@ exports.list = async (req, res) => {
         `SELECT p.*,
                 l.business_name AS client_name,
                 pr.title AS project_title,
+                sc.title AS cycle_title, sc.status AS cycle_status,
+                sc.start_date AS cycle_start_date, sc.end_date AS cycle_end_date,
+                sv.name AS service_name,
                 CONCAT(u.first_name, ' ', u.last_name) AS created_by_name,
                 (SELECT COUNT(*) FROM content_calendar_posts WHERE plan_id = p.id) AS post_count,
                 (SELECT COUNT(*) FROM content_calendar_shoots WHERE plan_id = p.id) AS shoot_count,
@@ -106,6 +114,9 @@ exports.list = async (req, res) => {
          FROM content_calendar_plans p
          LEFT JOIN leads l ON l.id = p.client_id
          LEFT JOIN projects pr ON pr.id = p.project_id
+         LEFT JOIN service_cycles sc ON sc.id = p.cycle_id
+         LEFT JOIN project_services ps ON ps.id = sc.project_service_id
+         LEFT JOIN services sv ON sv.id = ps.service_id
          LEFT JOIN users u ON u.id = p.created_by
          WHERE ${where}
          ORDER BY p.plan_month DESC, p.created_at DESC
