@@ -70,6 +70,11 @@ exports.list = async (req, res) => {
 
     if (client_id) { where += ' AND p.client_id = ?'; params.push(client_id); }
     if (project_id) { where += ' AND p.project_id = ?'; params.push(project_id); }
+    // Service filter: plans whose cycle belongs to that project service
+    if (req.query.project_service_id) {
+      where += ' AND p.cycle_id IN (SELECT id FROM service_cycles WHERE project_service_id = ?)';
+      params.push(req.query.project_service_id);
+    }
     if (cycle_id) { where += ' AND p.cycle_id = ?'; params.push(cycle_id); }
     if (month) { where += ' AND p.plan_month = ?'; params.push(month); }
     if (status) { where += ' AND p.status = ?'; params.push(status); }
@@ -701,6 +706,11 @@ exports.calendarView = async (req, res) => {
 
     if (client_id) { planWhere += ' AND p.client_id = ?'; planParams.push(client_id); }
     if (project_id) { planWhere += ' AND p.project_id = ?'; planParams.push(project_id); }
+    // Service filter: plans whose cycle belongs to that project service
+    if (req.query.project_service_id) {
+      planWhere += ' AND p.cycle_id IN (SELECT id FROM service_cycles WHERE project_service_id = ?)';
+      planParams.push(req.query.project_service_id);
+    }
     // "Own" scope: member/creator plans, plus plans holding a shoot this user is crew on
     // (so photographers/videographers with Calendar-only access can find & punch their shoot).
     const ownScope = !req.user.is_admin && !(req.socialAccessLevel >= 2);

@@ -130,6 +130,11 @@ exports.listSlots = async (req, res) => {
     if (project_id) { planWhere += ' AND p.project_id = ?'; planParams.push(project_id); }
     if (cycle_id) { planWhere += ' AND p.cycle_id = ?'; planParams.push(cycle_id); }
     if (client_id) { planWhere += ' AND p.client_id = ?'; planParams.push(client_id); }
+    // Service filter: plans whose cycle belongs to that project service
+    if (req.query.project_service_id) {
+      planWhere += ' AND p.cycle_id IN (SELECT id FROM service_cycles WHERE project_service_id = ?)';
+      planParams.push(req.query.project_service_id);
+    }
 
     const [plans] = await db.query(
       `SELECT p.id, p.project_id, p.cycle_id, p.plan_month, p.client_id,
