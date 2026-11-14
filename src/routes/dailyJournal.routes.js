@@ -21,6 +21,15 @@ router.use(requireSocialAccess('daily_journal'));
 // GET  /api/daily-journal         — list entries with filters
 router.get('/', dailyJournalController.list);
 
+// GET  /api/daily-journal/my-services — Project ▸ Service options (+ today's submitted flags)
+router.get('/my-services', dailyJournalController.myServices);
+
+// GET  /api/daily-journal/status      — stats, my pending services, team pending (All access)
+router.get('/status', dailyJournalController.status);
+
+// GET  /api/daily-journal/filter-options — filter dropdown values from visible entries
+router.get('/filter-options', dailyJournalController.filterOptions);
+
 // GET  /api/daily-journal/:id     — get single entry
 router.get('/:id', param('id').isInt(), dailyJournalController.getOne);
 

@@ -2,48 +2,22 @@ const db = require('../config/db');
 const { getExpectedHoursForDate, getExpectedHoursForRange } = require('./workSchedule.controller');
 const { getUserModulePermission } = require('../middleware/auth');
 
+const dailyUpdate = require('../helpers/dailyUpdate');
+
 /**
- * Check if a user has "Own" access (can_access === 1) to the Daily Update (daily_journal) submenu in SM Ops (creative_hub).
- * Users with "Own" access are required to submit their daily update each day before clocking out.
+ * Daily Update services still pending today (IST) for a user.
+ * Rule: users with Daily Update access (Own or All) must submit one update for
+ * each active Project ▸ Service they are a member of. Admins and users with no
+ * service membership have nothing pending. Never throws (returns []).
  */
-async function userHasOwnDailyJournalAccess(userId) {
+async function pendingDailyUpdates(userId) {
   try {
-    // 1. Check user-level submenu permissions override
-    const [userOverride] = await db.query(
-      'SELECT can_access FROM user_submenu_permissions WHERE user_id = ? AND module = ? AND submenu = ?',
-      [userId, 'creative_hub', 'daily_journal']
-    );
-    if (userOverride.length > 0) {
-      return Number(userOverride[0].can_access) === 1; // Exactly 1 = "Own"
-    }
-
-    // 2. Check role-level submenu permissions
-    const [userRole] = await db.query('SELECT role_id, is_admin FROM users WHERE id = ?', [userId]);
-    if (!userRole.length || userRole[0].is_admin) return false;
-
-    const roleId = userRole[0].role_id;
-    if (roleId) {
-      const [rolePerms] = await db.query(
-        'SELECT can_access FROM role_submenu_permissions WHERE role_id = ? AND module = ? AND submenu = ?',
-        [roleId, 'creative_hub', 'daily_journal']
-      );
-      if (rolePerms.length > 0) {
-        return Number(rolePerms[0].can_access) === 1; // Exactly 1 = "Own"
-      }
-
-      // 3. Fallback to legacy role_social_permissions
-      const [socialPerms] = await db.query(
-        'SELECT daily_journal FROM role_social_permissions WHERE role_id = ?',
-        [roleId]
-      );
-      if (socialPerms.length > 0) {
-        return Number(socialPerms[0].daily_journal) === 1; // Exactly 1 = "Own"
-      }
-    }
+    const status = await dailyUpdate.userStatus(userId, dailyUpdate.todayIST());
+    return status.pending;
   } catch (err) {
-    console.error('Error checking user daily journal access:', err);
+    console.error('Error checking pending Daily Updates:', err);
+    return [];
   }
-  return false;
 }
 
 exports.clockIn = async (req, res) => {
@@ -317,19 +291,14 @@ exports.clockOut = async (req, res) => {
       });
     }
 
-    // ── Enforce daily update submission if user has "Own" access to Daily Update ──
-    const requiresDailyJournal = await userHasOwnDailyJournalAccess(userId);
-    if (requiresDailyJournal) {
-      const [todayJournal] = await db.query(
-        'SELECT id FROM smm_daily_journal WHERE submitted_by = ? AND (journal_date = CURDATE() OR DATE(submitted_at) = CURDATE()) LIMIT 1',
-        [userId]
-      );
-      if (!todayJournal.length) {
-        return res.status(400).json({
-          message: 'Cannot clock out: You must submit your Daily Update for today before clocking out.',
-          missing_daily_journal: true,
-        });
-      }
+    // ── Enforce Daily Update: one per assigned Project ▸ Service (when user has access) ──
+    const pendingUpdates = await pendingDailyUpdates(userId);
+    if (pendingUpdates.length) {
+      return res.status(400).json({
+        message: `Cannot clock out: Daily Update pending for ${pendingUpdates.map(dailyUpdate.serviceLabel).join(', ')}.`,
+        missing_daily_journal: true,
+        pending_daily_updates: pendingUpdates,
+      });
     }
 
 
@@ -1902,24 +1871,16 @@ exports.checkOverdueTasks = async (req, res) => {
       [userId]
     );
 
-    // Check if user has "Own" access to Daily Update and hasn't submitted today's journal
-    let missingDailyJournal = false;
-    const requiresDailyJournal = await userHasOwnDailyJournalAccess(userId);
-    if (requiresDailyJournal) {
-      const [todayJournal] = await db.query(
-        'SELECT id FROM smm_daily_journal WHERE submitted_by = ? AND (journal_date = CURDATE() OR DATE(submitted_at) = CURDATE()) LIMIT 1',
-        [userId]
-      );
-      if (!todayJournal.length) {
-        missingDailyJournal = true;
-      }
-    }
+    // Daily Update services still pending today (one per assigned Project ▸ Service)
+    const pendingUpdates = await pendingDailyUpdates(userId);
+    const missingDailyJournal = pendingUpdates.length > 0;
 
     return res.json({
       has_overdue: overdueTasks.length > 0 || overdueTickets.length > 0 || missingDailyJournal,
       overdue_tasks: overdueTasks,
       overdue_tickets: overdueTickets,
       missing_daily_journal: missingDailyJournal,
+      pending_daily_updates: pendingUpdates,
     });
   } catch (err) {
     console.error('Check overdue tasks error:', err);

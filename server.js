@@ -300,6 +300,9 @@ server.listen(PORT, () => {
   // ── Contents (posts): SMM → PC/PM → Mark as Done workflow schema ────────────
   require('./src/helpers/contentWorkflow').ensureContentWorkflowSchema()
     .catch(err => console.error('⚠️  Contents workflow schema error (non-fatal):', err.message));
+  // ── Daily Update: per Project ▸ Service entries ─────────────────────────────
+  require('./src/helpers/dailyUpdate').ensureDailyJournalSchema()
+    .catch(err => console.error('⚠️  Daily Update schema error (non-fatal):', err.message));
   const { startAdsActivationCron } = require('./src/jobs/adsActivationCron');
   startAdsActivationCron();
 });

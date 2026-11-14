@@ -1,17 +1,118 @@
 const db = require('../config/db');
-const { getExpectedHoursForRange } = require('./workSchedule.controller');
+const {
+  todayIST, toDateStr, parseJson, parseEntry,
+  requiredServices, submittedKeys, userStatus, resolveEntryService,
+} = require('../helpers/dailyUpdate');
+
+const WORK_CATEGORIES = ['Content', 'Shoot', 'Ads', 'Design - Editing', 'Social Listenings'];
+const NO_ISSUES = 'No Issues';
+
+/** Daily Update access level for the request (admin = 2). */
+function levelOf(req) {
+  if (req.user.is_admin) return 2;
+  return Number(req.socialAccessLevel) >= 2 ? 2 : 1;
+}
+
+/** Same-day lock: non-admins may edit / delete only their own entry, on the entry's date (IST). */
+function rowRights(req, row) {
+  if (req.user.is_admin) return { can_edit: true, can_delete: true };
+  const own = Number(row.submitted_by) === Number(req.user.id);
+  const sameDay = toDateStr(row.journal_date) === todayIST();
+  return { can_edit: own && sameDay, can_delete: own && sameDay };
+}
+
+/**
+ * Clean + validate the submitted body. Returns the column values or throws { status, message }.
+ * Health status is always computed here (the client value is ignored).
+ */
+function normaliseBody(body) {
+  // Work Done: { Category: [points] } — keep known categories, trimmed, non-empty
+  const rawCats = parseJson(body.work_categories, {}) || {};
+  const work = {};
+  let pointCount = 0;
+  WORK_CATEGORIES.forEach(cat => {
+    const pts = Array.isArray(rawCats[cat]) ? rawCats[cat] : [];
+    work[cat] = pts.map(p => String(p ?? '').trim()).filter(Boolean).slice(0, 50);
+    pointCount += work[cat].length;
+  });
+  if (pointCount === 0) throw { status: 400, message: 'Add at least one "Work Done Today" point' };
+
+  const comm = body.client_communication === 'yes' ? 'yes' : 'no';
+  const commSummary = comm === 'yes' ? (String(body.communication_summary || '').trim() || null) : null;
+
+  let issues = (Array.isArray(body.issues_delays) ? body.issues_delays : [])
+    .map(i => String(i ?? '').trim()).filter(Boolean);
+  issues = [...new Set(issues)];
+  if (issues.some(i => i !== NO_ISSUES)) issues = issues.filter(i => i !== NO_ISSUES);
+  const hasIssues = issues.some(i => i !== NO_ISSUES);
+  const issuesDetails = hasIssues ? (String(body.issues_details || '').trim() || null) : null;
+
+  const priorities = (Array.isArray(body.tomorrow_priorities) ? body.tomorrow_priorities : [])
+    .map(p => String(p ?? '').trim()).filter(Boolean).slice(0, 3);
+
+  const escalation = body.escalation_required === 'yes' ? 'yes' : 'no';
+  const escalationDetails = escalation === 'yes' ? (String(body.escalation_details || '').trim() || null) : null;
+  if (escalation === 'yes' && !escalationDetails) throw { status: 400, message: 'Please add the escalation details' };
+
+  const health = escalation === 'yes' ? 'critical' : (hasIssues ? 'attention_needed' : 'on_track');
+
+  return {
+    work_categories: JSON.stringify(work),
+    client_communication: comm,
+    communication_summary: commSummary,
+    issues_delays: issues.length ? JSON.stringify(issues) : null,
+    issues_details: issuesDetails,
+    leads_opportunities: String(body.leads_opportunities || '').trim() || null,
+    tomorrow_priorities: priorities.length ? JSON.stringify(priorities) : null,
+    escalation_required: escalation,
+    escalation_details: escalationDetails,
+    health_status: health,
+  };
+}
+
+const ENTRY_SELECT = `
+  SELECT dj.*,
+         p.title AS project_title,
+         l.business_name AS client_name,
+         s.name AS service_name,
+         CONCAT(u.first_name, ' ', u.last_name) AS submitted_by_name
+  FROM smm_daily_journal dj
+  LEFT JOIN projects p          ON p.id = dj.project_id
+  LEFT JOIN leads l             ON l.id = p.client_id
+  LEFT JOIN project_services ps ON ps.id = dj.project_service_id
+  LEFT JOIN services s          ON s.id = ps.service_id
+  LEFT JOIN users u             ON u.id = dj.submitted_by`;
+
+async function fetchEntry(id) {
+  const [rows] = await db.query(`${ENTRY_SELECT} WHERE dj.id = ?`, [id]);
+  return rows.length ? parseEntry(rows[0]) : null;
+}
+
+function sendError(res, err, label) {
+  if (err && err.status) return res.status(err.status).json({ message: err.message });
+  console.error(`Daily Update ${label} error:`, err);
+  return res.status(500).json({ message: 'Server error' });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/daily-journal — list journal entries (with filters)
+// GET /api/daily-journal — list (Own = my entries, All = everyone's)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.list = async (req, res) => {
   try {
-    const { project_id, user_id, client_id, date_from, date_to, health_status, client_communication, escalation_required, page = 1, limit = 20 } = req.query;
+    const {
+      project_id, project_service_id, user_id, client_id, date_from, date_to,
+      health_status, client_communication, escalation_required,
+    } = req.query;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const level = levelOf(req);
+
     let where = '1=1';
     const params = [];
-
+    if (level < 2) { where += ' AND dj.submitted_by = ?'; params.push(req.user.id); }
+    else if (user_id) { where += ' AND dj.submitted_by = ?'; params.push(user_id); }
     if (project_id) { where += ' AND dj.project_id = ?'; params.push(project_id); }
-    if (user_id) { where += ' AND dj.submitted_by = ?'; params.push(user_id); }
+    if (project_service_id) { where += ' AND dj.project_service_id = ?'; params.push(project_service_id); }
     if (client_id) { where += ' AND p.client_id = ?'; params.push(client_id); }
     if (date_from) { where += ' AND dj.journal_date >= ?'; params.push(date_from); }
     if (date_to) { where += ' AND dj.journal_date <= ?'; params.push(date_to); }
@@ -19,288 +120,315 @@ exports.list = async (req, res) => {
     if (client_communication) { where += ' AND dj.client_communication = ?'; params.push(client_communication); }
     if (escalation_required) { where += ' AND dj.escalation_required = ?'; params.push(escalation_required); }
 
-    // Non-admin: only see their own entries or entries for projects they are members of
-    if (!req.user.is_admin) {
-      where += ' AND (dj.submitted_by = ? OR pm.user_id IS NOT NULL)';
-      params.push(req.user.id);
-    }
-
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-
     const [rows] = await db.query(
-      `SELECT dj.*,
-              p.title AS project_title,
-              l.business_name AS client_name,
-              CONCAT(u.first_name, ' ', u.last_name) AS submitted_by_name
-       FROM smm_daily_journal dj
-       LEFT JOIN projects p ON p.id = dj.project_id
-       LEFT JOIN leads l ON l.id = p.client_id
-       LEFT JOIN users u ON u.id = dj.submitted_by
-       ${!req.user.is_admin ? 'LEFT JOIN project_members pm ON pm.project_id = dj.project_id AND pm.user_id = ' + req.user.id : ''}
+      `${ENTRY_SELECT}
        WHERE ${where}
        ORDER BY dj.journal_date DESC, dj.submitted_at DESC
        LIMIT ? OFFSET ?`,
-      [...params, parseInt(limit), offset]
+      [...params, limit, (page - 1) * limit]
     );
-
-    // Get total count
-    const [countResult] = await db.query(
+    const [[countRow]] = await db.query(
       `SELECT COUNT(*) AS total
        FROM smm_daily_journal dj
        LEFT JOIN projects p ON p.id = dj.project_id
-       ${!req.user.is_admin ? 'LEFT JOIN project_members pm ON pm.project_id = dj.project_id AND pm.user_id = ' + req.user.id : ''}
        WHERE ${where}`,
       params
     );
 
-    // Parse JSON fields
-    rows.forEach(row => {
-      if (row.work_categories && typeof row.work_categories === 'string') {
-        row.work_categories = JSON.parse(row.work_categories);
-      }
-      if (row.activities_completed && typeof row.activities_completed === 'string') {
-        row.activities_completed = JSON.parse(row.activities_completed);
-      }
-      if (row.issues_delays && typeof row.issues_delays === 'string') {
-        row.issues_delays = JSON.parse(row.issues_delays);
-      }
-      if (row.tomorrow_priorities && typeof row.tomorrow_priorities === 'string') {
-        row.tomorrow_priorities = JSON.parse(row.tomorrow_priorities);
-      }
-    });
-
-    return res.json({
-      entries: rows,
-      total: countResult[0].total,
-      page: parseInt(page),
-      limit: parseInt(limit),
-    });
+    const entries = rows.map(r => ({ ...parseEntry(r), ...rowRights(req, r) }));
+    return res.json({ entries, total: Number(countRow.total) || 0, page, limit, access_level: level });
   } catch (err) {
-    console.error('Daily journal list error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return sendError(res, err, 'list');
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/daily-journal/:id — get single entry
+// GET /api/daily-journal/my-services — Project ▸ Service options for the form
+// (members: services they belong to; admin: every active service) + today's flags
+// ─────────────────────────────────────────────────────────────────────────────
+exports.myServices = async (req, res) => {
+  try {
+    const date = toDateStr(req.query.date) || todayIST();
+    let rows;
+    if (req.user.is_admin) {
+      [rows] = await db.query(
+        `SELECT ps.id AS project_service_id, ps.project_id, p.title AS project_title,
+                l.business_name AS client_name, s.name AS service_name
+         FROM project_services ps
+         JOIN projects p      ON p.id = ps.project_id
+         LEFT JOIN services s ON s.id = ps.service_id
+         LEFT JOIN leads l    ON l.id = p.client_id
+         WHERE p.deleted = 0 AND p.status = 'active' AND ps.status = 'active'
+         ORDER BY p.title, s.name`
+      );
+    } else {
+      [rows] = await db.query(
+        `SELECT ps.id AS project_service_id, ps.project_id, p.title AS project_title,
+                l.business_name AS client_name, s.name AS service_name
+         FROM project_service_members psm
+         JOIN project_services ps ON ps.id = psm.project_service_id
+         JOIN projects p          ON p.id = ps.project_id
+         LEFT JOIN services s     ON s.id = ps.service_id
+         LEFT JOIN leads l        ON l.id = p.client_id
+         WHERE psm.user_id = ? AND p.deleted = 0 AND p.status = 'active' AND ps.status = 'active'
+         ORDER BY p.title, s.name`,
+        [req.user.id]
+      );
+    }
+    const done = await submittedKeys(date, [Number(req.user.id)]);
+    const services = rows.map(r => ({ ...r, submitted: done.has(`${Number(req.user.id)}:${Number(r.project_service_id)}`) }));
+    return res.json({ date, services });
+  } catch (err) {
+    return sendError(res, err, 'my-services');
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/daily-journal/status?date= — stats + my pending; team list for All access
+// ─────────────────────────────────────────────────────────────────────────────
+exports.status = async (req, res) => {
+  try {
+    const date = toDateStr(req.query.date) || todayIST();
+    const level = levelOf(req);
+    const mine = req.user.is_admin
+      ? { date, required: [], pending: [], submitted_count: 0 }
+      : await userStatus(req.user.id, date);
+
+    // Entry counts for the date (scoped like the list)
+    const scope = level < 2 ? 'AND submitted_by = ?' : '';
+    const [[counts]] = await db.query(
+      `SELECT COUNT(*) AS submitted,
+              SUM(health_status = 'critical') AS critical,
+              SUM(health_status = 'attention_needed') AS attention,
+              SUM(escalation_required = 'yes') AS escalations
+       FROM smm_daily_journal WHERE journal_date = ? ${scope}`,
+      level < 2 ? [date, req.user.id] : [date]
+    );
+
+    const result = {
+      date,
+      access_level: level,
+      my: mine,
+      stats: {
+        submitted: Number(counts.submitted) || 0,
+        critical: Number(counts.critical) || 0,
+        attention: Number(counts.attention) || 0,
+        escalations: Number(counts.escalations) || 0,
+        required: mine.required.length,
+        pending: mine.pending.length,
+      },
+      team: null,
+    };
+
+    if (level >= 2) {
+      const req2 = await requiredServices(null);
+      const done = await submittedKeys(date, null);
+      const byUser = new Map();
+      req2.forEach(r => {
+        const key = Number(r.user_id);
+        if (!byUser.has(key)) byUser.set(key, { user_id: key, name: r.user_name, required: 0, submitted: 0, pending: [] });
+        const m = byUser.get(key);
+        m.required += 1;
+        if (done.has(`${key}:${Number(r.project_service_id)}`)) m.submitted += 1;
+        else m.pending.push({ project_service_id: r.project_service_id, project_title: r.project_title, service_name: r.service_name });
+      });
+      const members = [...byUser.values()].sort((a, b) => b.pending.length - a.pending.length || String(a.name).localeCompare(String(b.name)));
+      const requiredTotal = members.reduce((s, m) => s + m.required, 0);
+      const pendingTotal = members.reduce((s, m) => s + m.pending.length, 0);
+      result.team = {
+        members,
+        required_total: requiredTotal,
+        pending_total: pendingTotal,
+        members_pending: members.filter(m => m.pending.length > 0).length,
+      };
+      result.stats.required = requiredTotal;
+      result.stats.pending = pendingTotal;
+    }
+
+    return res.json(result);
+  } catch (err) {
+    return sendError(res, err, 'status');
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/daily-journal/filter-options — projects / services / clients / members
+// that appear in entries the user can see (includes closed projects)
+// ─────────────────────────────────────────────────────────────────────────────
+exports.filterOptions = async (req, res) => {
+  try {
+    const level = levelOf(req);
+    const scope = level < 2 ? 'WHERE dj.submitted_by = ?' : '';
+    const params = level < 2 ? [req.user.id] : [];
+    const [rows] = await db.query(
+      `SELECT DISTINCT dj.project_id, p.title AS project_title,
+              dj.project_service_id, s.name AS service_name,
+              p.client_id, l.business_name AS client_name,
+              dj.submitted_by, CONCAT(u.first_name, ' ', u.last_name) AS submitted_by_name
+       FROM smm_daily_journal dj
+       LEFT JOIN projects p          ON p.id = dj.project_id
+       LEFT JOIN leads l             ON l.id = p.client_id
+       LEFT JOIN project_services ps ON ps.id = dj.project_service_id
+       LEFT JOIN services s          ON s.id = ps.service_id
+       LEFT JOIN users u             ON u.id = dj.submitted_by
+       ${scope}`,
+      params
+    );
+    const uniq = (list, key) => {
+      const m = new Map();
+      list.forEach(x => { if (x[key] && !m.has(x[key])) m.set(x[key], x); });
+      return [...m.values()];
+    };
+    const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+    return res.json({
+      projects: uniq(rows, 'project_id').map(r => ({ id: r.project_id, name: r.project_title || `Project #${r.project_id}` })).sort(byName),
+      services: uniq(rows, 'project_service_id').map(r => ({ id: r.project_service_id, project_id: r.project_id, name: r.service_name || 'Service' })).sort(byName),
+      clients: uniq(rows, 'client_id').map(r => ({ id: r.client_id, name: r.client_name || `Client #${r.client_id}` })).sort(byName),
+      members: level >= 2 ? uniq(rows, 'submitted_by').map(r => ({ id: r.submitted_by, name: r.submitted_by_name || `User #${r.submitted_by}` })).sort(byName) : [],
+    });
+  } catch (err) {
+    return sendError(res, err, 'filter-options');
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/daily-journal/:id
 // ─────────────────────────────────────────────────────────────────────────────
 exports.getOne = async (req, res) => {
   try {
-    const [rows] = await db.query(
-      `SELECT dj.*,
-              p.title AS project_title,
-              l.business_name AS client_name,
-              CONCAT(u.first_name, ' ', u.last_name) AS submitted_by_name
-       FROM smm_daily_journal dj
-       LEFT JOIN projects p ON p.id = dj.project_id
-       LEFT JOIN leads l ON l.id = p.client_id
-       LEFT JOIN users u ON u.id = dj.submitted_by
-       WHERE dj.id = ?`,
-      [req.params.id]
-    );
-
-    if (rows.length === 0) return res.status(404).json({ message: 'Entry not found' });
-
-    const entry = rows[0];
-    if (entry.work_categories && typeof entry.work_categories === 'string') {
-      entry.work_categories = JSON.parse(entry.work_categories);
+    const entry = await fetchEntry(req.params.id);
+    if (!entry) return res.status(404).json({ message: 'Entry not found' });
+    if (levelOf(req) < 2 && Number(entry.submitted_by) !== Number(req.user.id)) {
+      return res.status(403).json({ message: 'Access denied' });
     }
-    if (entry.activities_completed && typeof entry.activities_completed === 'string') {
-      entry.activities_completed = JSON.parse(entry.activities_completed);
-    }
-    if (entry.issues_delays && typeof entry.issues_delays === 'string') {
-      entry.issues_delays = JSON.parse(entry.issues_delays);
-    }
-    if (entry.tomorrow_priorities && typeof entry.tomorrow_priorities === 'string') {
-      entry.tomorrow_priorities = JSON.parse(entry.tomorrow_priorities);
-    }
-
-    return res.json(entry);
+    return res.json({ ...entry, ...rowRights(req, entry) });
   } catch (err) {
-    console.error('Daily journal getOne error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return sendError(res, err, 'getOne');
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POST /api/daily-journal — create new journal entry
+// POST /api/daily-journal — one entry per project ▸ service ▸ date ▸ user
 // ─────────────────────────────────────────────────────────────────────────────
 exports.create = async (req, res) => {
   try {
-    const {
-      project_id,
-      journal_date,
-      work_categories,
-      client_communication,
-      communication_summary,
-      issues_delays,
-      issues_details,
-      leads_opportunities,
-      tomorrow_priorities,
-      escalation_required,
-      escalation_details,
-      health_status,
-    } = req.body;
+    const { project_id, project_service_id } = req.body;
+    const today = todayIST();
+    const journalDate = toDateStr(req.body.journal_date) || today;
 
-    if (!project_id || !journal_date) {
-      return res.status(400).json({ message: 'Project and date are required' });
+    // Non-admins submit for today only (IST)
+    if (!req.user.is_admin && journalDate !== today) {
+      return res.status(400).json({ message: "Daily Update can only be submitted for today's date" });
     }
 
-    // Disallow past dates for daily journal entries (non-admins)
-    if (!req.user.is_admin) {
-      const [dateCheck] = await db.query('SELECT ? < CURDATE() AS is_past', [journal_date]);
-      if (dateCheck[0]?.is_past) {
-        return res.status(400).json({ message: 'Cannot submit a Daily Update for past dates.' });
-      }
-    }
+    await resolveEntryService(req.user, project_id, project_service_id);
+    const v = normaliseBody(req.body);
 
-    // Check project exists
-    const [project] = await db.query(
-      'SELECT id FROM projects WHERE id = ? AND deleted = 0',
-      [project_id]
+    const [dup] = await db.query(
+      'SELECT id FROM smm_daily_journal WHERE project_service_id = ? AND journal_date = ? AND submitted_by = ? LIMIT 1',
+      [project_service_id, journalDate, req.user.id]
     );
-    if (project.length === 0) {
-      return res.status(404).json({ message: 'Project not found' });
+    if (dup.length) {
+      return res.status(409).json({ message: 'You already submitted a Daily Update for this service today. Edit the existing entry instead.', existing_id: dup[0].id });
     }
 
     const [result] = await db.query(
       `INSERT INTO smm_daily_journal
-        (project_id, journal_date, submitted_by, work_categories,
+        (project_id, project_service_id, journal_date, submitted_by, work_categories,
          client_communication, communication_summary, issues_delays, issues_details,
          leads_opportunities, tomorrow_priorities,
          escalation_required, escalation_details, health_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        project_id,
-        journal_date,
-        req.user.id,
-        work_categories ? JSON.stringify(work_categories) : null,
-        client_communication || 'no',
-        communication_summary || null,
-        issues_delays ? JSON.stringify(issues_delays) : null,
-        issues_details || null,
-        leads_opportunities || null,
-        tomorrow_priorities ? JSON.stringify(tomorrow_priorities) : null,
-        escalation_required || 'no',
-        escalation_details || null,
-        health_status || 'on_track',
+        project_id, project_service_id, journalDate, req.user.id, v.work_categories,
+        v.client_communication, v.communication_summary, v.issues_delays, v.issues_details,
+        v.leads_opportunities, v.tomorrow_priorities,
+        v.escalation_required, v.escalation_details, v.health_status,
       ]
     );
 
-    const [entry] = await db.query('SELECT * FROM smm_daily_journal WHERE id = ?', [result.insertId]);
-    res.emitSocket('daily-journal:created', entry[0]);
-    return res.status(201).json(entry[0]);
+    const entry = await fetchEntry(result.insertId);
+    res.emitSocket('daily-journal:created', { id: result.insertId });
+    return res.status(201).json({ ...entry, ...rowRights(req, entry) });
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'A journal entry already exists for this project, date, and user. Please edit the existing entry.' });
+    if (err && err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'You already submitted a Daily Update for this service today. Edit the existing entry instead.' });
     }
-    console.error('Daily journal create error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return sendError(res, err, 'create');
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUT /api/daily-journal/:id — update journal entry
+// PUT /api/daily-journal/:id — owner on the same day, or admin
+// (project / service / date are fixed once submitted)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.update = async (req, res) => {
   try {
     const [existing] = await db.query('SELECT * FROM smm_daily_journal WHERE id = ?', [req.params.id]);
-    if (existing.length === 0) return res.status(404).json({ message: 'Entry not found' });
-
-    // Only the submitter or admin can edit
-    if (!req.user.is_admin && existing[0].submitted_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+    if (!existing.length) return res.status(404).json({ message: 'Entry not found' });
+    if (!rowRights(req, existing[0]).can_edit) {
+      return res.status(403).json({ message: 'You can only edit your own Daily Update on the same day' });
     }
 
-    const {
-      work_categories,
-      client_communication,
-      communication_summary,
-      issues_delays,
-      issues_details,
-      leads_opportunities,
-      tomorrow_priorities,
-      escalation_required,
-      escalation_details,
-      health_status,
-    } = req.body;
-
+    const v = normaliseBody(req.body);
     await db.query(
       `UPDATE smm_daily_journal SET
-        work_categories = ?,
-        client_communication = ?,
-        communication_summary = ?,
-        issues_delays = ?,
-        issues_details = ?,
-        leads_opportunities = ?,
-        tomorrow_priorities = ?,
-        escalation_required = ?,
-        escalation_details = ?,
+        work_categories = ?, client_communication = ?, communication_summary = ?,
+        issues_delays = ?, issues_details = ?, leads_opportunities = ?,
+        tomorrow_priorities = ?, escalation_required = ?, escalation_details = ?,
         health_status = ?
        WHERE id = ?`,
       [
-        work_categories ? JSON.stringify(work_categories) : null,
-        client_communication || 'no',
-        communication_summary || null,
-        issues_delays ? JSON.stringify(issues_delays) : null,
-        issues_details || null,
-        leads_opportunities || null,
-        tomorrow_priorities ? JSON.stringify(tomorrow_priorities) : null,
-        escalation_required || 'no',
-        escalation_details || null,
-        health_status || 'on_track',
-        req.params.id,
+        v.work_categories, v.client_communication, v.communication_summary,
+        v.issues_delays, v.issues_details, v.leads_opportunities,
+        v.tomorrow_priorities, v.escalation_required, v.escalation_details,
+        v.health_status, req.params.id,
       ]
     );
 
-    const [updated] = await db.query('SELECT * FROM smm_daily_journal WHERE id = ?', [req.params.id]);
-    res.emitSocket('daily-journal:updated', updated[0]);
-    return res.json(updated[0]);
+    const entry = await fetchEntry(req.params.id);
+    res.emitSocket('daily-journal:updated', { id: Number(req.params.id) });
+    return res.json({ ...entry, ...rowRights(req, entry) });
   } catch (err) {
-    console.error('Daily journal update error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return sendError(res, err, 'update');
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DELETE /api/daily-journal/:id — delete journal entry
+// DELETE /api/daily-journal/:id — owner on the same day, or admin
 // ─────────────────────────────────────────────────────────────────────────────
 exports.remove = async (req, res) => {
   try {
     const [existing] = await db.query('SELECT * FROM smm_daily_journal WHERE id = ?', [req.params.id]);
-    if (existing.length === 0) return res.status(404).json({ message: 'Entry not found' });
-
-    if (!req.user.is_admin && existing[0].submitted_by !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+    if (!existing.length) return res.status(404).json({ message: 'Entry not found' });
+    if (!rowRights(req, existing[0]).can_delete) {
+      return res.status(403).json({ message: 'You can only delete your own Daily Update on the same day' });
     }
 
     await db.query('DELETE FROM smm_daily_journal WHERE id = ?', [req.params.id]);
-    res.emitSocket('daily-journal:deleted', { id: parseInt(req.params.id) });
+    res.emitSocket('daily-journal:deleted', { id: Number(req.params.id) });
     return res.json({ message: 'Entry deleted' });
   } catch (err) {
-    console.error('Daily journal delete error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return sendError(res, err, 'delete');
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/daily-journal/report/productivity
 // Daily PRODUCTIVITY report for SM Ops members: per-member, per selected date
-// (or date range) — productive time (task+ticket+meeting+shoot logs), expected
-// target hours, whether their daily update was submitted, health, escalations.
+// (or date range) — tasks / tickets / shoots worked + daily update summary.
 // Admin / SMM lead (socialAccessLevel >= 2) only.
-// Query: date_from, date_to (default: today), project_id (optional)
+// Query: date_from, date_to (default: today IST)
 // ─────────────────────────────────────────────────────────────────────────────
 exports.productivityReport = async (req, res) => {
   try {
-    // Only admin or SMM lead (full access) can see the team productivity report
     if (!req.user.is_admin && (!req.socialAccessLevel || req.socialAccessLevel < 2)) {
       return res.status(403).json({ message: 'Only admin or SMM leads can view the team productivity report' });
     }
 
-    const today = new Date().toISOString().split('T')[0];
-    const dateFrom = req.query.date_from || today;
-    const dateTo = req.query.date_to || dateFrom;
+    const today = todayIST();
+    const dateFrom = toDateStr(req.query.date_from) || today;
+    const dateTo = toDateStr(req.query.date_to) || dateFrom;
 
     // ── Resolve SM Ops members: active non-admin users whose role grants any
     // creative_hub submenu access (role_submenu_permissions) OR legacy
@@ -347,49 +475,44 @@ exports.productivityReport = async (req, res) => {
       return res.json({ date_from: dateFrom, date_to: dateTo, journals: [], members: [], summary: emptyReportSummary() });
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // SECTION A — Daily Update summary (what the update-users submitted)
-    // ═══════════════════════════════════════════════════════════════════════
+    // ═══ SECTION A — Daily Update summary ═══
     let journals = [];
     try {
       const [jrows] = await db.query(
-        `SELECT dj.id, dj.project_id, dj.journal_date, dj.submitted_by,
+        `SELECT dj.id, dj.project_id, dj.project_service_id, dj.journal_date, dj.submitted_by,
                 dj.work_categories, dj.client_communication, dj.communication_summary,
                 dj.issues_delays, dj.issues_details, dj.leads_opportunities,
                 dj.tomorrow_priorities, dj.escalation_required, dj.escalation_details,
                 dj.health_status,
                 p.title AS project_title, l.business_name AS client_name,
+                s.name AS service_name,
                 CONCAT(u.first_name, ' ', u.last_name) AS submitted_by_name
          FROM smm_daily_journal dj
-         LEFT JOIN projects p ON p.id = dj.project_id
-         LEFT JOIN leads l ON l.id = p.client_id
-         LEFT JOIN users u ON u.id = dj.submitted_by
+         LEFT JOIN projects p          ON p.id = dj.project_id
+         LEFT JOIN leads l             ON l.id = p.client_id
+         LEFT JOIN project_services ps ON ps.id = dj.project_service_id
+         LEFT JOIN services s          ON s.id = ps.service_id
+         LEFT JOIN users u             ON u.id = dj.submitted_by
          WHERE dj.journal_date BETWEEN ? AND ?
          ORDER BY dj.journal_date DESC, dj.submitted_at DESC`,
         [dateFrom, dateTo]
       );
-      const parseJson = (v) => { if (!v) return null; try { return typeof v === 'string' ? JSON.parse(v) : v; } catch { return null; } };
       journals = jrows.map(j => ({
         ...j,
-        work_categories: parseJson(j.work_categories),
-        issues_delays: parseJson(j.issues_delays),
-        tomorrow_priorities: parseJson(j.tomorrow_priorities),
+        journal_date: toDateStr(j.journal_date) || j.journal_date,
+        work_categories: parseJson(j.work_categories, null),
+        issues_delays: parseJson(j.issues_delays, []),
+        tomorrow_priorities: parseJson(j.tomorrow_priorities, []),
       }));
     } catch (e) { console.warn('Daily report journals warning:', e.message); }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // SECTION B — Team activity: tasks / tickets / shoots each member WORKED ON
-    // that date (defined as "logged time on that day").
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // Member profiles
+    // ═══ SECTION B — Team activity (logged time that day) ═══
     const [users] = await db.query(
       `SELECT id, CONCAT(first_name, ' ', last_name) AS name, department, designation, avatar_url
        FROM users WHERE id IN (?) ORDER BY first_name`,
       [memberIds]
     );
 
-    // Tasks worked (distinct tasks a member logged time on in range)
     const tasksByUser = {};
     try {
       const [rows] = await db.query(
@@ -403,7 +526,6 @@ exports.productivityReport = async (req, res) => {
       rows.forEach(r => { (tasksByUser[r.user_id] = tasksByUser[r.user_id] || []).push({ id: r.id, title: r.title, code: r.task_id_code, status: r.status }); });
     } catch (e) { console.warn('Daily report tasks warning:', e.message); }
 
-    // Tickets worked (ticket_time_logs uses log_date + minutes)
     const ticketsByUser = {};
     try {
       const [rows] = await db.query(
@@ -417,7 +539,6 @@ exports.productivityReport = async (req, res) => {
       rows.forEach(r => { (ticketsByUser[r.user_id] = ticketsByUser[r.user_id] || []).push({ id: r.id, title: r.title, status: r.status }); });
     } catch (e) { console.warn('Daily report tickets warning:', e.message); }
 
-    // Shoots worked (shoot_time_logs = punches)
     const shootsByUser = {};
     try {
       const [rows] = await db.query(
@@ -431,10 +552,8 @@ exports.productivityReport = async (req, res) => {
       rows.forEach(r => { (shootsByUser[r.user_id] = shootsByUser[r.user_id] || []).push({ id: r.id, code: r.shoot_id_code, title: r.project_campaign_name, status: r.status }); });
     } catch (e) { console.warn('Daily report shoots warning:', e.message); }
 
-    // Did each member submit a journal in the range?
     const submittedSet = new Set(journals.map(j => j.submitted_by));
 
-    // Build member rows — only members who have activity OR submitted an update
     const members = [];
     for (const u of users) {
       const tasks = tasksByUser[u.id] || [];
@@ -448,15 +567,12 @@ exports.productivityReport = async (req, res) => {
         designation: u.designation,
         avatar_url: u.avatar_url,
         journal_submitted: submitted,
-        tasks,
-        tickets,
-        shoots,
+        tasks, tickets, shoots,
         task_count: tasks.length,
         ticket_count: tickets.length,
         shoot_count: shoots.length,
       });
     }
-    // Most active first
     members.sort((a, b) => (b.task_count + b.ticket_count + b.shoot_count) - (a.task_count + a.ticket_count + a.shoot_count));
 
     const summary = {
