@@ -6,7 +6,7 @@ const dailyUpdate = require('../helpers/dailyUpdate');
 
 /**
  * Daily Update services still pending today (IST) for a user.
- * Rule: users with Daily Update access (Own or All) must submit one update for
+ * Rule: users with Daily Update access = Own must submit one update for
  * each active Project ▸ Service they are a member of. Admins and users with no
  * service membership have nothing pending. Never throws (returns []).
  */

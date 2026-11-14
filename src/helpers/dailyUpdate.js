@@ -5,7 +5,7 @@
  *   A user must submit one Daily Update per day for EACH active Project ▸ Service
  *   they are a member of (project_service_members), when:
  *     - they are an active, non-admin user
- *     - they have Daily Update access (Own or All) in SM Ops
+ *     - they have Daily Update access = Own in SM Ops (All = leads, exempt)
  *     - the project is active (not deleted) and the service is active
  *   Users with access but no service membership have nothing required.
  *
@@ -150,7 +150,8 @@ async function requiredServices(userIds = null) {
   }
   if (!rows.length) return [];
   const levels = await accessLevels(rows.map(r => r.user_id));
-  return rows.filter(r => (levels.get(Number(r.user_id)) || 0) >= 1);
+  // Only "Own" (1) must submit — "All" (2) are leads/reviewers and are exempt
+  return rows.filter(r => (levels.get(Number(r.user_id)) || 0) === 1);
 }
 
 /** Set of "userId:projectServiceId" submitted on a date. */
