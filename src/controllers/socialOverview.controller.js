@@ -283,6 +283,7 @@ exports.getBoard = async (req, res) => {
 
     const [svcRows] = await db.query(
       `SELECT ps.id AS project_service_id, ps.project_id, ps.status AS service_status,
+              ps.start_date AS service_start, ps.end_date AS service_end,
               p.title AS project_title, COALESCE(p.project_type, 'external') AS project_type,
               l.business_name AS client_name, s.name AS service_name
        FROM project_services ps
@@ -454,8 +455,9 @@ exports.getBoard = async (req, res) => {
        FROM ad_campaigns ac
        LEFT JOIN ad_campaign_reports acr ON acr.campaign_id = ac.id
        WHERE ac.deleted = 0 AND ac.project_id IN (?) AND ac.status <> 'draft'
-         AND ((ac.start_date BETWEEN ? AND ?) OR ac.status IN ('pending_approval','approved','active','paused','report_pending'))`,
-      [projectIds, from, to]
+         AND ac.start_date IS NOT NULL AND ac.start_date <= ?
+         AND COALESCE(ac.end_date, ac.start_date) >= ?`,
+      [projectIds, to, from]
     ))[0]);
     campaigns.forEach(ac => {
       // Campaigns carry no service id: they belong to the project's SMM service
@@ -496,7 +498,8 @@ exports.getBoard = async (req, res) => {
       row.daily.critical = Number(j.critical) || 0;
       row.daily.attention = Number(j.attention) || 0;
     });
-    {
+    // "Submitted today" only makes sense for the current month
+    if (today >= from && today <= to) {
       const required = await safe('daily required', () => requiredServices(null));
       const done = await submittedKeys(today, null);
       required.forEach(r => {
@@ -517,7 +520,20 @@ exports.getBoard = async (req, res) => {
     const summary = { projects: 0, on_track: 0, attention: 0, at_risk: 0, overdue: 0, pending_approvals: 0, daily_pending: 0, content_delivery_pct: null };
     let planned = 0, delivered = 0;
 
-    const rows = [...rowsById.values()].map(row => {
+    // Month filter: keep a service only if it runs in the month or has activity in it
+    const inMonth = (row) => {
+      const sStart = toDateStr(row.service_start);
+      const sEnd = toDateStr(row.service_end);
+      const runs = (!sStart || sStart <= to) && (!sEnd || sEnd >= from);
+      const activity = row.content.total + row.shoots.total + row.ads.slots + row.ads.campaigns + row.daily.entries > 0;
+      return runs || activity;
+    };
+    const keep = new Set([...rowsById.values()].filter(inMonth).map(r => r.key));
+    for (let i = attention.length - 1; i >= 0; i--) {
+      if (!keep.has(attention[i].project_service_id)) attention.splice(i, 1);
+    }
+
+    const rows = [...rowsById.values()].filter(r => keep.has(r.key)).map(row => {
       const c = row.content;
       const delivered_n = c.reels.delivered + c.posts.delivered;
       const planned_n = c.reels.planned + c.posts.planned;
