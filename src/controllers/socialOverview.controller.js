@@ -199,8 +199,11 @@ exports.getDeliverables = async (req, res) => {
          pas.ads_post_ad_report
        FROM project_allocation_sheets pas
        JOIN projects pr ON pr.id = pas.project_id
+       LEFT JOIN project_services pps ON pps.id = pas.project_service_id
+       LEFT JOIN services psv ON psv.id = pps.service_id
        LEFT JOIN leads l ON l.id = pr.client_id
        WHERE ${where}
+         AND (pas.project_service_id IS NULL OR LOWER(psv.name) IN ('smm', 'social media marketing'))
        ORDER BY pr.title ASC`,
       params
     );
