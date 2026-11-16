@@ -42,8 +42,8 @@ exports.createExtension = async (req, res) => {
   const rawReason = (req.body.reason || '').trim();
 
   // ── Delay type + options ──
-  const CLIENT_OPTIONS = ['Shoot Approval', 'Content Approval', 'Calendar Approval', 'Creatives Completion'];
-  const TEAM_OPTIONS = ['Design Delay', 'Editing Delay', 'Source Delay', 'Content Input Delay', 'Internal Approval Delay'];
+  const CLIENT_OPTIONS = ['Client Rework', 'Shoot Approval', 'Content Approval', 'Calendar Approval', 'Creatives Completion'];
+  const TEAM_OPTIONS = ['Team Rework', 'Design Delay', 'Editing Delay', 'Source Delay', 'Content Input Delay', 'Internal Approval Delay'];
   // Client / Team delay types need the "Delay Request" permission (Settings → Roles → Tasks).
   // Without it the request is treated as General (reason with 30+ letters).
   const canUseDelayTypes = req.user.is_admin || ((await getSubmenuAccess(req.user.id, 'tasks', 'delay_request')) >= 1);

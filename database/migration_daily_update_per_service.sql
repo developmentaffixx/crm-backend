@@ -18,6 +18,11 @@ ALTER TABLE smm_daily_journal
 ALTER TABLE smm_daily_journal
   ADD UNIQUE INDEX IF NOT EXISTS uq_journal_entry_svc (project_id, project_service_id, journal_date, submitted_by);
 
--- Old key (project, date, user) blocks a second service on the same project
+-- Old key (project, date, user) blocks a second service on the same project.
+-- It exists under different names on different servers — drop whichever you have
+-- (check with: SHOW INDEX FROM smm_daily_journal;)
 ALTER TABLE smm_daily_journal
   DROP INDEX IF EXISTS uq_journal_entry;
+
+ALTER TABLE smm_daily_journal
+  DROP INDEX IF EXISTS uq_journal_project_date_user;

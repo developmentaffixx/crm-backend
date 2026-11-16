@@ -241,6 +241,25 @@ async function ensureDailyJournalSchema() {
   for (const sql of steps) {
     try { await db.query(sql); } catch (e) { console.error('⚠️  Daily Update schema (non-fatal):', e.message); }
   }
+
+  // Drop ANY other unique key on exactly (project_id, journal_date, submitted_by),
+  // whatever its name (e.g. uq_journal_project_date_user) — it blocks a 2nd service of the same project.
+  try {
+    const [idx] = await db.query(
+      `SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS cols
+       FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'smm_daily_journal' AND NON_UNIQUE = 0
+       GROUP BY INDEX_NAME`
+    );
+    const hasNewKey = idx.some(i => i.INDEX_NAME === 'uq_journal_entry_svc');
+    for (const i of idx) {
+      if (hasNewKey && i.INDEX_NAME !== 'PRIMARY' && i.cols === 'project_id,journal_date,submitted_by') {
+        await db.query(`ALTER TABLE smm_daily_journal DROP INDEX \`${i.INDEX_NAME}\``);
+        console.log(`✅  Daily Update: dropped old unique key ${i.INDEX_NAME}`);
+      }
+    }
+  } catch (e) { console.error('⚠️  Daily Update old unique key cleanup (non-fatal):', e.message); }
+
   console.log('✅  Daily Update schema checked');
 }
 
