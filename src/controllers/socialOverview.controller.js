@@ -240,6 +240,31 @@ const normStage = (s) => (STAGES.includes(s) ? s : 'open');
 const DONE_STAGES = ['approved', 'completed'];
 const SEVERITY_RANK = { high: 0, medium: 1, low: 2 };
 
+// Content Writing form fields per content type (mirrors NewContentWriteModal / contentWorkflow rules)
+const isBlank = (v) => v === null || v === undefined || String(v).trim() === '';
+function contentFieldStatus(po) {
+  let type = po.content_type === 'reel_video_script' ? 'reel' : (po.content_type || po.format);
+  if (!['reel', 'carousel', 'static_post'].includes(type)) type = 'static_post';
+  const out = [];
+  const add = (label, filled, required) => out.push({ label, filled: !!filled, required });
+
+  if (type === 'reel') {
+    add('Hook', !isBlank(po.hook_opening_line), true);
+    add('Value', !isBlank(po.core_message), true);
+    add('Call to action', !isBlank(po.call_to_action), false);
+    add('Caption', !isBlank(po.caption_content), false);
+  } else if (type === 'carousel') {
+    let slides = [];
+    try { const a = JSON.parse(po.caption_content || '[]'); if (Array.isArray(a)) slides = a.map(s => String(s ?? '').trim()); } catch { /* plain text */ }
+    const count = Math.max(2, slides.length);
+    for (let i = 0; i < count; i++) add(`Slide ${i + 1}`, !!slides[i], i < 2);
+  } else {
+    add('Post content & caption', !isBlank(po.caption_content), true);
+  }
+  add('Creative suggestion', !isBlank(po.creative_suggestion), false);
+  add('Reference links', !isBlank(po.reference_links), false);
+  return out;
+}
 function monthRange(monthYear) {
   const m = /^(\d{4})-(\d{2})$/.exec(monthYear || '');
   const now = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
@@ -312,7 +337,7 @@ exports.getBoard = async (req, res) => {
         key: Number(r.project_service_id),
         is_personal_branding: isPB(r.service_name),
         commitment: null,
-        content: { total: 0, stages: emptyStages(), overdue: 0, reels: { planned: 0, delivered: 0 }, posts: { planned: 0, delivered: 0 } },
+        content: { total: 0, stages: emptyStages(), overdue: 0, incomplete: 0, slots: [], reels: { planned: 0, delivered: 0 }, posts: { planned: 0, delivered: 0 } },
         shoots: { total: 0, stages: emptyStages(), overdue: 0, footage_missing: 0 },
         ads: { slots: 0, stages: emptyStages(), campaigns: 0, active: 0, pending_approval: 0, report_pending: 0, completed: 0, budget: 0, spent: 0 },
         daily: { entries: 0, days: 0, escalations: 0, critical: 0, attention: 0, required_today: 0, submitted_today: 0, pending_today: [] },
@@ -363,13 +388,20 @@ exports.getBoard = async (req, res) => {
     const posts = await safe('posts', async () => (await db.query(
       `SELECT cp.id, cp.post_no, cp.format, cp.topic, cp.posting_date, cp.slot_status,
               p.project_id, sc.project_service_id,
-              CONCAT(u.first_name, ' ', u.last_name) AS assignee
+              CONCAT(u.first_name, ' ', u.last_name) AS assignee,
+              cw.id AS content_id, cw.content_type, cw.hook_opening_line, cw.core_message,
+              cw.call_to_action, cw.caption_content, cw.creative_suggestion, cw.reference_links
        FROM content_calendar_posts cp
        JOIN content_calendar_plans p ON p.id = cp.plan_id AND p.deleted = 0
        LEFT JOIN service_cycles sc ON sc.id = p.cycle_id
        LEFT JOIN users u ON u.id = cp.assigned_to
+       LEFT JOIN content_write_requests cw ON cw.id = (
+         SELECT w.id FROM content_write_requests w
+         WHERE w.calendar_slot_id = cp.id AND w.deleted = 0
+         ORDER BY w.id DESC LIMIT 1)
        WHERE cp.posting_date BETWEEN ? AND ? AND p.project_id IN (?)
-         AND (cp.status IS NULL OR cp.status <> 'cancelled')`,
+         AND (cp.status IS NULL OR cp.status <> 'cancelled')
+       ORDER BY cp.posting_date ASC, cp.id ASC`,
       [from, to, projectIds]
     ))[0]);
     posts.forEach(po => {
@@ -384,14 +416,33 @@ exports.getBoard = async (req, res) => {
       if (DONE_STAGES.includes(st)) bucket.delivered += 1;
       const pd = toDateStr(po.posting_date);
       const label = `${po.post_no || 'Post'} · ${String(po.topic || '').slice(0, 70) || po.format}`;
+
+      // Which Content Writing form fields are still empty for this slot
+      const fields = contentFieldStatus(po);
+      const missing = fields.filter(f => !f.filled);
+      const missingRequired = missing.filter(f => f.required);
+      const slot = {
+        id: po.id, content_id: po.content_id || null,
+        post_no: po.post_no || null, topic: po.topic || null,
+        format: po.content_type || po.format, posting_date: pd, stage: st,
+        assignee: po.assignee || null,
+        filled: fields.length - missing.length, total: fields.length,
+        missing: missing.map(f => ({ label: f.label, required: f.required })),
+        missing_required: missingRequired.length,
+      };
+      c.slots.push(slot);
+      if (st !== 'completed' && missing.length) c.incomplete += 1;
+      const missingText = missingRequired.length ? ` · Missing: ${missingRequired.map(f => f.label).join(', ')}` : '';
+
       if (pd && pd < today && !DONE_STAGES.includes(st)) {
         c.overdue += 1;
-        addAttn(row, 'content_overdue', 'high', label, `Posting date passed · ${st.replace('_', ' ')}${po.assignee ? ` · ${po.assignee}` : ''}`, pd, '/social/write-content');
+        addAttn(row, 'content_overdue', 'high', label, `Posting date passed · ${st.replace('_', ' ')}${po.assignee ? ` · ${po.assignee}` : ''}${missingText}`, pd, '/social/write-content');
       } else if (st === 'rejected') {
-        addAttn(row, 'content_rework', 'medium', label, `Sent back for rework${po.assignee ? ` · ${po.assignee}` : ''}`, pd, '/social/write-content');
+        addAttn(row, 'content_rework', 'medium', label, `Sent back for rework${po.assignee ? ` · ${po.assignee}` : ''}${missingText}`, pd, '/social/write-content');
+      } else if (missingRequired.length && ['open', 'assigned'].includes(st)) {
+        addAttn(row, 'content_incomplete', 'medium', label, `${st === 'open' ? 'Not assigned' : 'Not submitted'}${po.assignee ? ` · ${po.assignee}` : ''}${missingText}`, pd, '/social/write-content');
       }
     });
-
     // ── 4. Shoots ───────────────────────────────────────────────────────────
     const shootSlots = await safe('shoot slots', async () => (await db.query(
       `SELECT cs.id, cs.shoot_date, cs.slot_status, p.project_id, sc.project_service_id

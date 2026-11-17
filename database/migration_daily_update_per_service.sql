@@ -23,6 +23,6 @@ ALTER TABLE smm_daily_journal
 -- (check with: SHOW INDEX FROM smm_daily_journal;)
 ALTER TABLE smm_daily_journal
   DROP INDEX IF EXISTS uq_journal_entry;
-
+qqwaqzs
 ALTER TABLE smm_daily_journal
   DROP INDEX IF EXISTS uq_journal_project_date_user;
