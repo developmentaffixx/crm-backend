@@ -21,6 +21,15 @@ router.get('/:id', param('id').isInt(), c.getOne);
 // GET  /api/content-write/:id/history     — approval history
 router.get('/:id/history', param('id').isInt(), c.getHistory);
 
+// POST /api/content-write/library         — new stored content (no slot / project / cycle, not on the calendar)
+router.post('/library', c.createLibrary);
+
+// POST /api/content-write/:id/move        — copy stored content into an empty slot (stored copy is kept)
+router.post('/:id/move', param('id').isInt(), c.moveToSlot);
+
+// POST /api/content-write/:id/discard-empty — drop a stored draft that was never written
+router.post('/:id/discard-empty', param('id').isInt(), c.discardEmpty);
+
 // POST /api/content-write                 — legacy fill (requires calendar_slot_id; no direct creation)
 router.post('/', c.create);
 

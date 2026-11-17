@@ -518,9 +518,13 @@ async function ensureContentWorkflowSchema() {
     ADD COLUMN IF NOT EXISTS completed_by       INT UNSIGNED DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS completed_at       DATETIME DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS draft_saved_at     DATETIME DEFAULT NULL`, 'columns');
+  // Stored (library) content: not on any calendar slot, project or cycle
+  await run(`ALTER TABLE content_write_requests
+    ADD COLUMN IF NOT EXISTS is_library TINYINT(1) NOT NULL DEFAULT 0`, 'library column');
   await run(`ALTER TABLE content_write_requests
     ADD INDEX IF NOT EXISTS idx_cwr_slot (calendar_slot_id),
-    ADD INDEX IF NOT EXISTS idx_cwr_cycle (cycle_id)`, 'indexes');
+    ADD INDEX IF NOT EXISTS idx_cwr_cycle (cycle_id),
+    ADD INDEX IF NOT EXISTS idx_cwr_library (is_library)`, 'indexes');
 
   // 4. History actions
   try {

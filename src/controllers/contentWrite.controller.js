@@ -36,6 +36,7 @@ function scopeClause(req) {
 }
 
 async function canView(req, row, slot) {
+  if (row.is_library) return true; // stored content is visible to everyone with Contents access
   if (wf.canSeeAllContent(req)) return true;
   const uid = Number(req.user.id);
   return Number(row.created_by) === uid || Number(slot?.assigned_to) === uid;
@@ -100,7 +101,11 @@ exports.list = async (req, res) => {
     const limitNum = Math.min(200, Math.max(1, toInt(req.query.limit) || 20));
     const parts = await selectParts();
 
+    // Stored (library) content is listed on its own tab and kept out of every other count
+    const hasLibrary = await hasColumn('is_library');
+    const libraryMode = hasLibrary && ['1', 'true'].includes(String(req.query.library));
     let where = 'cwr.deleted = 0';
+    if (hasLibrary) where += libraryMode ? ' AND cwr.is_library = 1' : ' AND cwr.is_library = 0';
     const params = [];
     const term = typeof search === 'string' ? search.trim() : '';
     if (term) {
@@ -116,9 +121,11 @@ exports.list = async (req, res) => {
     if (projectId) { where += ' AND cwr.project_id = ?'; params.push(projectId); }
     if (serviceId) { where += ` AND ${parts.serviceExpr} = ?`; params.push(serviceId); }
     if (cycleId) { where += ` AND ${parts.cycleExpr} = ?`; params.push(cycleId); }
-    const scope = scopeClause(req);
-    where += scope.sql;
-    params.push(...scope.params);
+    if (!libraryMode) {
+      const scope = scopeClause(req);
+      where += scope.sql;
+      params.push(...scope.params);
+    }
 
     let listWhere = where;
     const listParams = [...params];
@@ -146,6 +153,12 @@ exports.list = async (req, res) => {
       summary[key] = (summary[key] || 0) + (Number(r.count) || 0);
       summary.total += Number(r.count) || 0;
     });
+
+    summary.library = 0;
+    if (hasLibrary) {
+      const [[lib]] = await db.query('SELECT COUNT(*) AS n FROM content_write_requests WHERE deleted = 0 AND is_library = 1');
+      summary.library = Number(lib.n) || 0;
+    }
 
     return res.json({ requests: rows, summary, total: Number(total) || 0, page: pageNum, limit: limitNum });
   } catch (err) {
@@ -287,6 +300,7 @@ exports.saveDraft = async (req, res) => {
 exports.submit = async (req, res) => {
   try {
     const { row, isWriter } = await loadForWrite(req, req.params.id);
+    if (row.is_library) return res.status(400).json({ message: 'Stored content has to be moved to a calendar slot before it can be submitted' });
     if (!isWriter) return res.status(403).json({ message: 'Only the assigned writer can submit this content' });
     if (row.status === 'smm_reviewed') {
       return res.status(400).json({ message: 'SMM has already reviewed this. Ask a PC/PM approver to send it back if it needs changes.' });
@@ -310,6 +324,12 @@ exports.update = async (req, res) => {
     const { row, isWriter } = await loadForWrite(req, req.params.id);
     if (row.status === 'completed' && !req.user.is_admin) {
       return res.status(400).json({ message: 'Completed content can no longer be edited' });
+    }
+    if (row.is_library) {
+      // Stored content: save only, never enters the approval workflow
+      if (!isWriter) return res.status(403).json({ message: 'Only the writer can edit this stored content' });
+      await saveFields(row.id, req.body);
+      return res.json(await loadDetail(row.id));
     }
     if (isWriter && !wf.canPcpmApprove(req)) return exports.submit(req, res);
     if (!isWriter && !wf.canPcpmApprove(req)) {
@@ -343,6 +363,93 @@ exports.create = async (req, res) => {
     const row = await wf.ensureRowForSlot(slotId, req.user.id);
     req.params.id = row.id;
     return exports.submit(req, res);
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+// ─── STORED (LIBRARY) CONTENT ────────────────────────────────────────────────
+/**
+ * POST /api/content-write/library — start a stored content draft.
+ * Not linked to a calendar slot, project or cycle, so it never shows on the calendar.
+ */
+exports.createLibrary = async (req, res) => {
+  try {
+    if (!(await hasColumn('is_library'))) {
+      return res.status(500).json({ message: 'Stored content is not set up yet. Restart the server to apply the database update.' });
+    }
+    const type = typeof req.body.content_type === 'string' && req.body.content_type ? req.body.content_type : 'static_post';
+    const { insertId } = await wf.insertWithCode(db, null, (code) => [
+      `INSERT INTO content_write_requests (content_id_code, content_type, status, created_by, is_library)
+       VALUES (?, ?, 'draft', ?, 1)`,
+      [code, type, req.user.id],
+    ]);
+    await saveFields(insertId, req.body);
+    return res.status(201).json(await loadDetail(insertId));
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+/**
+ * DELETE-style cleanup for a stored draft that was opened and never written.
+ * POST /api/content-write/:id/discard-empty — creator or admin, library rows with no text only.
+ */
+exports.discardEmpty = async (req, res) => {
+  try {
+    const row = await wf.getRow(db, req.params.id);
+    if (!row) return res.json({ discarded: false });
+    if (!row.is_library) return res.status(400).json({ message: 'Only stored content can be discarded here' });
+    if (!req.user.is_admin && Number(row.created_by) !== Number(req.user.id)) {
+      return res.status(403).json({ message: 'Only the writer can discard this content' });
+    }
+    if (wf.hasAnyContent(row)) return res.json({ discarded: false });
+    await db.query('UPDATE content_write_requests SET deleted = 1 WHERE id = ?', [row.id]);
+    return res.json({ discarded: true });
+  } catch (err) {
+    return send(res, err);
+  }
+};
+
+/**
+ * POST /api/content-write/:id/move  { slot_id }
+ * Copies stored content into an empty calendar post slot assigned to the caller
+ * (admins: any assigned slot). The stored copy is left untouched.
+ * Returns the slot's content row.
+ */
+exports.moveToSlot = async (req, res) => {
+  try {
+    const row = await wf.getRow(db, req.params.id);
+    if (!row) return res.status(404).json({ message: 'Content not found' });
+    if (!row.is_library) return res.status(400).json({ message: 'Only stored content can be moved to a slot' });
+    if (!wf.hasAnyContent(row)) return res.status(400).json({ message: 'Write something in this content before moving it to a slot' });
+
+    const slotId = toInt(req.body.slot_id);
+    if (!slotId) return res.status(400).json({ message: 'Pick a calendar slot' });
+    const [s] = await db.query('SELECT * FROM content_calendar_posts WHERE id = ?', [slotId]);
+    if (!s.length) return res.status(404).json({ message: 'Calendar post slot not found' });
+    const slot = s[0];
+    if (!slot.assigned_to) return res.status(400).json({ message: 'Assign this post slot on the Content Calendar first' });
+    if (!req.user.is_admin && Number(slot.assigned_to) !== Number(req.user.id)) {
+      return res.status(403).json({ message: 'You can only move content into slots assigned to you' });
+    }
+    if (slot.slot_status !== 'assigned') {
+      return res.status(400).json({ message: 'This slot already has submitted content. Pick a slot that is still empty.' });
+    }
+
+    const target = await wf.ensureRowForSlot(slotId, req.user.id);
+    if (target.status !== 'draft' || wf.hasAnyContent(target)) {
+      return res.status(400).json({ message: 'This slot already has content. Pick an empty slot.' });
+    }
+
+    // Copy everything except platform (the slot decides the platform)
+    const copy = {};
+    wf.CONTENT_FIELDS.filter(f => f !== 'platform').forEach(f => { copy[f] = row[f]; });
+    await saveFields(target.id, copy, { autosave: true });
+
+    const detail = await loadDetail(target.id);
+    res.emitSocket?.('content-calendar:updated', { item_type: 'post', item_id: slotId });
+    return res.json(detail);
   } catch (err) {
     return send(res, err);
   }
@@ -413,9 +520,16 @@ exports.remodify = async (req, res) => {
  */
 exports.remove = async (req, res) => {
   try {
-    if (!req.user.is_admin) return res.status(403).json({ message: 'Only an admin can delete content' });
     const row = await wf.getRow(db, req.params.id);
     if (!row) return res.status(404).json({ message: 'Content not found' });
+    if (row.is_library) {
+      if (!req.user.is_admin && Number(row.created_by) !== Number(req.user.id)) {
+        return res.status(403).json({ message: 'Only the writer or an admin can delete stored content' });
+      }
+      await db.query('UPDATE content_write_requests SET deleted = 1 WHERE id = ?', [row.id]);
+      return res.json({ message: 'Content deleted' });
+    }
+    if (!req.user.is_admin) return res.status(403).json({ message: 'Only an admin can delete content' });
     const slot = await wf.slotForRow(db, row);
 
     const conn = await db.getConnection();
