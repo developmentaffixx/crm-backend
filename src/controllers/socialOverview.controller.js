@@ -308,7 +308,11 @@ exports.getBoard = async (req, res) => {
 
     const [svcRows] = await db.query(
       `SELECT ps.id AS project_service_id, ps.project_id, ps.status AS service_status,
-              ps.start_date AS service_start, ps.end_date AS service_end,
+              COALESCE(ps.start_date,
+                       (SELECT MIN(sc0.start_date) FROM service_cycles sc0 WHERE sc0.project_service_id = ps.id),
+                       p.start_date) AS service_start,
+              COALESCE(ps.end_date,
+                       (SELECT MAX(sc1.end_date) FROM service_cycles sc1 WHERE sc1.project_service_id = ps.id)) AS service_end,
               p.title AS project_title, COALESCE(p.project_type, 'external') AS project_type,
               l.business_name AS client_name, s.name AS service_name
        FROM project_services ps
@@ -575,9 +579,14 @@ exports.getBoard = async (req, res) => {
     const inMonth = (row) => {
       const sStart = toDateStr(row.service_start);
       const sEnd = toDateStr(row.service_end);
-      const runs = (!sStart || sStart <= to) && (!sEnd || sEnd >= from);
+      // A service that has not started yet in this month never shows
+      if (sStart && sStart > to) return false;
+      const endedBefore = sEnd && sEnd < from;
       const activity = row.content.total + row.shoots.total + row.ads.slots + row.ads.campaigns + row.daily.entries > 0;
-      return runs || activity;
+      // Already ended: show only if it still had activity in the month
+      if (endedBefore) return activity;
+      // Running, or start date unknown: show it
+      return true;
     };
     const keep = new Set([...rowsById.values()].filter(inMonth).map(r => r.key));
     for (let i = attention.length - 1; i >= 0; i--) {
