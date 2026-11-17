@@ -306,7 +306,7 @@ exports.getBoard = async (req, res) => {
       params.push(uid, uid);
     }
 
-    const [svcRows] = await db.query(
+    let [svcRows] = await db.query(
       `SELECT ps.id AS project_service_id, ps.project_id, ps.status AS service_status,
               COALESCE(ps.start_date,
                        (SELECT MIN(sc0.start_date) FROM service_cycles sc0 WHERE sc0.project_service_id = ps.id),
@@ -331,6 +331,57 @@ exports.getBoard = async (req, res) => {
       attention: [], rows: [],
     };
     if (!svcRows.length) return res.json(empty);
+
+    // ── 1b. Cycle window: a service shows in a month only if one of its cycles
+    //        (start → end) overlaps it. Data then follows that cycle, not the calendar month.
+    const cycleRows = await (async () => {
+      try {
+        return (await db.query(
+          `SELECT id, project_service_id, title, status, start_date, end_date
+           FROM service_cycles
+           WHERE project_service_id IN (?) AND (status IS NULL OR status NOT IN ('cancelled','skipped'))
+           ORDER BY start_date ASC`,
+          [svcRows.map(r => Number(r.project_service_id))]
+        ))[0];
+      } catch (e) { console.warn('Social board cycles warning:', e.message); return []; }
+    })();
+    const cyclesBySvc = new Map();
+    cycleRows.forEach(c => {
+      const k = Number(c.project_service_id);
+      if (!cyclesBySvc.has(k)) cyclesBySvc.set(k, []);
+      cyclesBySvc.get(k).push({ ...c, start: toDateStr(c.start_date), end: toDateStr(c.end_date) });
+    });
+
+    svcRows = svcRows.map(r => {
+      const all = cyclesBySvc.get(Number(r.project_service_id)) || [];
+      if (!all.length) {
+        // No cycles recorded: fall back to the service's own dates and the calendar month
+        const sStart = toDateStr(r.service_start);
+        const sEnd = toDateStr(r.service_end);
+        const visible = !(sStart && sStart > to) && !(sEnd && sEnd < from);
+        return visible ? { ...r, cycles: [], cycle_ids: [], period: { from, to }, has_cycles: false } : null;
+      }
+      const hit = all.filter(c => c.start && c.start <= to && (!c.end || c.end >= from));
+      if (!hit.length) return null;
+      const pFrom = hit.map(c => c.start).sort()[0];
+      const pTo = hit.map(c => c.end || to).sort().slice(-1)[0];
+      return {
+        ...r,
+        cycles: hit.map(c => ({ id: c.id, title: c.title, status: c.status, start: c.start, end: c.end })),
+        cycle_ids: hit.map(c => Number(c.id)),
+        period: { from: pFrom, to: pTo },
+        has_cycles: true,
+      };
+    }).filter(Boolean);
+    if (!svcRows.length) return res.json(empty);
+
+    const gFrom = svcRows.map(r => r.period.from).sort()[0];
+    const gTo = svcRows.map(r => r.period.to).sort().slice(-1)[0];
+    // Does a dated item belong to a service's current cycle window?
+    const inPeriod = (row, cycleId, d) => {
+      if (cycleId) return row.cycle_ids.includes(Number(cycleId));
+      return !!d && d >= row.period.from && d <= row.period.to;
+    };
 
     const isPB = (name) => PB_NAMES.includes(String(name || '').toLowerCase());
     const rowsById = new Map();
@@ -391,7 +442,7 @@ exports.getBoard = async (req, res) => {
     // ── 3. Content (calendar post slots) ────────────────────────────────────
     const posts = await safe('posts', async () => (await db.query(
       `SELECT cp.id, cp.post_no, cp.format, cp.topic, cp.posting_date, cp.slot_status,
-              p.project_id, sc.project_service_id,
+              p.project_id, p.cycle_id, sc.project_service_id,
               CONCAT(u.first_name, ' ', u.last_name) AS assignee,
               cw.id AS content_id, cw.content_type, cw.hook_opening_line, cw.core_message,
               cw.call_to_action, cw.caption_content, cw.creative_suggestion, cw.reference_links
@@ -406,11 +457,11 @@ exports.getBoard = async (req, res) => {
        WHERE cp.posting_date BETWEEN ? AND ? AND p.project_id IN (?)
          AND (cp.status IS NULL OR cp.status <> 'cancelled')
        ORDER BY cp.posting_date ASC, cp.id ASC`,
-      [from, to, projectIds]
+      [gFrom, gTo, projectIds]
     ))[0]);
     posts.forEach(po => {
       const row = rowFor(po.project_id, po.project_service_id);
-      if (!row) return;
+      if (!row || !inPeriod(row, po.cycle_id, toDateStr(po.posting_date))) return;
       const st = normStage(po.slot_status);
       const c = row.content;
       c.total += 1; c.stages[st] += 1;
@@ -449,30 +500,30 @@ exports.getBoard = async (req, res) => {
     });
     // ── 4. Shoots ───────────────────────────────────────────────────────────
     const shootSlots = await safe('shoot slots', async () => (await db.query(
-      `SELECT cs.id, cs.shoot_date, cs.slot_status, p.project_id, sc.project_service_id
+      `SELECT cs.id, cs.shoot_date, cs.slot_status, p.project_id, p.cycle_id, sc.project_service_id
        FROM content_calendar_shoots cs
        JOIN content_calendar_plans p ON p.id = cs.plan_id AND p.deleted = 0
        LEFT JOIN service_cycles sc ON sc.id = p.cycle_id
        WHERE cs.shoot_date BETWEEN ? AND ? AND p.project_id IN (?)
          AND (cs.status IS NULL OR cs.status <> 'cancelled')`,
-      [from, to, projectIds]
+      [gFrom, gTo, projectIds]
     ))[0]);
     shootSlots.forEach(sl => {
       const row = rowFor(sl.project_id, sl.project_service_id);
-      if (!row) return;
+      if (!row || !inPeriod(row, sl.cycle_id, toDateStr(sl.shoot_date))) return;
       const st = normStage(sl.slot_status);
       row.shoots.total += 1; row.shoots.stages[st] += 1;
     });
 
     const shootRows = await safe('shoots', async () => (await db.query(
-      `SELECT id, shoot_id_code, project_campaign_name, shoot_date, status, footage_drive_link, project_id, project_service_id
+      `SELECT id, shoot_id_code, project_campaign_name, shoot_date, status, footage_drive_link, project_id, project_service_id, cycle_id
        FROM shoots
        WHERE deleted = 0 AND status <> 'draft' AND shoot_date BETWEEN ? AND ? AND project_id IN (?)`,
-      [from, to, projectIds]
+      [gFrom, gTo, projectIds]
     ))[0]);
     shootRows.forEach(sh => {
       const row = rowFor(sh.project_id, sh.project_service_id);
-      if (!row) return;
+      if (!row || !inPeriod(row, sh.cycle_id, toDateStr(sh.shoot_date))) return;
       const sd = toDateStr(sh.shoot_date);
       const label = `${sh.shoot_id_code || 'Shoot'}${sh.project_campaign_name && sh.project_campaign_name !== 'TBD' ? ` · ${sh.project_campaign_name}` : ''}`;
       if (sh.status === 'pending_approval') addAttn(row, 'shoot_approval', 'medium', label, 'Waiting for shoot approval', sd, '/social/shoots');
@@ -489,17 +540,17 @@ exports.getBoard = async (req, res) => {
 
     // ── 5. Ads (Personal Branding has no ads) ───────────────────────────────
     const adSlots = await safe('ad slots', async () => (await db.query(
-      `SELECT ca.id, ca.start_date, ca.slot_status, p.project_id, sc.project_service_id
+      `SELECT ca.id, ca.start_date, ca.slot_status, p.project_id, p.cycle_id, sc.project_service_id
        FROM content_calendar_ads ca
        JOIN content_calendar_plans p ON p.id = ca.plan_id AND p.deleted = 0
        LEFT JOIN service_cycles sc ON sc.id = p.cycle_id
        WHERE ca.start_date BETWEEN ? AND ? AND p.project_id IN (?)
          AND (ca.ad_status IS NULL OR ca.ad_status <> 'cancelled')`,
-      [from, to, projectIds]
+      [gFrom, gTo, projectIds]
     ))[0]);
     adSlots.forEach(sl => {
       const row = rowFor(sl.project_id, sl.project_service_id);
-      if (!row || row.is_personal_branding) return;
+      if (!row || row.is_personal_branding || !inPeriod(row, sl.cycle_id, toDateStr(sl.start_date))) return;
       const st = normStage(sl.slot_status);
       row.ads.slots += 1; row.ads.stages[st] += 1;
     });
@@ -512,12 +563,14 @@ exports.getBoard = async (req, res) => {
        WHERE ac.deleted = 0 AND ac.project_id IN (?) AND ac.status <> 'draft'
          AND ac.start_date IS NOT NULL AND ac.start_date <= ?
          AND COALESCE(ac.end_date, ac.start_date) >= ?`,
-      [projectIds, to, from]
+      [projectIds, gTo, gFrom]
     ))[0]);
     campaigns.forEach(ac => {
       // Campaigns carry no service id: they belong to the project's SMM service
       const row = rowFor(ac.project_id, null);
       if (!row || row.is_personal_branding) return;
+      const acS = toDateStr(ac.start_date), acE = toDateStr(ac.end_date) || acS;
+      if (!acS || acS > row.period.to || acE < row.period.from) return;
       const a = row.ads;
       a.campaigns += 1;
       a.budget += Number(ac.budget) || 0;
@@ -535,25 +588,28 @@ exports.getBoard = async (req, res) => {
 
     // ── 6. Daily Updates ────────────────────────────────────────────────────
     const journals = await safe('daily', async () => (await db.query(
-      `SELECT project_service_id, COUNT(*) AS entries, COUNT(DISTINCT journal_date) AS days,
+      `SELECT project_service_id, journal_date, COUNT(*) AS entries,
               SUM(escalation_required = 'yes') AS escalations,
               SUM(health_status = 'critical') AS critical,
               SUM(health_status = 'attention_needed') AS attention
        FROM smm_daily_journal
        WHERE journal_date BETWEEN ? AND ? AND project_service_id IN (?)
-       GROUP BY project_service_id`,
-      [from, to, svcIds]
+       GROUP BY project_service_id, journal_date`,
+      [gFrom, gTo, svcIds]
     ))[0]);
+    // Grouped per day, so each service only counts days inside its own cycle window
     journals.forEach(j => {
       const row = rowsById.get(Number(j.project_service_id));
       if (!row) return;
-      row.daily.entries = Number(j.entries) || 0;
-      row.daily.days = Number(j.days) || 0;
-      row.daily.escalations = Number(j.escalations) || 0;
-      row.daily.critical = Number(j.critical) || 0;
-      row.daily.attention = Number(j.attention) || 0;
+      const d = toDateStr(j.journal_date);
+      if (!d || d < row.period.from || d > row.period.to) return;
+      row.daily.entries += Number(j.entries) || 0;
+      row.daily.days += 1;
+      row.daily.escalations += Number(j.escalations) || 0;
+      row.daily.critical += Number(j.critical) || 0;
+      row.daily.attention += Number(j.attention) || 0;
     });
-    // "Submitted today" only makes sense for the current month
+    // "Submitted today" only when today falls inside the selected month
     if (today >= from && today <= to) {
       const required = await safe('daily required', () => requiredServices(null));
       const done = await submittedKeys(today, null);
@@ -575,25 +631,8 @@ exports.getBoard = async (req, res) => {
     const summary = { projects: 0, on_track: 0, attention: 0, at_risk: 0, overdue: 0, pending_approvals: 0, daily_pending: 0, content_delivery_pct: null };
     let planned = 0, delivered = 0;
 
-    // Month filter: keep a service only if it runs in the month or has activity in it
-    const inMonth = (row) => {
-      const sStart = toDateStr(row.service_start);
-      const sEnd = toDateStr(row.service_end);
-      // A service that has not started yet in this month never shows
-      if (sStart && sStart > to) return false;
-      const endedBefore = sEnd && sEnd < from;
-      const activity = row.content.total + row.shoots.total + row.ads.slots + row.ads.campaigns + row.daily.entries > 0;
-      // Already ended: show only if it still had activity in the month
-      if (endedBefore) return activity;
-      // Running, or start date unknown: show it
-      return true;
-    };
-    const keep = new Set([...rowsById.values()].filter(inMonth).map(r => r.key));
-    for (let i = attention.length - 1; i >= 0; i--) {
-      if (!keep.has(attention[i].project_service_id)) attention.splice(i, 1);
-    }
-
-    const rows = [...rowsById.values()].filter(r => keep.has(r.key)).map(row => {
+    // Services were already limited to those with a cycle in the selected month (step 1b)
+    const rows = [...rowsById.values()].map(row => {
       const c = row.content;
       const delivered_n = c.reels.delivered + c.posts.delivered;
       const planned_n = c.reels.planned + c.posts.planned;
