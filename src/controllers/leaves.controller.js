@@ -46,6 +46,98 @@ async function hasLeavesAllAccess(user) {
 
 exports.hasLeavesAllAccess = hasLeavesAllAccess;
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Normalise a date input to 'YYYY-MM-DD' (or null if invalid). */
+function toDateStr(v) {
+  if (!v) return null;
+  const s = String(v).slice(0, 10);
+  if (!DATE_RE.test(s)) return null;
+  return Number.isNaN(new Date(`${s}T00:00:00Z`).getTime()) ? null : s;
+}
+
+/**
+ * Count working days between two dates (inclusive).
+ * Sundays and full company holidays are not counted.
+ */
+async function countWorkingDays(conn, from, to) {
+  let holidays = new Set();
+  try {
+    const [rows] = await conn.query(
+      "SELECT date FROM company_holidays WHERE date BETWEEN ? AND ? AND holiday_type = 'full_holiday'",
+      [from, to]
+    );
+    holidays = new Set(rows.map((r) => String(r.date).slice(0, 10)));
+  } catch (err) {
+    console.error('countWorkingDays holiday lookup failed (ignored):', err.message);
+  }
+
+  let count = 0;
+  const cur = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  while (cur <= end) {
+    const key = cur.toISOString().slice(0, 10);
+    if (cur.getUTCDay() !== 0 && !holidays.has(key)) count += 1;
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return count;
+}
+
+/**
+ * Adjust the balance for a leave. Unpaid leave never touches balances.
+ * `delta` is positive to deduct (approve) and negative to restore (cancel).
+ * The balance year is always the year of the leave's from_date.
+ */
+async function adjustBalance(conn, leave, delta) {
+  if (leave.leave_type === 'unpaid') return;
+  const fromStr = String(leave.from_date).slice(0, 10);
+  const year = Number(fromStr.slice(0, 4));
+  if (delta > 0) {
+    await conn.query(
+      `INSERT INTO leave_balances (user_id, leave_type, total, used, year)
+       VALUES (?, ?, 12, ?, ?)
+       ON DUPLICATE KEY UPDATE used = used + VALUES(used)`,
+      [leave.user_id, leave.leave_type, delta, year]
+    );
+  } else {
+    await conn.query(
+      `UPDATE leave_balances SET used = GREATEST(used + ?, 0)
+       WHERE user_id = ? AND leave_type = ? AND year = ?`,
+      [delta, leave.user_id, leave.leave_type, year]
+    );
+  }
+}
+
+/** Run fn(conn) inside a transaction. */
+async function withTransaction(fn) {
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const result = await fn(conn);
+    await conn.commit();
+    return result;
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) { /* ignore */ }
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+/** Error carrying an HTTP status, thrown inside transactions. */
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function sendError(res, err, label) {
+  if (err instanceof HttpError) return res.status(err.status).json({ message: err.message });
+  console.error(`${label}:`, err);
+  return res.status(500).json({ message: 'Server error' });
+}
+
 /**
  * GET /api/leaves
  * Admin / users with "All" submenu access: get all leave requests with filters
@@ -83,7 +175,7 @@ exports.list = async (req, res) => {
 
     if (search) {
       sql += " AND (u.first_name LIKE ? OR u.last_name LIKE ? OR CONCAT(u.first_name, ' ', u.last_name) LIKE ?)";
-      const s = `%${search}%`;
+      const s = `%${String(search).replace(/[\\%_]/g, '\\$&')}%`;
       params.push(s, s, s);
     }
 
@@ -137,44 +229,75 @@ exports.approve = async (req, res) => {
     const { id } = req.params;
     const { remarks } = req.body;
 
-    const [rows] = await db.query('SELECT * FROM leaves WHERE id = ? AND deleted = 0', [id]);
-    if (!rows.length) return res.status(404).json({ message: 'Leave not found' });
-    if (rows[0].status !== 'pending') {
-      return res.status(400).json({ message: 'Only pending leaves can be approved' });
-    }
-
-    // Two-step approval: the tagged Head must approve before HR / Admin.
-    // Exception: if the tagged Head's account is no longer active, HR can proceed.
-    if (rows[0].head_status === 'pending') {
-      const [coord] = await db.query(
-        'SELECT id FROM users WHERE id = ? AND deleted = 0 AND is_active = 1',
-        [rows[0].coordinator_id]
-      );
-      if (coord.length) {
-        return res.status(400).json({ message: 'Waiting for the Head\'s approval before HR can approve this leave' });
+    await withTransaction(async (conn) => {
+      // Lock the row so two simultaneous approvals cannot both deduct the balance
+      const [rows] = await conn.query('SELECT * FROM leaves WHERE id = ? AND deleted = 0 FOR UPDATE', [id]);
+      if (!rows.length) throw new HttpError(404, 'Leave not found');
+      const leave = rows[0];
+      if (leave.status !== 'pending') throw new HttpError(400, 'Only pending leaves can be approved');
+      if (leave.user_id === req.user.id && !req.user.is_admin) {
+        throw new HttpError(403, 'You cannot approve your own leave');
       }
-    }
 
-    await db.query(
-      "UPDATE leaves SET status = 'approved', approved_by = ?, remarks = ?, updated_at = NOW() WHERE id = ?",
-      [req.user.id, remarks || null, id]
-    );
+      // Two-step approval: the tagged Head must approve before HR / Admin.
+      // Exception: if the tagged Head's account is no longer active, HR can proceed.
+      if (leave.head_status === 'pending') {
+        const [coord] = await conn.query(
+          'SELECT id FROM users WHERE id = ? AND deleted = 0 AND is_active = 1',
+          [leave.coordinator_id]
+        );
+        if (coord.length) {
+          throw new HttpError(400, "Waiting for the Head's approval before HR can approve this leave");
+        }
+      }
 
-    // Update leave balance
-    const leave = rows[0];
-    await db.query(
-      `INSERT INTO leave_balances (user_id, leave_type, total, used, year)
-       VALUES (?, ?, 12, ?, YEAR(CURDATE()))
-       ON DUPLICATE KEY UPDATE used = used + ?`,
-      [leave.user_id, leave.leave_type === 'unpaid' ? 'casual' : leave.leave_type, leave.days, leave.days]
-    );
+      await conn.query(
+        "UPDATE leaves SET status = 'approved', approved_by = ?, remarks = ?, updated_at = NOW() WHERE id = ?",
+        [req.user.id, remarks || null, id]
+      );
+      await adjustBalance(conn, leave, Number(leave.days));
+    });
 
     await notifyLeave(Number(id), 'approved', req.user.id);
     res.emitSocket('leaves:updated', { id, status: 'approved' });
     return res.json({ message: 'Leave approved' });
   } catch (err) {
-    console.error('Approve leave error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return sendError(res, err, 'Approve leave error');
+  }
+};
+
+/**
+ * PUT /api/leaves/:id/cancel
+ * The employee (own leave) or HR / Admin cancels a pending or approved leave.
+ * An approved leave gets its balance restored.
+ */
+exports.cancel = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isHr = await hasLeavesAllAccess(req.user);
+
+    await withTransaction(async (conn) => {
+      const [rows] = await conn.query('SELECT * FROM leaves WHERE id = ? AND deleted = 0 FOR UPDATE', [id]);
+      if (!rows.length) throw new HttpError(404, 'Leave not found');
+      const leave = rows[0];
+
+      if (!isHr && leave.user_id !== req.user.id) {
+        throw new HttpError(403, 'You can only cancel your own leave');
+      }
+      if (leave.status !== 'pending' && leave.status !== 'approved') {
+        throw new HttpError(400, 'Only pending or approved leaves can be cancelled');
+      }
+
+      await conn.query("UPDATE leaves SET status = 'cancelled', updated_at = NOW() WHERE id = ?", [id]);
+      if (leave.status === 'approved') {
+        await adjustBalance(conn, leave, -Number(leave.days));
+      }
+    });
+
+    res.emitSocket('leaves:updated', { id, status: 'cancelled' });
+    return res.json({ message: 'Leave cancelled' });
+  } catch (err) {
+    return sendError(res, err, 'Cancel leave error');
   }
 };
 
@@ -196,43 +319,58 @@ exports.adminApply = async (req, res) => {
     const validDurations = ['full_day', 'first_half', 'second_half'];
     const leaveDuration = validDurations.includes(duration) ? duration : 'full_day';
 
-    const start = new Date(from_date);
-    const end = new Date(to_date);
-    const fullDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
+    if (!['casual', 'sick', 'earned', 'unpaid'].includes(leave_type)) {
+      return res.status(400).json({ message: 'Invalid leave type' });
+    }
 
-    if (fullDays <= 0) return res.status(400).json({ message: 'Invalid date range' });
+    const fromStr = toDateStr(from_date);
+    const toStr = toDateStr(to_date);
+    if (!fromStr || !toStr || toStr < fromStr) {
+      return res.status(400).json({ message: 'Invalid date range' });
+    }
 
-    if (leaveDuration !== 'full_day' && fullDays > 1) {
+    if (leaveDuration !== 'full_day' && fromStr !== toStr) {
       return res.status(400).json({ message: 'Half-day leave can only be applied for a single day' });
     }
 
-    const days = leaveDuration !== 'full_day' ? 0.5 : fullDays;
-
-    // Insert as approved directly
     // Tag the employee's Head (when unambiguous) so it shows in their planning view.
     const heads = await getHeadsOfUser(user_id);
     const coordinatorId = heads.length === 1 ? heads[0].id : null;
 
-    const [result] = await db.query(
-      `INSERT INTO leaves (user_id, leave_type, from_date, to_date, duration, days, reason, status, approved_by, coordinator_id, head_status, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, 'not_required', NOW())`,
-      [user_id, leave_type, from_date, to_date, leaveDuration, days, reason, req.user.id, coordinatorId]
-    );
+    const insertId = await withTransaction(async (conn) => {
+      const workingDays = await countWorkingDays(conn, fromStr, toStr);
+      if (workingDays <= 0) {
+        throw new HttpError(400, 'The selected dates have no working days (Sundays / holidays only)');
+      }
+      const days = leaveDuration !== 'full_day' ? 0.5 : workingDays;
 
-    // Update leave balance
-    await db.query(
-      `INSERT INTO leave_balances (user_id, leave_type, total, used, year)
-       VALUES (?, ?, 12, ?, YEAR(?))
-       ON DUPLICATE KEY UPDATE used = used + ?`,
-      [user_id, leave_type === 'unpaid' ? 'casual' : leave_type, days, from_date, days]
-    );
+      // Reject overlaps with the employee's existing pending / approved leaves
+      const [overlap] = await conn.query(
+        `SELECT id FROM leaves
+         WHERE user_id = ? AND deleted = 0 AND status IN ('pending', 'approved')
+           AND from_date <= ? AND to_date >= ?
+         LIMIT 1 FOR UPDATE`,
+        [user_id, toStr, fromStr]
+      );
+      if (overlap.length) {
+        throw new HttpError(409, 'This employee already has a leave overlapping these dates');
+      }
 
-    await notifyLeave(result.insertId, 'approved', req.user.id);
-    res.emitSocket('leaves:updated', { id: result.insertId, status: 'approved' });
-    return res.status(201).json({ message: 'Leave applied and approved successfully', id: result.insertId });
+      // Insert as approved directly
+      const [result] = await conn.query(
+        `INSERT INTO leaves (user_id, leave_type, from_date, to_date, duration, days, reason, status, approved_by, coordinator_id, head_status, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, 'not_required', NOW())`,
+        [user_id, leave_type, fromStr, toStr, leaveDuration, days, String(reason).trim(), req.user.id, coordinatorId]
+      );
+      await adjustBalance(conn, { user_id, leave_type, from_date: fromStr }, days);
+      return result.insertId;
+    });
+
+    await notifyLeave(insertId, 'approved', req.user.id);
+    res.emitSocket('leaves:updated', { id: insertId, status: 'approved' });
+    return res.status(201).json({ message: 'Leave applied and approved successfully', id: insertId });
   } catch (err) {
-    console.error('Admin apply leave error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return sendError(res, err, 'Admin apply leave error');
   }
 };
 

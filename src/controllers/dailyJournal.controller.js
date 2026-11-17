@@ -429,11 +429,17 @@ exports.productivityReport = async (req, res) => {
     const today = todayIST();
     const dateFrom = toDateStr(req.query.date_from) || today;
     const dateTo = toDateStr(req.query.date_to) || dateFrom;
+    if (dateFrom > dateTo) {
+      return res.status(400).json({ message: 'The start date must be on or before the end date' });
+    }
+    const dayList = listDays(dateFrom, dateTo);
+    if (dayList.length > REPORT_MAX_DAYS) {
+      return res.status(400).json({ message: `Please choose a range of ${REPORT_MAX_DAYS} days or less` });
+    }
 
-    // ── Resolve SM Ops members: active non-admin users whose role grants any
-    // creative_hub submenu access (role_submenu_permissions) OR legacy
-    // role_social_permissions. Falls back gracefully if a table is missing.
-    let memberIds = [];
+    // ── Members: SM Ops roles with any submenu access, anyone required to submit a
+    // Daily Update, and anyone who submitted one in the range (covers user overrides).
+    const memberSet = new Set();
     try {
       const [rows] = await db.query(
         `SELECT DISTINCT u.id
@@ -442,10 +448,10 @@ exports.productivityReport = async (req, res) => {
            ON rsp.role_id = u.role_id AND rsp.module = 'creative_hub' AND rsp.can_access >= 1
          WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0`
       );
-      memberIds = rows.map(r => r.id);
+      rows.forEach(r => memberSet.add(Number(r.id)));
     } catch (e) { /* table may not exist */ }
 
-    if (memberIds.length === 0) {
+    if (memberSet.size === 0) {
       try {
         const [rows] = await db.query(
           `SELECT DISTINCT u.id
@@ -455,27 +461,20 @@ exports.productivityReport = async (req, res) => {
              AND (rsp.social_overview >= 1 OR rsp.content_calendar >= 1 OR rsp.content_writing >= 1
                   OR rsp.shoot_planning >= 1 OR rsp.ads_planning >= 1 OR rsp.daily_journal >= 1 OR rsp.report_centre >= 1)`
         );
-        memberIds = rows.map(r => r.id);
+        rows.forEach(r => memberSet.add(Number(r.id)));
       } catch (e) { /* ignore */ }
     }
 
-    // Also include anyone who submitted a journal in the range (covers user-level overrides)
+    const warnings = [];
+
+    // Required Project > Service rows (same rule as the Daily Update page)
+    let required = [];
     try {
-      const [extra] = await db.query(
-        `SELECT DISTINCT submitted_by AS id FROM smm_daily_journal
-         WHERE journal_date BETWEEN ? AND ?`,
-        [dateFrom, dateTo]
-      );
-      const set = new Set(memberIds);
-      extra.forEach(r => set.add(r.id));
-      memberIds = Array.from(set);
-    } catch (e) { /* ignore */ }
+      required = await requiredServices(null);
+      required.forEach(r => memberSet.add(Number(r.user_id)));
+    } catch (e) { warnings.push('Could not load required daily updates'); }
 
-    if (memberIds.length === 0) {
-      return res.json({ date_from: dateFrom, date_to: dateTo, journals: [], members: [], summary: emptyReportSummary() });
-    }
-
-    // ═══ SECTION A — Daily Update summary ═══
+    // ═══ SECTION A: Daily Update entries in the range ═══
     let journals = [];
     try {
       const [jrows] = await db.query(
@@ -504,97 +503,212 @@ exports.productivityReport = async (req, res) => {
         issues_delays: parseJson(j.issues_delays, []),
         tomorrow_priorities: parseJson(j.tomorrow_priorities, []),
       }));
-    } catch (e) { console.warn('Daily report journals warning:', e.message); }
+      journals.forEach(j => memberSet.add(Number(j.submitted_by)));
+    } catch (e) {
+      console.warn('Daily report journals warning:', e.message);
+      warnings.push('Daily Update entries could not be loaded');
+    }
 
-    // ═══ SECTION B — Team activity (logged time that day) ═══
+    const memberIds = Array.from(memberSet).filter(Boolean);
+    if (memberIds.length === 0) {
+      return res.json({
+        date_from: dateFrom, date_to: dateTo, days: dayList, journals: [], members: [],
+        summary: emptyReportSummary(), warnings,
+      });
+    }
+
+    // ═══ SECTION B: logged time per member / item / day ═══
+    // Aggregated in seconds. Tasks and shoots use started_at; tickets use log_date.
+    const timeRows = []; // { user_id, kind, id, title, code, status, day, secs }
+    const loadTime = async (label, sql, params, mapRow) => {
+      try {
+        const [rows] = await db.query(sql, params);
+        rows.forEach(r => timeRows.push(mapRow(r)));
+        return true;
+      } catch (e) {
+        console.warn(`Daily report ${label} warning:`, e.message);
+        return false;
+      }
+    };
+
+    const okTasks = await loadTime('tasks',
+      `SELECT tl.user_id, DATE(tl.started_at) AS day, t.id, t.title, t.task_id_code, t.status,
+              SUM(tl.duration) AS secs
+       FROM task_time_logs tl
+       JOIN tasks t ON t.id = tl.task_id
+       WHERE tl.user_id IN (?) AND DATE(tl.started_at) BETWEEN ? AND ?
+       GROUP BY tl.user_id, DATE(tl.started_at), t.id, t.title, t.task_id_code, t.status`,
+      [memberIds, dateFrom, dateTo],
+      r => ({ user_id: Number(r.user_id), kind: 'task', id: r.id, title: r.title, code: r.task_id_code, status: r.status, day: toDateStr(r.day), secs: Number(r.secs) || 0 }));
+    if (!okTasks) warnings.push('Task time could not be loaded');
+
+    const ticketSql = (secExpr) =>
+      `SELECT tl.user_id, tl.log_date AS day, tk.id, tk.title, tk.status, SUM(${secExpr}) AS secs
+       FROM ticket_time_logs tl
+       JOIN tickets tk ON tk.id = tl.ticket_id
+       WHERE tl.user_id IN (?) AND tl.log_date BETWEEN ? AND ? AND tk.deleted = 0
+       GROUP BY tl.user_id, tl.log_date, tk.id, tk.title, tk.status`;
+    const mapTicket = r => ({ user_id: Number(r.user_id), kind: 'ticket', id: r.id, title: r.title, status: r.status, day: toDateStr(r.day), secs: Number(r.secs) || 0 });
+    let okTickets = await loadTime('tickets', ticketSql('COALESCE(NULLIF(tl.duration, 0), tl.minutes * 60)'), [memberIds, dateFrom, dateTo], mapTicket);
+    if (!okTickets) okTickets = await loadTime('tickets (minutes)', ticketSql('tl.minutes * 60'), [memberIds, dateFrom, dateTo], mapTicket);
+    if (!okTickets) warnings.push('Ticket time could not be loaded');
+
+    const okShoots = await loadTime('shoots',
+      `SELECT sl.user_id, DATE(sl.started_at) AS day, s.id, s.shoot_id_code, s.project_campaign_name, s.status,
+              SUM(sl.duration) AS secs
+       FROM shoot_time_logs sl
+       JOIN shoots s ON s.id = sl.shoot_id
+       WHERE sl.user_id IN (?) AND DATE(sl.started_at) BETWEEN ? AND ? AND s.deleted = 0
+       GROUP BY sl.user_id, DATE(sl.started_at), s.id, s.shoot_id_code, s.project_campaign_name, s.status`,
+      [memberIds, dateFrom, dateTo],
+      r => ({ user_id: Number(r.user_id), kind: 'shoot', id: r.id, title: r.project_campaign_name, code: r.shoot_id_code, status: r.status, day: toDateStr(r.day), secs: Number(r.secs) || 0 }));
+    if (!okShoots) warnings.push('Shoot time could not be loaded');
+
     const [users] = await db.query(
       `SELECT id, CONCAT(first_name, ' ', last_name) AS name, department, designation, avatar_url
        FROM users WHERE id IN (?) ORDER BY first_name`,
       [memberIds]
     );
 
-    const tasksByUser = {};
-    try {
-      const [rows] = await db.query(
-        `SELECT DISTINCT tl.user_id, t.id, t.title, t.task_id_code, t.status
-         FROM task_time_logs tl
-         JOIN tasks t ON t.id = tl.task_id
-         WHERE tl.user_id IN (?) AND DATE(tl.started_at) BETWEEN ? AND ?
-         ORDER BY t.id DESC`,
-        [memberIds, dateFrom, dateTo]
-      );
-      rows.forEach(r => { (tasksByUser[r.user_id] = tasksByUser[r.user_id] || []).push({ id: r.id, title: r.title, code: r.task_id_code, status: r.status }); });
-    } catch (e) { console.warn('Daily report tasks warning:', e.message); }
+    // ── Working days: today, plus any day that has an update or logged time (so
+    // Sundays / holidays with no activity do not show everyone as "pending").
+    const activeDays = new Set();
+    if (dayList.includes(today)) activeDays.add(today);
+    journals.forEach(j => activeDays.add(j.journal_date));
+    timeRows.forEach(r => { if (r.day) activeDays.add(r.day); });
+    const dueDays = dayList.filter(d => d <= today && activeDays.has(d));
 
-    const ticketsByUser = {};
-    try {
-      const [rows] = await db.query(
-        `SELECT DISTINCT tl.user_id, tk.id, tk.title, tk.status
-         FROM ticket_time_logs tl
-         JOIN tickets tk ON tk.id = tl.ticket_id
-         WHERE tl.user_id IN (?) AND tl.log_date BETWEEN ? AND ? AND tk.deleted = 0
-         ORDER BY tk.id DESC`,
-        [memberIds, dateFrom, dateTo]
-      );
-      rows.forEach(r => { (ticketsByUser[r.user_id] = ticketsByUser[r.user_id] || []).push({ id: r.id, title: r.title, status: r.status }); });
-    } catch (e) { console.warn('Daily report tickets warning:', e.message); }
+    // ── Pending Daily Updates: required service x due day with no entry
+    const submittedKey = new Set(journals.map(j => `${j.journal_date}:${Number(j.submitted_by)}:${Number(j.project_service_id)}`));
+    const requiredByUser = new Map();
+    required.forEach(r => {
+      const k = Number(r.user_id);
+      if (!requiredByUser.has(k)) requiredByUser.set(k, []);
+      requiredByUser.get(k).push(r);
+    });
 
-    const shootsByUser = {};
-    try {
-      const [rows] = await db.query(
-        `SELECT DISTINCT sl.user_id, s.id, s.shoot_id_code, s.project_campaign_name, s.status
-         FROM shoot_time_logs sl
-         JOIN shoots s ON s.id = sl.shoot_id
-         WHERE sl.user_id IN (?) AND DATE(sl.started_at) BETWEEN ? AND ? AND s.deleted = 0
-         ORDER BY s.id DESC`,
-        [memberIds, dateFrom, dateTo]
-      );
-      rows.forEach(r => { (shootsByUser[r.user_id] = shootsByUser[r.user_id] || []).push({ id: r.id, code: r.shoot_id_code, title: r.project_campaign_name, status: r.status }); });
-    } catch (e) { console.warn('Daily report shoots warning:', e.message); }
-
-    const submittedSet = new Set(journals.map(j => j.submitted_by));
+    const journalsByUser = new Map();
+    journals.forEach(j => {
+      const k = Number(j.submitted_by);
+      journalsByUser.set(k, (journalsByUser.get(k) || 0) + 1);
+    });
 
     const members = [];
     for (const u of users) {
-      const tasks = tasksByUser[u.id] || [];
-      const tickets = ticketsByUser[u.id] || [];
-      const shoots = shootsByUser[u.id] || [];
-      const submitted = submittedSet.has(u.id);
-      if (tasks.length === 0 && tickets.length === 0 && shoots.length === 0 && !submitted) continue;
+      const uid = Number(u.id);
+      const mine = timeRows.filter(r => r.user_id === uid);
+
+      const items = { task: new Map(), ticket: new Map(), shoot: new Map() };
+      const perDay = new Map();
+      const secs = { task: 0, ticket: 0, shoot: 0 };
+      mine.forEach(r => {
+        secs[r.kind] += r.secs;
+        const m = items[r.kind];
+        const cur = m.get(r.id) || { id: r.id, title: r.title, code: r.code, status: r.status, seconds: 0 };
+        cur.seconds += r.secs;
+        m.set(r.id, cur);
+        if (r.day) perDay.set(r.day, (perDay.get(r.day) || 0) + r.secs);
+      });
+      const sortItems = (m) => Array.from(m.values()).sort((a, b) => b.seconds - a.seconds);
+      const tasks = sortItems(items.task);
+      const tickets = sortItems(items.ticket);
+      const shoots = sortItems(items.shoot);
+
+      const reqRows = requiredByUser.get(uid) || [];
+      const pending = [];
+      let requiredCount = 0;
+      dueDays.forEach(day => {
+        reqRows.forEach(r => {
+          requiredCount += 1;
+          if (!submittedKey.has(`${day}:${uid}:${Number(r.project_service_id)}`)) {
+            pending.push({
+              date: day,
+              project_service_id: r.project_service_id,
+              project_id: r.project_id,
+              project_title: r.project_title,
+              service_name: r.service_name,
+            });
+          }
+        });
+      });
+
+      const journalCount = journalsByUser.get(uid) || 0;
+      const totalSecs = secs.task + secs.ticket + secs.shoot;
+      // Show anyone with activity, an update, or something pending
+      if (!totalSecs && !tasks.length && !tickets.length && !shoots.length && !journalCount && !pending.length) continue;
+
       members.push({
-        user_id: u.id,
+        user_id: uid,
         name: u.name,
         designation: u.designation,
         avatar_url: u.avatar_url,
-        journal_submitted: submitted,
+        journal_submitted: journalCount > 0,
+        journal_count: journalCount,
+        required_count: requiredCount,
+        submitted_count: requiredCount - pending.length,
+        pending,
+        seconds: { ...secs, total: totalSecs },
+        by_day: Array.from(perDay.entries()).sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([date, seconds]) => ({ date, seconds })),
         tasks, tickets, shoots,
         task_count: tasks.length,
         ticket_count: tickets.length,
         shoot_count: shoots.length,
       });
     }
-    members.sort((a, b) => (b.task_count + b.ticket_count + b.shoot_count) - (a.task_count + a.ticket_count + a.shoot_count));
+    // Most pending first, then most time logged
+    members.sort((a, b) => (b.pending.length - a.pending.length) || (b.seconds.total - a.seconds.total) || String(a.name).localeCompare(String(b.name)));
 
+    const sum = (fn) => members.reduce((s, m) => s + fn(m), 0);
     const summary = {
       journal_count: journals.length,
       member_count: members.length,
-      tasks_total: members.reduce((s, m) => s + m.task_count, 0),
-      tickets_total: members.reduce((s, m) => s + m.ticket_count, 0),
-      shoots_total: members.reduce((s, m) => s + m.shoot_count, 0),
+      required_total: sum(m => m.required_count),
+      submitted_total: sum(m => m.submitted_count),
+      pending_total: sum(m => m.pending.length),
+      members_pending: members.filter(m => m.pending.length > 0).length,
+      tasks_total: sum(m => m.task_count),
+      tickets_total: sum(m => m.ticket_count),
+      shoots_total: sum(m => m.shoot_count),
+      seconds_total: sum(m => m.seconds.total),
+      seconds_task: sum(m => m.seconds.task),
+      seconds_ticket: sum(m => m.seconds.ticket),
+      seconds_shoot: sum(m => m.seconds.shoot),
       escalations_total: journals.filter(j => j.escalation_required === 'yes').length,
       critical_count: journals.filter(j => j.health_status === 'critical').length,
+      attention_count: journals.filter(j => j.health_status === 'attention_needed').length,
+      on_track_count: journals.filter(j => j.health_status === 'on_track').length,
     };
 
-    return res.json({ date_from: dateFrom, date_to: dateTo, journals, members, summary });
+    return res.json({
+      date_from: dateFrom, date_to: dateTo, days: dayList, due_days: dueDays,
+      journals, members, summary, warnings,
+    });
   } catch (err) {
     console.error('Daily report error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
 
+const REPORT_MAX_DAYS = 31;
+
+/** Inclusive list of YYYY-MM-DD strings between two dates. */
+function listDays(from, to) {
+  const out = [];
+  const d = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || Number.isNaN(end.getTime())) return out;
+  while (d <= end && out.length <= REPORT_MAX_DAYS + 1) {
+    out.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return out;
+}
+
 function emptyReportSummary() {
   return {
-    journal_count: 0, member_count: 0, tasks_total: 0, tickets_total: 0,
-    shoots_total: 0, escalations_total: 0, critical_count: 0,
+    journal_count: 0, member_count: 0, required_total: 0, submitted_total: 0, pending_total: 0,
+    members_pending: 0, tasks_total: 0, tickets_total: 0, shoots_total: 0,
+    seconds_total: 0, seconds_task: 0, seconds_ticket: 0, seconds_shoot: 0,
+    escalations_total: 0, critical_count: 0, attention_count: 0, on_track_count: 0,
   };
 }

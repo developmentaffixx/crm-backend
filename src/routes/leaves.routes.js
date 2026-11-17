@@ -34,4 +34,7 @@ router.post('/admin-apply', requireLeavesAdmin, ctrl.adminApply);
 router.put('/:id/approve', requireLeavesAdmin, ctrl.approve);
 router.put('/:id/reject', requireLeavesAdmin, ctrl.reject);
 
+// Cancel (owner or HR/Admin; controller enforces this). Restores balance if approved.
+router.put('/:id/cancel', ctrl.cancel);
+
 module.exports = router;
