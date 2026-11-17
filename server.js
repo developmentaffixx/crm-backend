@@ -234,6 +234,7 @@ server.listen(PORT, () => {
   // ── Ensure Sales Meetings table exists (Revenue → Meetings) ────────────────
   require('./src/config/ensureSalesMeetingsTable')();
   require('./src/config/ensureExtensionColumns')();
+  require('./src/config/ensureLeaveCoordinator')();
   require('./src/controllers/projectAllocation.controller').ensureSchema();
 
   // ── One-time: Ensure bank_account_name column exists in company_settings ───

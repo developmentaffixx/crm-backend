@@ -47,6 +47,9 @@ router.get('/me/tasks', usersController.myTasks);
 // GET /api/users/me/leaves — user's leaves
 router.get('/me/leaves', usersController.myLeaves);
 
+// GET /api/users/me/leave-coordinators — heads the user can tag on a leave
+router.get('/me/leave-coordinators', usersController.myLeaveCoordinators);
+
 // POST /api/users/me/leaves — apply for leave
 router.post('/me/leaves', usersController.applyLeave);
 

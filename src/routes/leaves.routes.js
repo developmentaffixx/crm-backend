@@ -17,6 +17,13 @@ router.use(authenticate);
 // List leaves (admin sees all, employee sees own)
 router.get('/', ctrl.list);
 
+// Leaves tagged to the logged-in Head (coordinator dashboard)
+router.get('/team', ctrl.team);
+
+// Step 1 approval by the tagged Head (controller verifies the user is that Head)
+router.put('/:id/head-approve', ctrl.headApprove);
+router.put('/:id/head-reject', ctrl.headReject);
+
 // Stats (admin or people ops with all/approve access)
 router.get('/stats', requireLeavesAdmin, ctrl.stats);
 

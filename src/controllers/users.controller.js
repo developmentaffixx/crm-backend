@@ -383,9 +383,11 @@ exports.myTasks = async (req, res) => {
 exports.myLeaves = async (req, res) => {
   try {
     const [leaves] = await db.query(
-      `SELECT l.*, CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name
+      `SELECT l.*, CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name,
+              CONCAT(c.first_name, ' ', c.last_name) AS coordinator_name
        FROM leaves l
        LEFT JOIN users a ON a.id = l.approved_by
+       LEFT JOIN users c ON c.id = l.coordinator_id
        WHERE l.user_id = ? AND l.deleted = 0
        ORDER BY l.from_date DESC`,
       [req.user.id]
@@ -402,14 +404,50 @@ exports.myLeaves = async (req, res) => {
 };
 
 /**
+ * GET /api/users/me/leave-coordinators
+ * Heads the employee can tag on a leave request. `required` is false when the
+ * employee has no head (HR / Admin approve directly).
+ */
+exports.myLeaveCoordinators = async (req, res) => {
+  try {
+    const coordinators = await require('../helpers/leaveWorkflow').getHeadsOfUser(req.user.id);
+    return res.json({
+      required: coordinators.length > 0,
+      coordinators,
+      default_id: coordinators.length === 1 ? coordinators[0].id : null,
+    });
+  } catch (err) {
+    console.error('Leave coordinators error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * POST /api/users/me/leaves
  * Apply for leave
  */
 exports.applyLeave = async (req, res) => {
   try {
-    const { leave_type, from_date, to_date, duration, reason } = req.body;
+    const { leave_type, from_date, to_date, duration, reason, coordinator_id } = req.body;
     if (!leave_type || !from_date || !to_date || !reason) {
       return res.status(400).json({ message: 'All fields are required' });
+    }
+
+    // Coordinator tagging: mandatory when the employee has a Head. The tagged
+    // person must be one of the employee's own heads (cannot be bypassed via API).
+    const { getHeadsOfUser, notifyLeave } = require('../helpers/leaveWorkflow');
+    const heads = await getHeadsOfUser(req.user.id);
+    let taggedCoordinator = null;
+    let headStatus = 'not_required';
+    if (heads.length > 0) {
+      if (!coordinator_id) {
+        return res.status(400).json({ message: 'Please tag your respective coordinator' });
+      }
+      if (!heads.some((h) => h.id === Number(coordinator_id))) {
+        return res.status(400).json({ message: 'Selected coordinator is not your head' });
+      }
+      taggedCoordinator = Number(coordinator_id);
+      headStatus = 'pending';
     }
 
     const validDurations = ['full_day', 'first_half', 'second_half'];
@@ -429,9 +467,13 @@ exports.applyLeave = async (req, res) => {
     const days = leaveDuration !== 'full_day' ? 0.5 : fullDays;
 
     const [result] = await db.query(
-      `INSERT INTO leaves (user_id, leave_type, from_date, to_date, duration, days, reason) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [req.user.id, leave_type, from_date, to_date, leaveDuration, days, reason]
+      `INSERT INTO leaves (user_id, leave_type, from_date, to_date, duration, days, reason, coordinator_id, head_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [req.user.id, leave_type, from_date, to_date, leaveDuration, days, reason, taggedCoordinator, headStatus]
     );
+
+    await notifyLeave(result.insertId, 'requested', req.user.id);
+    res.emitSocket('leaves:updated', { id: result.insertId, status: 'pending' });
 
     return res.status(201).json({ message: 'Leave applied', id: result.insertId });
   } catch (err) {
@@ -457,6 +499,8 @@ exports.cancelLeave = async (req, res) => {
     }
 
     await db.query("UPDATE leaves SET status = 'cancelled', updated_at = NOW() WHERE id = ?", [id]);
+    await require('../helpers/leaveWorkflow').notifyLeave(Number(id), 'cancelled', req.user.id);
+    res.emitSocket('leaves:updated', { id, status: 'cancelled' });
     return res.json({ message: 'Leave cancelled' });
   } catch (err) {
     console.error('Cancel leave error:', err);

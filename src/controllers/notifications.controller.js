@@ -235,11 +235,46 @@ exports.getUnifiedNotifications = async (req, res) => {
           title: `${r.employee_name} — Leave Request`,
           subtitle: `${r.leave_type} • ${r.days} day${r.days > 1 ? 's' : ''}`,
           message: `${new Date(r.from_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} → ${new Date(r.to_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`,
-          link: `/leaves`,
+          link: `/people-ops/leaves`,
           date: r.from_date,
           days_overdue: 0,
         });
       });
+    }
+
+    // ─── 5b. Leave workflow updates (employee / tagged Head / HR) ───────────────
+    // Requested / head-approved / approved / rejected / cancelled events, last 14 days.
+    // Admins already see pending requests in section 5, so 'requested' is skipped for them.
+    try {
+      const [rows] = await db.query(
+        `SELECT n.id, n.type, n.title, n.message, n.created_at, n.leave_id,
+                l.user_id AS leave_user_id, l.coordinator_id
+         FROM leave_notifications n
+         JOIN leaves l ON l.id = n.leave_id
+         WHERE n.user_id = ? AND n.created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
+         ORDER BY n.created_at DESC
+         LIMIT 15`,
+        [userId]
+      );
+      rows.forEach(r => {
+        if (isAdmin && r.type === 'requested') return;
+        const link = r.leave_user_id === userId ? '/profile'
+          : r.coordinator_id === userId ? '/dashboard'
+          : '/people-ops/leaves';
+        notifications.push({
+          id: `leavenote-${r.id}`,
+          category: 'leave_approval',
+          priority: 'medium',
+          title: r.title,
+          subtitle: r.type.replace('_', ' '),
+          message: r.message,
+          link,
+          date: r.created_at,
+          days_overdue: 0,
+        });
+      });
+    } catch (e) {
+      console.error('Leave notifications feed error:', e.message);
     }
 
     // ─── 6. Overdue Invoices (Admin only) ───────────────────────────────────────

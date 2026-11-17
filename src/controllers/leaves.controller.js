@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { getHeadsOfUser, notifyLeave } = require('../helpers/leaveWorkflow');
 
 /**
  * Helper: returns true if the user is an admin OR has been granted
@@ -59,10 +60,13 @@ exports.list = async (req, res) => {
       SELECT l.*, 
              CONCAT(u.first_name, ' ', u.last_name) AS employee_name,
              u.department, u.designation,
-             CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name
+             CONCAT(a.first_name, ' ', a.last_name) AS approved_by_name,
+             CONCAT(c.first_name, ' ', c.last_name) AS coordinator_name,
+             c.email AS coordinator_email
       FROM leaves l
       INNER JOIN users u ON u.id = l.user_id
       LEFT JOIN users a ON a.id = l.approved_by
+      LEFT JOIN users c ON c.id = l.coordinator_id
       WHERE l.deleted = 0
     `;
     const params = [];
@@ -139,6 +143,18 @@ exports.approve = async (req, res) => {
       return res.status(400).json({ message: 'Only pending leaves can be approved' });
     }
 
+    // Two-step approval: the tagged Head must approve before HR / Admin.
+    // Exception: if the tagged Head's account is no longer active, HR can proceed.
+    if (rows[0].head_status === 'pending') {
+      const [coord] = await db.query(
+        'SELECT id FROM users WHERE id = ? AND deleted = 0 AND is_active = 1',
+        [rows[0].coordinator_id]
+      );
+      if (coord.length) {
+        return res.status(400).json({ message: 'Waiting for the Head\'s approval before HR can approve this leave' });
+      }
+    }
+
     await db.query(
       "UPDATE leaves SET status = 'approved', approved_by = ?, remarks = ?, updated_at = NOW() WHERE id = ?",
       [req.user.id, remarks || null, id]
@@ -153,6 +169,7 @@ exports.approve = async (req, res) => {
       [leave.user_id, leave.leave_type === 'unpaid' ? 'casual' : leave.leave_type, leave.days, leave.days]
     );
 
+    await notifyLeave(Number(id), 'approved', req.user.id);
     res.emitSocket('leaves:updated', { id, status: 'approved' });
     return res.json({ message: 'Leave approved' });
   } catch (err) {
@@ -192,10 +209,14 @@ exports.adminApply = async (req, res) => {
     const days = leaveDuration !== 'full_day' ? 0.5 : fullDays;
 
     // Insert as approved directly
+    // Tag the employee's Head (when unambiguous) so it shows in their planning view.
+    const heads = await getHeadsOfUser(user_id);
+    const coordinatorId = heads.length === 1 ? heads[0].id : null;
+
     const [result] = await db.query(
-      `INSERT INTO leaves (user_id, leave_type, from_date, to_date, duration, days, reason, status, approved_by, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, NOW())`,
-      [user_id, leave_type, from_date, to_date, leaveDuration, days, reason, req.user.id]
+      `INSERT INTO leaves (user_id, leave_type, from_date, to_date, duration, days, reason, status, approved_by, coordinator_id, head_status, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, 'not_required', NOW())`,
+      [user_id, leave_type, from_date, to_date, leaveDuration, days, reason, req.user.id, coordinatorId]
     );
 
     // Update leave balance
@@ -206,6 +227,7 @@ exports.adminApply = async (req, res) => {
       [user_id, leave_type === 'unpaid' ? 'casual' : leave_type, days, from_date, days]
     );
 
+    await notifyLeave(result.insertId, 'approved', req.user.id);
     res.emitSocket('leaves:updated', { id: result.insertId, status: 'approved' });
     return res.status(201).json({ message: 'Leave applied and approved successfully', id: result.insertId });
   } catch (err) {
@@ -234,10 +256,102 @@ exports.reject = async (req, res) => {
       [req.user.id, remarks || null, id]
     );
 
+    await notifyLeave(Number(id), 'rejected', req.user.id);
     res.emitSocket('leaves:updated', { id, status: 'rejected' });
     return res.json({ message: 'Leave rejected' });
   } catch (err) {
     console.error('Reject leave error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * PUT /api/leaves/:id/head-approve  |  PUT /api/leaves/:id/head-reject
+ * Step 1 of the two-step approval. Only the Head tagged on the leave may act.
+ *   approve → head_status = 'approved' (HR / Admin can now give the final approval)
+ *   reject  → leave is rejected (final); HR / Admin and the employee are notified
+ */
+function headDecision(action) {
+  return async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { remarks } = req.body || {};
+
+      const [rows] = await db.query('SELECT * FROM leaves WHERE id = ? AND deleted = 0', [id]);
+      if (!rows.length) return res.status(404).json({ message: 'Leave not found' });
+      const leave = rows[0];
+
+      if (!leave.coordinator_id || leave.coordinator_id !== req.user.id) {
+        return res.status(403).json({ message: 'Only the tagged Head can action this leave' });
+      }
+      if (leave.status !== 'pending' || leave.head_status !== 'pending') {
+        return res.status(400).json({ message: 'This leave is not waiting for Head approval' });
+      }
+
+      if (action === 'approve') {
+        await db.query(
+          "UPDATE leaves SET head_status = 'approved', head_actioned_by = ?, head_remarks = ?, head_actioned_at = NOW(), updated_at = NOW() WHERE id = ?",
+          [req.user.id, remarks || null, id]
+        );
+        await notifyLeave(Number(id), 'head_approved', req.user.id);
+        res.emitSocket('leaves:updated', { id, status: 'pending' });
+        return res.json({ message: 'Approved. Sent to HR for final approval' });
+      }
+
+      await db.query(
+        "UPDATE leaves SET status = 'rejected', head_status = 'rejected', head_actioned_by = ?, head_remarks = ?, head_actioned_at = NOW(), approved_by = ?, remarks = ?, updated_at = NOW() WHERE id = ?",
+        [req.user.id, remarks || null, req.user.id, remarks || null, id]
+      );
+      await notifyLeave(Number(id), 'head_rejected', req.user.id);
+      res.emitSocket('leaves:updated', { id, status: 'rejected' });
+      return res.json({ message: 'Leave rejected' });
+    } catch (err) {
+      console.error('Head decision error:', err);
+      return res.status(500).json({ message: 'Server error' });
+    }
+  };
+}
+exports.headApprove = headDecision('approve');
+exports.headReject = headDecision('reject');
+
+/**
+ * GET /api/leaves/team
+ * Leaves tagged to the logged-in Head: pending, approved, rejected, cancelled
+ * (last 60 days and all upcoming). `overlaps` = how many other tagged members
+ * are also on leave (pending or approved) during the same dates.
+ */
+exports.team = async (req, res) => {
+  try {
+    const [head] = await db.query(
+      "SELECT 1 FROM team_members WHERE user_id = ? AND role = 'head' LIMIT 1",
+      [req.user.id]
+    );
+    const [rows] = await db.query(
+      `SELECT l.*, CONCAT(u.first_name, ' ', u.last_name) AS employee_name,
+              u.department, u.designation
+       FROM leaves l
+       JOIN users u ON u.id = l.user_id
+       WHERE l.deleted = 0 AND l.coordinator_id = ?
+         AND l.to_date >= DATE_SUB(CURDATE(), INTERVAL 60 DAY)
+       ORDER BY l.from_date ASC
+       LIMIT 300`,
+      [req.user.id]
+    );
+
+    const active = rows.filter((r) => r.status === 'pending' || r.status === 'approved');
+    const leaves = rows.map((r) => {
+      let overlaps = 0;
+      if (r.status === 'pending' || r.status === 'approved') {
+        overlaps = active.filter(
+          (o) => o.id !== r.id && o.user_id !== r.user_id && o.from_date <= r.to_date && o.to_date >= r.from_date
+        ).length;
+      }
+      return { ...r, overlaps };
+    });
+
+    return res.json({ is_head: head.length > 0, leaves });
+  } catch (err) {
+    console.error('Team leaves error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
