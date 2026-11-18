@@ -5,6 +5,26 @@ const http  = require('http');
 // Normalise a boolean-ish value to 0/1 for tinyint columns.
 // The joinus form forwards these as the STRINGS "0" / "1"; a plain
 // truthiness check (`"0" ? 1 : 0`) wrongly yields 1 because "0" is truthy.
+const BANK_SECTIONS = ['technical', 'practical', 'scenario', 'evaluation'];
+const BANK_ACCESS_TYPES = ['all', 'roles', 'users', 'roles_and_users'];
+
+function parseIdList(v) {
+  try {
+    const arr = typeof v === 'string' ? JSON.parse(v) : v;
+    return Array.isArray(arr) ? arr.map(Number).filter(Number.isFinite) : [];
+  } catch (e) { return []; }
+}
+
+async function getBankAccessRow() {
+  const [rows] = await db.query('SELECT * FROM interview_bank_settings WHERE id = 1');
+  const r = rows[0] || {};
+  return {
+    access_type:   BANK_ACCESS_TYPES.includes(r.access_type) ? r.access_type : 'all',
+    allowed_roles: parseIdList(r.allowed_roles),
+    allowed_users: parseIdList(r.allowed_users),
+  };
+}
+
 function toTinyInt(v) {
   if (v === true || v === 1 || v === '1') return 1;
   if (v === 'yes' || v === 'true') return 1;
@@ -437,6 +457,7 @@ exports.listPositions = async (req, res) => {
 exports.createQuestion = async (req, res) => {
   try {
     const { position_name, question, order_no } = req.body;
+    const section = BANK_SECTIONS.includes(req.body.section) ? req.body.section : 'technical';
     if (!position_name?.trim() || !question?.trim()) {
       return res.status(400).json({ message: 'Position and question are required' });
     }
@@ -452,8 +473,8 @@ exports.createQuestion = async (req, res) => {
     }
 
     const [result] = await db.query(
-      `INSERT INTO interview_question_bank (position_name, question, order_no, created_by) VALUES (?, ?, ?, ?)`,
-      [position_name.trim(), question.trim(), nextOrder, req.user.id]
+      `INSERT INTO interview_question_bank (position_name, section, question, order_no, created_by) VALUES (?, ?, ?, ?, ?)`,
+      [position_name.trim(), section, question.trim(), nextOrder, req.user.id]
     );
     return res.status(201).json({ message: 'Question added', id: result.insertId });
   } catch (err) {
@@ -472,6 +493,10 @@ exports.updateQuestion = async (req, res) => {
     if (position_name !== undefined) { fields.push('position_name = ?'); params.push(position_name); }
     if (question      !== undefined) { fields.push('question = ?');      params.push(question); }
     if (order_no      !== undefined) { fields.push('order_no = ?');      params.push(order_no); }
+    if (req.body.section !== undefined) {
+      if (!BANK_SECTIONS.includes(req.body.section)) return res.status(400).json({ message: 'Invalid section' });
+      fields.push('section = ?'); params.push(req.body.section);
+    }
     if (!fields.length) return res.status(400).json({ message: 'Nothing to update' });
     params.push(id);
     await db.query(`UPDATE interview_question_bank SET ${fields.join(', ')} WHERE id = ?`, params);
@@ -490,6 +515,74 @@ exports.deleteQuestion = async (req, res) => {
     return res.json({ message: 'Question deleted' });
   } catch (err) {
     console.error('deleteQuestion error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── GET /api/interview-scheduler/question-bank ────────────────────────────────
+// Read-only role-wise bank for the Recruitment page. Admin or permitted members.
+exports.getQuestionBank = async (req, res) => {
+  try {
+    if (!req.user.is_admin) {
+      const acc = await getBankAccessRow();
+      const [u] = await db.query('SELECT role_id FROM users WHERE id = ?', [req.user.id]);
+      const roleId = u[0]?.role_id ? Number(u[0].role_id) : null;
+      const byRole = roleId !== null && acc.allowed_roles.includes(roleId);
+      const byUser = acc.allowed_users.includes(Number(req.user.id));
+      const ok =
+        acc.access_type === 'all' ||
+        (acc.access_type === 'roles' && byRole) ||
+        (acc.access_type === 'users' && byUser) ||
+        (acc.access_type === 'roles_and_users' && (byRole || byUser));
+      if (!ok) return res.status(403).json({ message: 'Access denied' });
+    }
+    const [rows] = await db.query(
+      `SELECT id, position_name, section, question, order_no
+       FROM interview_question_bank
+       ORDER BY position_name ASC, order_no ASC, id ASC`
+    );
+    const map = new Map();
+    for (const r of rows) {
+      if (!map.has(r.position_name)) {
+        map.set(r.position_name, { position_name: r.position_name, technical: [], practical: [], scenario: [], evaluation: [] });
+      }
+      const sec = BANK_SECTIONS.includes(r.section) ? r.section : 'technical';
+      map.get(r.position_name)[sec].push({ id: r.id, question: r.question });
+    }
+    return res.json({ positions: [...map.values()] });
+  } catch (err) {
+    console.error('getQuestionBank error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── GET /api/interview-scheduler/question-bank/access (admin) ─────────────────
+exports.getBankAccess = async (req, res) => {
+  try {
+    return res.json(await getBankAccessRow());
+  } catch (err) {
+    console.error('getBankAccess error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── PUT /api/interview-scheduler/question-bank/access (admin) ─────────────────
+exports.updateBankAccess = async (req, res) => {
+  try {
+    const type = req.body.access_type;
+    if (!BANK_ACCESS_TYPES.includes(type)) return res.status(400).json({ message: 'Invalid access type' });
+    const roles = (type === 'roles' || type === 'roles_and_users') ? parseIdList(req.body.allowed_roles) : [];
+    const users = (type === 'users' || type === 'roles_and_users') ? parseIdList(req.body.allowed_users) : [];
+    await db.query(
+      `INSERT INTO interview_bank_settings (id, access_type, allowed_roles, allowed_users)
+       VALUES (1, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE access_type = VALUES(access_type),
+         allowed_roles = VALUES(allowed_roles), allowed_users = VALUES(allowed_users)`,
+      [type, JSON.stringify(roles), JSON.stringify(users)]
+    );
+    return res.json({ message: 'Access updated' });
+  } catch (err) {
+    console.error('updateBankAccess error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

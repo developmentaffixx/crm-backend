@@ -26,6 +26,9 @@ router.get('/today',     ctrl.getToday);
 router.get('/stats',     ctrl.getStats);
 
 // Question Bank (Admin only)
+router.get('/question-bank',        ctrl.getQuestionBank);
+router.get('/question-bank/access', requireAdmin, ctrl.getBankAccess);
+router.put('/question-bank/access', requireAdmin, ctrl.updateBankAccess);
 router.get('/questions',           ctrl.listQuestions);
 router.get('/questions/positions', ctrl.listPositions);
 router.post('/questions',          requireAdmin, ctrl.createQuestion);

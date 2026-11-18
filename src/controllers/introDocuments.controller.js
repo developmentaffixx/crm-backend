@@ -30,27 +30,31 @@ function parseRow(row) {
   return { ...row, sections, allowed_roles, allowed_users };
 }
 
-// Helper: check if a user has access to a document based on permissions
+// Helper: check if a user has access to a document, using the access chosen in
+// Settings → Introduction Docs (All Users / Roles / Users / Roles & Users).
+// Ids are compared as numbers so a "3" stored as text still matches 3.
+// An unknown access type denies access (it must never fail open).
 function userHasAccess(doc, userId, userRoleId) {
   const accessType = doc.access_type || 'all';
+  const uid = userId == null ? null : Number(userId);
+  const rid = userRoleId == null ? null : Number(userRoleId);
+
+  const listHas = (list, value) =>
+    value !== null && Array.isArray(list) && list.some(v => Number(v) === value);
 
   if (accessType === 'all') return true;
-
-  if (accessType === 'roles') {
-    return Array.isArray(doc.allowed_roles) && doc.allowed_roles.includes(userRoleId);
-  }
-
-  if (accessType === 'users') {
-    return Array.isArray(doc.allowed_users) && doc.allowed_users.includes(userId);
-  }
-
+  if (accessType === 'roles') return listHas(doc.allowed_roles, rid);
+  if (accessType === 'users') return listHas(doc.allowed_users, uid);
   if (accessType === 'roles_and_users') {
-    const roleMatch = Array.isArray(doc.allowed_roles) && doc.allowed_roles.includes(userRoleId);
-    const userMatch = Array.isArray(doc.allowed_users) && doc.allowed_users.includes(userId);
-    return roleMatch || userMatch;
+    return listHas(doc.allowed_roles, rid) || listHas(doc.allowed_users, uid);
   }
+  return false;
+}
 
-  return true;
+// Helper: current role id of a user (read live from the DB)
+async function getUserRoleId(userId) {
+  const [rows] = await db.query('SELECT role_id FROM users WHERE id = ?', [userId]);
+  return rows[0]?.role_id ?? null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,9 +83,7 @@ exports.list = async (req, res) => {
 exports.listVisible = async (req, res) => {
   try {
     const userId = req.user.id;
-    // Fetch role_id from DB
-    const [userRows] = await db.query('SELECT role_id FROM users WHERE id = ?', [userId]);
-    const userRoleId = userRows[0]?.role_id || null;
+    const userRoleId = await getUserRoleId(userId);
 
     const [rows] = await db.query(
       `SELECT id, title, sections, access_type, allowed_roles, allowed_users
@@ -121,7 +123,20 @@ exports.getOne = async (req, res) => {
     );
     if (rows.length === 0) return res.status(404).json({ message: 'Document not found' });
 
-    return res.json(parseRow(rows[0]));
+    const doc = parseRow(rows[0]);
+
+    // Admins manage every document. Everyone else follows the access set in
+    // Settings → Introduction Docs. A document the user may not see is reported as
+    // "not found" so its existence is not revealed.
+    if (!req.user.is_admin) {
+      const userRoleId = await getUserRoleId(req.user.id);
+      if (!userHasAccess(doc, req.user.id, userRoleId)) {
+        return res.status(404).json({ message: 'Document not found' });
+      }
+      return res.json({ id: doc.id, title: doc.title, sections: doc.sections });
+    }
+
+    return res.json(doc);
   } catch (err) {
     console.error('IntroDocuments getOne error:', err.message, err.sqlMessage);
     return res.status(500).json({ message: err.sqlMessage || err.message || 'Server error' });
