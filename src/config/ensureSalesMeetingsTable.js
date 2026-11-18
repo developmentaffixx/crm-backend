@@ -57,6 +57,12 @@ async function ensureSalesMeetingsTable() {
       'deleted TINYINT(1) DEFAULT 0',
       'created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
       'updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP',
+      // ── Added for the Sales → Meetings rework ──
+      // created_by = who BOOKED the meeting, attendee_id = who ATTENDS it
+      'attendee_id INT UNSIGNED DEFAULT NULL',
+      "meeting_type VARCHAR(30) NOT NULL DEFAULT 'discovery'",
+      'location_or_link VARCHAR(500) DEFAULT NULL',
+      'reschedule_of INT UNSIGNED DEFAULT NULL',
     ];
     for (const col of columns) {
       try {
@@ -66,9 +72,76 @@ async function ensureSalesMeetingsTable() {
       }
     }
 
+    // Existing rows: the person who booked the meeting also attends it.
+    await db.query('UPDATE sales_meetings SET attendee_id = created_by WHERE attendee_id IS NULL');
+
+    try {
+      await db.query('ALTER TABLE sales_meetings ADD INDEX idx_attendee_id (attendee_id)');
+    } catch (e) {
+      if (e.code !== 'ER_DUP_KEYNAME') console.error('[sales-meetings] index idx_attendee_id:', e.message);
+    }
+
+    await seedMeetingAccessOnce();
+
     console.log('[sales-meetings] table verified/created');
   } catch (err) {
     console.error('[sales-meetings] ensureSalesMeetingsTable failed:', err.code, err.errno, err.message);
+  }
+}
+
+/**
+ * One-time migration of Meetings access.
+ *
+ * Before this rework the Meetings page was gated by the Sales → "leads" submenu
+ * and every user could book / edit / delete their own meetings. Meetings now
+ * have their own submenu ("meetings") plus on/off switches in Settings → Roles.
+ *
+ * So existing roles / users do not lose access, copy their current "leads"
+ * level to "meetings" and switch on book / attend / edit / delete (the old
+ * behaviour). Team Reports starts OFF. Runs only while NO "meetings" row exists
+ * anywhere, so it never overwrites what an admin sets later.
+ */
+async function seedMeetingAccessOnce() {
+  try {
+    const [already] = await db.query(
+      `SELECT 1 FROM role_submenu_permissions WHERE module = 'revenue' AND submenu = 'meetings'
+       UNION ALL
+       SELECT 1 FROM user_submenu_permissions WHERE module = 'revenue' AND submenu = 'meetings'
+       LIMIT 1`
+    );
+    if (already.length > 0) return;
+
+    await db.query(
+      `INSERT IGNORE INTO role_submenu_permissions (role_id, module, submenu, can_access)
+       SELECT role_id, 'revenue', 'meetings', can_access
+       FROM role_submenu_permissions WHERE module = 'revenue' AND submenu = 'leads'`
+    );
+    for (const key of ['meeting_book', 'meeting_attend', 'meeting_edit', 'meeting_delete']) {
+      await db.query(
+        `INSERT IGNORE INTO role_submenu_permissions (role_id, module, submenu, can_access)
+         SELECT role_id, 'revenue', ?, 1
+         FROM role_submenu_permissions WHERE module = 'revenue' AND submenu = 'leads' AND can_access >= 1`,
+        [key]
+      );
+    }
+
+    // Per-user overrides on the old "leads" key
+    await db.query(
+      `INSERT IGNORE INTO user_submenu_permissions (user_id, module, submenu, can_access)
+       SELECT user_id, 'revenue', 'meetings', can_access
+       FROM user_submenu_permissions WHERE module = 'revenue' AND submenu = 'leads'`
+    );
+    for (const key of ['meeting_book', 'meeting_attend', 'meeting_edit', 'meeting_delete']) {
+      await db.query(
+        `INSERT IGNORE INTO user_submenu_permissions (user_id, module, submenu, can_access)
+         SELECT user_id, 'revenue', ?, 1
+         FROM user_submenu_permissions WHERE module = 'revenue' AND submenu = 'leads' AND can_access >= 1`,
+        [key]
+      );
+    }
+    console.log('[sales-meetings] meetings access seeded from leads access (one-time)');
+  } catch (err) {
+    console.error('[sales-meetings] seedMeetingAccessOnce failed:', err.message);
   }
 }
 

@@ -73,11 +73,23 @@ exports.autoStats = async (req, res) => {
     );
 
     // 3. Meetings booked (outcome = 'Meeting Scheduled')
-    const [meetingsBooked] = await db.query(
+    // Manual "Meeting Scheduled" follow-ups, EXCLUDING the ones Sales → Meetings creates
+    // automatically after an outcome (linked_follow_up_id). Those are not new bookings.
+    const [manualMeetings] = await db.query(
       `SELECT COUNT(*) AS count FROM lead_follow_ups
-       WHERE created_at >= ? AND created_at <= ? AND outcome = 'Meeting Scheduled' ${userId ? 'AND created_by = ?' : ''}`,
+       WHERE created_at >= ? AND created_at <= ? AND outcome = 'Meeting Scheduled'
+       AND id NOT IN (SELECT linked_follow_up_id FROM sales_meetings WHERE linked_follow_up_id IS NOT NULL)
+       ${userId ? 'AND created_by = ?' : ''}`,
       [dateStart, dateEnd, ...userParams]
     );
+    // Meetings booked on the Sales → Meetings page that day (a reschedule is not a new booking)
+    const [pageMeetings] = await db.query(
+      `SELECT COUNT(*) AS count FROM sales_meetings
+       WHERE created_at >= ? AND created_at <= ? AND deleted = 0 AND reschedule_of IS NULL
+       ${userId ? 'AND created_by = ?' : ''}`,
+      [dateStart, dateEnd, ...userParams]
+    );
+    const meetingsBooked = [{ count: (Number(manualMeetings[0].count) || 0) + (Number(pageMeetings[0].count) || 0) }];
 
     // 4. Replies received (any outcome that is NOT 'No Response' and NOT NULL)
     const [repliesReceived] = await db.query(

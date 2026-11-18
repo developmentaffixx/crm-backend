@@ -8,8 +8,13 @@ const db = require('../config/db');
 exports.dropdown = async (req, res) => {
   try {
     const where = "deleted = 0 AND status NOT IN ('Won', 'Converted')";
+    // ?minimal=1 returns names only (no phone / email / address) for pickers that
+    // do not need contact details, e.g. the Sales Meetings lead picker.
+    const columns = req.query.minimal === '1'
+      ? 'id, name, business_name'
+      : 'id, name, business_name, email, phone, address, city, state';
     const [rows] = await db.query(
-      `SELECT id, name, business_name, email, phone, address, city, state FROM leads WHERE ${where} ORDER BY COALESCE(NULLIF(business_name, ''), name) ASC`
+      `SELECT ${columns} FROM leads WHERE ${where} ORDER BY COALESCE(NULLIF(business_name, ''), name) ASC`
     );
 
     return res.json({ leads: rows });
