@@ -27,6 +27,11 @@ router.get('/stats',     ctrl.getStats);
 
 // Question Bank (Admin only)
 router.get('/question-bank',        ctrl.getQuestionBank);
+router.get('/question-bank/sections',        requireAdmin, ctrl.listSections);
+router.post('/question-bank/sections',       requireAdmin, ctrl.createSection);
+router.put('/question-bank/sections/order',  requireAdmin, ctrl.reorderSections);
+router.patch('/question-bank/sections/:id',  requireAdmin, ctrl.updateSection);
+router.delete('/question-bank/sections/:id', requireAdmin, ctrl.deleteSection);
 router.get('/question-bank/access', requireAdmin, ctrl.getBankAccess);
 router.put('/question-bank/access', requireAdmin, ctrl.updateBankAccess);
 router.get('/questions',           ctrl.listQuestions);

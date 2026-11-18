@@ -5,7 +5,10 @@ const http  = require('http');
 // Normalise a boolean-ish value to 0/1 for tinyint columns.
 // The joinus form forwards these as the STRINGS "0" / "1"; a plain
 // truthiness check (`"0" ? 1 : 0`) wrongly yields 1 because "0" is truthy.
-const BANK_SECTIONS = ['technical', 'practical', 'scenario', 'evaluation'];
+async function getSectionKeys() {
+  const [rows] = await db.query('SELECT section_key FROM interview_bank_sections ORDER BY sort_order ASC, id ASC');
+  return rows.map(r => r.section_key);
+}
 const BANK_ACCESS_TYPES = ['all', 'roles', 'users', 'roles_and_users'];
 
 function parseIdList(v) {
@@ -456,27 +459,33 @@ exports.listPositions = async (req, res) => {
 // ── POST /api/interview-scheduler/questions ───────────────────────────────────
 exports.createQuestion = async (req, res) => {
   try {
-    const { position_name, question, order_no } = req.body;
-    const section = BANK_SECTIONS.includes(req.body.section) ? req.body.section : 'technical';
-    if (!position_name?.trim() || !question?.trim()) {
+    const { position_name, order_no } = req.body;
+    // Supports one `question` or many via `questions: []` (bulk add)
+    const list = (Array.isArray(req.body.questions) ? req.body.questions : [req.body.question])
+      .map(q => (typeof q === 'string' ? q.trim() : ''))
+      .filter(Boolean);
+    if (!position_name?.trim() || list.length === 0) {
       return res.status(400).json({ message: 'Position and question are required' });
     }
+    const keys = await getSectionKeys();
+    const section = req.body.section || keys[0] || 'technical';
+    if (!keys.includes(section)) return res.status(400).json({ message: 'Invalid section' });
 
-    // Auto order_no if not provided
-    let nextOrder = order_no;
-    if (!nextOrder) {
-      const [[maxRow]] = await db.query(
-        `SELECT COALESCE(MAX(order_no), 0) + 1 AS next_order FROM interview_question_bank WHERE position_name = ?`,
-        [position_name.trim()]
-      );
-      nextOrder = maxRow.next_order;
-    }
-
-    const [result] = await db.query(
-      `INSERT INTO interview_question_bank (position_name, section, question, order_no, created_by) VALUES (?, ?, ?, ?, ?)`,
-      [position_name.trim(), section, question.trim(), nextOrder, req.user.id]
+    const [[maxRow]] = await db.query(
+      `SELECT COALESCE(MAX(order_no), 0) AS max_order FROM interview_question_bank WHERE position_name = ?`,
+      [position_name.trim()]
     );
-    return res.status(201).json({ message: 'Question added', id: result.insertId });
+    let next = order_no && list.length === 1 ? Number(order_no) : maxRow.max_order + 1;
+    let lastId = null;
+    for (const q of list) {
+      const [result] = await db.query(
+        `INSERT INTO interview_question_bank (position_name, section, question, order_no, created_by) VALUES (?, ?, ?, ?, ?)`,
+        [position_name.trim(), section, q, Math.min(next, 255), req.user.id]
+      );
+      lastId = result.insertId;
+      next += 1;
+    }
+    return res.status(201).json({ message: `${list.length} question${list.length > 1 ? 's' : ''} added`, id: lastId, count: list.length });
   } catch (err) {
     console.error('createQuestion error:', err);
     return res.status(500).json({ message: 'Server error' });
@@ -494,7 +503,7 @@ exports.updateQuestion = async (req, res) => {
     if (question      !== undefined) { fields.push('question = ?');      params.push(question); }
     if (order_no      !== undefined) { fields.push('order_no = ?');      params.push(order_no); }
     if (req.body.section !== undefined) {
-      if (!BANK_SECTIONS.includes(req.body.section)) return res.status(400).json({ message: 'Invalid section' });
+      if (!(await getSectionKeys()).includes(req.body.section)) return res.status(400).json({ message: 'Invalid section' });
       fields.push('section = ?'); params.push(req.body.section);
     }
     if (!fields.length) return res.status(400).json({ message: 'Nothing to update' });
@@ -541,17 +550,100 @@ exports.getQuestionBank = async (req, res) => {
        FROM interview_question_bank
        ORDER BY position_name ASC, order_no ASC, id ASC`
     );
+    const [sections] = await db.query(
+      `SELECT section_key AS \`key\`, label FROM interview_bank_sections ORDER BY sort_order ASC, id ASC`
+    );
+    const keys = sections.map(s => s.key);
     const map = new Map();
     for (const r of rows) {
-      if (!map.has(r.position_name)) {
-        map.set(r.position_name, { position_name: r.position_name, technical: [], practical: [], scenario: [], evaluation: [] });
-      }
-      const sec = BANK_SECTIONS.includes(r.section) ? r.section : 'technical';
-      map.get(r.position_name)[sec].push({ id: r.id, question: r.question });
+      if (!map.has(r.position_name)) map.set(r.position_name, { position_name: r.position_name, groups: {} });
+      const sec = keys.includes(r.section) ? r.section : null;
+      if (!sec) continue; // question points to a deleted/unknown heading
+      const g = map.get(r.position_name).groups;
+      (g[sec] = g[sec] || []).push({ id: r.id, question: r.question });
     }
-    return res.json({ positions: [...map.values()] });
+    return res.json({ sections, positions: [...map.values()] });
   } catch (err) {
     console.error('getQuestionBank error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ── Headings (shared across all roles) — admin ────────────────────────────────
+// GET /question-bank/sections
+exports.listSections = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT s.id, s.section_key, s.label, s.sort_order,
+              (SELECT COUNT(*) FROM interview_question_bank q WHERE q.section = s.section_key) AS question_count
+       FROM interview_bank_sections s ORDER BY s.sort_order ASC, s.id ASC`
+    );
+    return res.json({ sections: rows });
+  } catch (err) {
+    console.error('listSections error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// POST /question-bank/sections  { label }
+exports.createSection = async (req, res) => {
+  try {
+    const label = (req.body.label || '').trim().slice(0, 100);
+    if (!label) return res.status(400).json({ message: 'Heading name is required' });
+    const [[m]] = await db.query('SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM interview_bank_sections');
+    // Stable internal key (never changes on rename)
+    const key = 'sec_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    const [r] = await db.query(
+      'INSERT INTO interview_bank_sections (section_key, label, sort_order) VALUES (?, ?, ?)',
+      [key, label, m.n]
+    );
+    return res.status(201).json({ message: 'Heading added', id: r.insertId, section_key: key });
+  } catch (err) {
+    console.error('createSection error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// PATCH /question-bank/sections/:id  { label }
+exports.updateSection = async (req, res) => {
+  try {
+    const label = (req.body.label || '').trim().slice(0, 100);
+    if (!label) return res.status(400).json({ message: 'Heading name is required' });
+    await db.query('UPDATE interview_bank_sections SET label = ? WHERE id = ?', [label, req.params.id]);
+    return res.json({ message: 'Heading renamed' });
+  } catch (err) {
+    console.error('updateSection error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// PUT /question-bank/sections/order  { ids: [..] }
+exports.reorderSections = async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body.ids) ? req.body.ids.map(Number).filter(Number.isFinite) : [];
+    for (let i = 0; i < ids.length; i++) {
+      await db.query('UPDATE interview_bank_sections SET sort_order = ? WHERE id = ?', [i + 1, ids[i]]);
+    }
+    return res.json({ message: 'Order saved' });
+  } catch (err) {
+    console.error('reorderSections error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// DELETE /question-bank/sections/:id  (blocked while questions use it)
+exports.deleteSection = async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT section_key FROM interview_bank_sections WHERE id = ?', [req.params.id]);
+    if (!rows.length) return res.status(404).json({ message: 'Heading not found' });
+    const [[c]] = await db.query('SELECT COUNT(*) AS n FROM interview_question_bank WHERE section = ?', [rows[0].section_key]);
+    if (c.n > 0) {
+      return res.status(400).json({ message: `This heading has ${c.n} question(s). Move or delete them first.` });
+    }
+    await db.query('DELETE FROM interview_bank_sections WHERE id = ?', [req.params.id]);
+    return res.json({ message: 'Heading deleted' });
+  } catch (err) {
+    console.error('deleteSection error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };

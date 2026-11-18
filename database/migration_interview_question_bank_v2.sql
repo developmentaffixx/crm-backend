@@ -15,6 +15,20 @@ CREATE TABLE IF NOT EXISTS interview_bank_settings (
 INSERT IGNORE INTO interview_bank_settings (id, access_type, allowed_roles, allowed_users)
 VALUES (1, 'all', JSON_ARRAY(), JSON_ARRAY());
 
+-- 2b. Editable headings (shared by all roles). section_key is stable; label can be renamed.
+CREATE TABLE IF NOT EXISTS interview_bank_sections (
+  id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  section_key VARCHAR(40) NOT NULL,
+  label       VARCHAR(100) NOT NULL,
+  sort_order  INT NOT NULL DEFAULT 0,
+  UNIQUE KEY uq_ibs_key (section_key)
+) ENGINE=InnoDB;
+INSERT IGNORE INTO interview_bank_sections (section_key, label, sort_order) VALUES
+('technical',  'Technical Knowledge', 1),
+('practical',  'Practical Skills', 2),
+('scenario',   'Problem-Solving & Scenarios', 3),
+('evaluation', 'Expected Answer / Evaluation', 4);
+
 -- 3. Seed question bank (run once; inserts only, existing rows are untouched)
 INSERT INTO interview_question_bank (position_name, section, question, order_no) VALUES
 -- Social Media Manager
