@@ -78,6 +78,8 @@ const ceoDashboardRoutes     = require('./src/routes/ceoDashboard.routes');
 const salesDashboardRoutes   = require('./src/routes/salesDashboard.routes');
 const ceoRemindersRoutes     = require('./src/routes/ceoReminders.routes');
 const salesMeetingsRoutes    = require('./src/routes/salesMeetings.routes');
+const meetingMomsRoutes      = require('./src/routes/meetingMoms.routes');
+const meetingRequestsRoutes  = require('./src/routes/meetingRequests.routes');
 
 const app    = express();
 const server = http.createServer(app);
@@ -186,6 +188,8 @@ app.use('/api/ceo-dashboard',          ceoDashboardRoutes);
 app.use('/api/sales-dashboard',        salesDashboardRoutes);
 app.use('/api/ceo-reminders',          ceoRemindersRoutes);
 app.use('/api/sales-meetings',         salesMeetingsRoutes);
+app.use('/api/meeting-moms',           meetingMomsRoutes);
+app.use('/api/meeting-requests',       meetingRequestsRoutes);
 
 // Rule Book — accessible to all authenticated users (not admin-only)
 const { authenticate: authMiddleware } = require('./src/middleware/auth');
@@ -235,6 +239,8 @@ server.listen(PORT, () => {
 
   // ── Ensure Sales Meetings table exists (Revenue → Meetings) ────────────────
   require('./src/config/ensureSalesMeetingsTable')();
+  require('./src/config/ensureMeetingMomTables')();
+  require('./src/config/ensureMeetingRequestsTable')();
   require('./src/config/ensureExtensionColumns')();
   require('./src/config/ensureLeaveCoordinator')();
   require('./src/controllers/projectAllocation.controller').ensureSchema();

@@ -63,6 +63,9 @@ async function ensureSalesMeetingsTable() {
       "meeting_type VARCHAR(30) NOT NULL DEFAULT 'discovery'",
       'location_or_link VARCHAR(500) DEFAULT NULL',
       'reschedule_of INT UNSIGNED DEFAULT NULL',
+      // Optional exact time + length (the slot stays the required booking unit)
+      'start_time TIME DEFAULT NULL',
+      'duration_minutes SMALLINT UNSIGNED DEFAULT NULL',
     ];
     for (const col of columns) {
       try {

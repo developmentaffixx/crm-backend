@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { authenticate, requireAdminOrSubmenu } = require('../middleware/auth');
 const controller = require('../controllers/ceoDashboard.controller');
+const todaysMeetings = require('../controllers/todaysMeetings.controller');
 
 router.use(authenticate);
 
@@ -10,5 +11,8 @@ const checkCeoDashboardAccess = requireAdminOrSubmenu('dashboard', 'dashboard_ce
 
 // GET /api/ceo-dashboard/overview
 router.get('/overview', checkCeoDashboardAccess, controller.getOverview);
+
+// GET /api/ceo-dashboard/todays-meetings  (Lead / Client / Team meetings involving me, today)
+router.get('/todays-meetings', checkCeoDashboardAccess, todaysMeetings.getTodaysMeetings);
 
 module.exports = router;

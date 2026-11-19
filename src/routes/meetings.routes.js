@@ -13,6 +13,9 @@ router.get('/today-count', meetingsController.todayCount);
 // GET  /api/meetings/my-active-timer — current user's active meeting timer (for header)
 router.get('/my-active-timer', meetingsController.getMyActiveTimer);
 
+// GET  /api/meetings/founders — Founder / CEO users (for "Include Founder")
+router.get('/founders', meetingsController.founders);
+
 // GET  /api/meetings          — list meetings
 router.get('/', meetingsController.list);
 

@@ -54,6 +54,37 @@ const toIntOrNull = (v) => {
   return Number.isNaN(n) ? null : n;
 };
 
+/**
+ * Optional exact start time + duration.
+ * A field that is not in the body is left out of the result (undefined = no change).
+ * An empty string clears it (null).
+ * Returns { error } or { start_time, duration_minutes }.
+ */
+function parseTiming(body) {
+  const out = {};
+  if (body.start_time !== undefined) {
+    const raw = body.start_time === null ? '' : String(body.start_time).trim();
+    if (raw === '') {
+      out.start_time = null;
+    } else {
+      const m = /^([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?$/.exec(raw);
+      if (!m) return { error: 'start_time must be a valid time (HH:MM)' };
+      out.start_time = `${m[1]}:${m[2]}:00`;
+    }
+  }
+  if (body.duration_minutes !== undefined) {
+    const raw = body.duration_minutes === null ? '' : String(body.duration_minutes).trim();
+    if (raw === '') {
+      out.duration_minutes = null;
+    } else {
+      const n = parseInt(raw, 10);
+      if (!/^\d+$/.test(raw) || n < 5 || n > 480) return { error: 'duration_minutes must be between 5 and 480' };
+      out.duration_minutes = n;
+    }
+  }
+  return out;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ACCESS  (Settings → Roles & Permissions → Sales)
 //   view   : "Meetings" submenu level  0 none / 1 own / 2 all
@@ -608,11 +639,15 @@ exports.create = async (req, res) => {
     const scheduleError = await validateSchedule({ date: meeting_date, slot, attendeeId });
     if (scheduleError) return res.status(scheduleError.includes('already has') ? 409 : 400).json({ message: scheduleError });
 
+    const timing = parseTiming(req.body);
+    if (timing.error) return res.status(400).json({ message: timing.error });
+
     const [result] = await db.query(
       `INSERT INTO sales_meetings
-         (lead_id, created_by, attendee_id, meeting_date, slot, mode, meeting_type, title, location_or_link, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [leadId, req.user.id, attendeeId, meeting_date, slot, modeVal, typeVal, title || null, location_or_link || null, notes || null]
+         (lead_id, created_by, attendee_id, meeting_date, slot, start_time, duration_minutes, mode, meeting_type, title, location_or_link, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [leadId, req.user.id, attendeeId, meeting_date, slot, timing.start_time ?? null, timing.duration_minutes ?? null,
+       modeVal, typeVal, title || null, location_or_link || null, notes || null]
     );
 
     return res.status(201).json(await fetchMeeting(result.insertId));
@@ -685,6 +720,11 @@ exports.update = async (req, res) => {
     if (b.title !== undefined) updates.title = b.title || null;
     if (b.notes !== undefined) updates.notes = b.notes || null;
     if (b.location_or_link !== undefined) updates.location_or_link = b.location_or_link || null;
+
+    const timing = parseTiming(b);
+    if (timing.error) return res.status(400).json({ message: timing.error });
+    if (timing.start_time !== undefined) updates.start_time = timing.start_time;
+    if (timing.duration_minutes !== undefined) updates.duration_minutes = timing.duration_minutes;
 
     const newDate = b.meeting_date !== undefined ? ymd(b.meeting_date) : ymd(meeting.meeting_date);
     const newSlot = b.slot !== undefined ? b.slot : meeting.slot;

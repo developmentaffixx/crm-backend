@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { listFounders } = require('../helpers/founders');
 
 /**
  * GET /api/meetings/today-count
@@ -667,5 +668,20 @@ exports.getMyActiveTimer = async (req, res) => {
   } catch (err) {
     console.error('my-active-meeting-timer error:', err);
     return res.json({ active: false });
+  }
+};
+
+/**
+ * GET /api/meetings/founders
+ * Users who are the Founder / CEO: the "CEO" role, or anyone granted the
+ * CEO dashboard (module 'dashboard', submenu 'dashboard_ceo'; user override wins over role).
+ * Used by the meeting form's "Include Founder" option.
+ */
+exports.founders = async (req, res) => {
+  try {
+    return res.json(await listFounders());
+  } catch (err) {
+    console.error('Meetings founders error:', err);
+    return res.status(500).json({ message: 'Server error' });
   }
 };
