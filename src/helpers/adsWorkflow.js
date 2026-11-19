@@ -16,9 +16,16 @@ const ADS_PERM_COLS = ['can_ads_campaign_approve', 'can_ads_report_approve'];
 // (creative_hub row): Ads (2) + Shoots (2). Older schemas may only have the Ads pair.
 const SHOOT_PERM_COLS = ['can_shoot_approve', 'can_shoot_close_approve'];
 const CONTENT_PERM_COLS = ['can_content_smm_approve', 'can_content_pcpm_approve', 'can_content_complete'];
-const APPROVAL_PERM_COLS = [...ADS_PERM_COLS, ...SHOOT_PERM_COLS, ...CONTENT_PERM_COLS];
+// Ads edit-after-completion toggle (separate from approvals)
+const ADS_EDIT_COLS = ['can_ads_edit_completed'];
+const APPROVAL_PERM_COLS = [...ADS_PERM_COLS, ...SHOOT_PERM_COLS, ...CONTENT_PERM_COLS, ...ADS_EDIT_COLS];
 // Column sets to try, newest first — older databases may not have every toggle yet
-const PERM_COL_FALLBACKS = [APPROVAL_PERM_COLS, [...ADS_PERM_COLS, ...SHOOT_PERM_COLS], ADS_PERM_COLS];
+const PERM_COL_FALLBACKS = [
+  APPROVAL_PERM_COLS,
+  [...ADS_PERM_COLS, ...SHOOT_PERM_COLS, ...CONTENT_PERM_COLS],
+  [...ADS_PERM_COLS, ...SHOOT_PERM_COLS],
+  ADS_PERM_COLS,
+];
 
 // ─── Dates ────────────────────────────────────────────────────────────────────
 
@@ -151,7 +158,7 @@ async function saveAdsPerms(table, keyCol, id, module, perm) {
 async function resolveAdsApprovalFlags(userId, roleId) {
   const flags = {
     campaign: false, report: false, shoot: false, shootClose: false,
-    contentSmm: false, contentPcpm: false, contentComplete: false,
+    contentSmm: false, contentPcpm: false, contentComplete: false, adsEditCompleted: false,
   };
   const KEY = {
     can_ads_campaign_approve: 'campaign',
@@ -161,6 +168,7 @@ async function resolveAdsApprovalFlags(userId, roleId) {
     can_content_smm_approve: 'contentSmm',
     can_content_pcpm_approve: 'contentPcpm',
     can_content_complete: 'contentComplete',
+    can_ads_edit_completed: 'adsEditCompleted',
   };
   const apply = (row, onlyIfSet) => {
     Object.entries(KEY).forEach(([col, key]) => {
@@ -196,6 +204,9 @@ async function ensureAdsWorkflowSchema() {
     "ALTER TABLE role_permissions ADD COLUMN IF NOT EXISTS can_ads_report_approve TINYINT(1) NOT NULL DEFAULT 0",
     "ALTER TABLE user_permissions ADD COLUMN IF NOT EXISTS can_ads_campaign_approve TINYINT(1) NOT NULL DEFAULT 0",
     "ALTER TABLE user_permissions ADD COLUMN IF NOT EXISTS can_ads_report_approve TINYINT(1) NOT NULL DEFAULT 0",
+    // Edit-after-completion toggle
+    "ALTER TABLE role_permissions ADD COLUMN IF NOT EXISTS can_ads_edit_completed TINYINT(1) NOT NULL DEFAULT 0",
+    "ALTER TABLE user_permissions ADD COLUMN IF NOT EXISTS can_ads_edit_completed TINYINT(1) NOT NULL DEFAULT 0",
     // Shoots two-stage approval toggles
     "ALTER TABLE role_permissions ADD COLUMN IF NOT EXISTS can_shoot_approve TINYINT(1) NOT NULL DEFAULT 0",
     "ALTER TABLE role_permissions ADD COLUMN IF NOT EXISTS can_shoot_close_approve TINYINT(1) NOT NULL DEFAULT 0",

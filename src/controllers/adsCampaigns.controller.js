@@ -5,6 +5,8 @@ const {
 
 const canApproveCampaign = (req) => !!(req.user.is_admin || req.userCanAdsCampaignApprove);
 const canApproveReport   = (req) => !!(req.user.is_admin || req.userCanAdsReportApprove);
+// "Edit After Completion" toggle (Settings → Roles & Permissions)
+const canEditCompletedAd = (req) => !!(req.user.is_admin || req.userCanAdsEditCompleted);
 
 /**
  * Mark a content_calendar_ads slot as completed.
@@ -34,6 +36,7 @@ async function canModifyCampaign(req, campaign) {
   if (req.socialAccessLevel >= 2) return true;               // SMM lead — all campaigns
   if (req.userCanApprove || req.userCanSmmApprove) return true; // approvers act on any campaign
   if (req.userCanAdsCampaignApprove || req.userCanAdsReportApprove) return true;
+  if (req.userCanAdsEditCompleted && campaign.status === 'completed') return true; // any completed ad
 
   const uid = Number(req.user.id);
   if (Number(campaign.created_by) === uid) return true;
@@ -405,7 +408,8 @@ exports.update = async (req, res) => {
       }
     } else {
       // Plain edit (no status decision)
-      if (CLOSED.includes(current) && !req.user.is_admin) {
+      const canEditCompleted = current === 'completed' && canEditCompletedAd(req);
+      if (CLOSED.includes(current) && !req.user.is_admin && !canEditCompleted) {
         return res.status(400).json({ message: 'This campaign is closed and can no longer be edited' });
       }
       if (current === 'rejected') {
@@ -537,6 +541,11 @@ exports.update = async (req, res) => {
       }
     }
 
+    // Edit made after completion → keep an audit trail
+    if (current === 'completed' && Object.keys(updates).length > 0) {
+      await logAdsHistory(req.params.id, 'complete', `Campaign edited after completion (${Object.keys(updates).join(', ')})`, req.user.id);
+    }
+
     const [updated] = await db.query('SELECT * FROM ad_campaigns WHERE id = ?', [req.params.id]);
     res.emitSocket('ads:updated', updated[0]);
     return res.json(updated[0]);
@@ -654,8 +663,8 @@ exports.saveReport = async (req, res) => {
 
     // Completed: report is final — only report approvers may correct it
     if (campaign.status === 'completed') {
-      if (!canApproveReport(req)) {
-        return res.status(403).json({ message: 'This report is already approved. Only Ads Report approvers can edit it.' });
+      if (!canApproveReport(req) && !canEditCompletedAd(req)) {
+        return res.status(403).json({ message: 'This report is already approved. Only Ads Report approvers or users with Edit After Completion permission can edit it.' });
       }
       const report = await upsertReport(campaignId, req.body, req.user.id);
       await completeLinkedSlot(campaign, report, req.user.id, res); // keep slot amounts in sync
