@@ -2,11 +2,10 @@ const express = require('express');
 const router  = express.Router();
 const multer  = require('multer');
 const { body, param } = require('express-validator');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireAdminOrSubmenu } = require('../middleware/auth');
 const ctrl = require('../controllers/settings.controller');
 const docCtrl = require('../controllers/documentTemplates.controller');
 const docGenCtrl = require('../controllers/documentGenerate.controller');
-const onboardingCtrl = require('../controllers/onboarding.controller');
 
 // Multer for avatar upload
 const upload = multer({
@@ -23,14 +22,7 @@ router.use(authenticate);
 
 // Read-only endpoints used by the People Ops > On-boarding page (Document Templates tab).
 // Allowed for admins and users with on-boarding access; everything else below is admin only.
-async function requireAdminOrOnboarding(req, res, next) {
-  try {
-    if (await onboardingCtrl.hasOnboardingAccess(req.user, 'view')) return next();
-  } catch (err) {
-    console.error('requireAdminOrOnboarding error:', err);
-  }
-  return res.status(403).json({ message: 'Access denied' });
-}
+const requireAdminOrOnboarding = requireAdminOrSubmenu('people_ops', 'on_boarding_doc_templates');
 router.get('/users',                        requireAdminOrOnboarding, ctrl.getUsers);
 router.get('/document-templates',           requireAdminOrOnboarding, docCtrl.list);
 router.get('/document-templates/:key',      requireAdminOrOnboarding, docCtrl.getByKey);

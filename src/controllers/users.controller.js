@@ -185,7 +185,7 @@ exports.myPermissions = async (req, res) => {
       // Admins get full submenu access for all modules
       const submenuAccess = {
         creative_hub: { social_overview: 2, content_calendar: 2, content_writing: 2, shoot_planning: 2, ads_planning: 2, daily_journal: 2, report_centre: 2 },
-        people_ops: { on_boarding: 2, recruitment: 2, leaves: 2, reimbursements: 2 },
+        people_ops: { on_boarding: 2, on_boarding_doc_templates: 2, recruitment: 2, leaves: 2, reimbursements: 2 },
         revenue: { leads: 2, daily_reporting: 2, introduction: 2 },
         finance: { proposals: 2, quotations: 2, invoices: 2, expenses: 2, income: 2, assets: 2, payroll: 2, software_licenses: 2, inventories: 2, vendor_agreement: 2 },
         reports: { employees: 2, clients: 2, tickets: 2, leads: 2, projects: 2, finance: 2, performance: 2 },
