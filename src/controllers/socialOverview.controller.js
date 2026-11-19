@@ -294,7 +294,7 @@ exports.getBoard = async (req, res) => {
     if (service === 'smm') names = SMM_NAMES;
     if (service === 'personal_branding') names = PB_NAMES;
 
-    let where = `p.deleted = 0 AND p.status = 'active' AND ps.status IN ('active','paused') AND LOWER(s.name) IN (?)`;
+    let where = `p.deleted = 0 AND p.status = 'active' AND (ps.status IN ('active','paused') OR EXISTS (SELECT 1 FROM service_cycles sc_live WHERE sc_live.project_service_id = ps.id AND sc_live.status = 'active')) AND LOWER(s.name) IN (?)`;
     const params = [names];
     if (search) {
       where += ' AND (p.title LIKE ? OR COALESCE(l.business_name, "") LIKE ?)';

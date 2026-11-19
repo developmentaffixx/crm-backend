@@ -77,6 +77,15 @@ async function ensureReminderTables() {
       ) ENGINE=InnoDB
     `);
 
+    // Allow linking client / team meetings from the Meetings module (older tables only had sales_meeting)
+    try {
+      await db.query(
+        "ALTER TABLE ceo_reminders MODIFY linked_type ENUM('task','ticket','sales_meeting','meeting') DEFAULT NULL"
+      );
+    } catch (e) {
+      console.error('[ceo-reminders] linked_type update failed:', e.message);
+    }
+
     console.log('[ceo-reminders] tables verified/created');
   } catch (err) {
     console.error('[ceo-reminders] ensureReminderTables failed:', err.code, err.errno, err.message);

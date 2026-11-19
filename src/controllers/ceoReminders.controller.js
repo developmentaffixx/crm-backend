@@ -21,7 +21,7 @@ const { emitEvent } = require('../config/socket');
 
 const TYPES = ['task', 'ticket', 'deadline', 'meeting', 'discussion', 'follow_up', 'general'];
 const PRIORITIES = ['low', 'medium', 'high', 'critical'];
-const LINK_TYPES = ['task', 'ticket', 'sales_meeting'];
+const LINK_TYPES = ['task', 'ticket', 'sales_meeting', 'meeting'];
 const OPEN_STATUSES = ['pending', 'viewed', 'acknowledged', 'in_progress'];
 
 // Head-side forward-only progression
@@ -36,6 +36,17 @@ const STATUS_TS = {
 const SLOT_LABELS = { morning: 'Morning (9–12 AM)', afternoon: 'Afternoon (12–4 PM)', evening: 'Evening (4–8 PM)' };
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** 'HH:MM:SS' -> '10:30 AM' */
+function time12(t) {
+  if (!t) return '';
+  const [h, m] = String(t).split(':').map(Number);
+  return `${String(h % 12 === 0 ? 12 : h % 12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+function timeRangeLabel(start, end) {
+  if (!start) return '';
+  return end ? `${time12(start)} – ${time12(end)}` : time12(start);
+}
 const TIME_RE = /^\d{2}:\d{2}(:\d{2})?$/;
 
 const toInt = (v) => {
@@ -93,7 +104,7 @@ async function nextReminderCode() {
 }
 
 /** Verifies the linked record exists; returns a small snapshot or null. */
-async function loadLinkedItem(type, id) {
+async function loadLinkedItem(type, id, user = null) {
   if (!type || !id) return null;
   if (type === 'task') {
     const [r] = await db.query('SELECT id, title, deadline AS due_date FROM tasks WHERE id = ? AND deleted = 0', [id]);
@@ -111,6 +122,21 @@ async function loadLinkedItem(type, id) {
          LEFT JOIN leads l ON l.id = sm.lead_id
         WHERE sm.id = ? AND sm.deleted = 0`,
       [id]
+    );
+    return r[0] || null;
+  }
+  if (type === 'meeting') {
+    // Client / team meeting from the Meetings module (meetings table).
+    // Non-admins can only link meetings they created or are a member of.
+    const scope = user && !user.is_admin
+      ? 'AND (m.created_by = ? OR m.id IN (SELECT meeting_id FROM meeting_members WHERE user_id = ?))'
+      : '';
+    const params = user && !user.is_admin ? [id, user.id, user.id] : [id];
+    const [r] = await db.query(
+      `SELECT m.id, m.title, m.meeting_date, m.start_time
+         FROM meetings m
+        WHERE m.id = ? AND m.deleted = 0 ${scope}`,
+      params
     );
     return r[0] || null;
   }
@@ -137,7 +163,11 @@ const BASE_SELECT = `
          sm.title AS lk_sm_title, sm.meeting_date AS lk_sm_date, sm.slot AS lk_sm_slot, sm.mode AS lk_sm_mode,
          sm.pre_confirmed AS lk_sm_confirmed, sm.outcome AS lk_sm_outcome,
          COALESCE(sml.business_name, sml.name) AS lk_sm_lead,
-         CONCAT(smu.first_name, ' ', smu.last_name) AS lk_sm_owner
+         CONCAT(smu.first_name, ' ', smu.last_name) AS lk_sm_owner,
+
+         gm.title AS lk_gm_title, gm.meeting_date AS lk_gm_date, gm.start_time AS lk_gm_start,
+         gm.end_time AS lk_gm_end, gm.status AS lk_gm_status, gm.meeting_type AS lk_gm_kind,
+         CONCAT(gmu.first_name, ' ', gmu.last_name) AS lk_gm_owner
     FROM ceo_reminders r
     LEFT JOIN users ru  ON ru.id = r.recipient_user_id
     LEFT JOIN users cu  ON cu.id = r.created_by
@@ -176,6 +206,16 @@ function shapeRow(row) {
       confirmed: !!row.lk_sm_confirmed, outcome: row.lk_sm_outcome,
       meeting_date: row.lk_sm_date, slot: row.lk_sm_slot, slot_label: SLOT_LABELS[row.lk_sm_slot] || row.lk_sm_slot,
       mode: row.lk_sm_mode, lead: row.lk_sm_lead, assignee: row.lk_sm_owner, url: '/revenue/meetings',
+    };
+  } else if (row.linked_type === 'meeting' && row.lk_gm_date !== null) {
+    linked = {
+      type: 'meeting', id: row.linked_id,
+      title: row.lk_gm_title,
+      status: (row.lk_gm_status || '').replace(/_/g, ' '),
+      meeting_date: row.lk_gm_date,
+      slot_label: timeRangeLabel(row.lk_gm_start, row.lk_gm_end),
+      kind: row.lk_gm_kind === 'client' ? 'Client meeting' : 'Team meeting',
+      assignee: row.lk_gm_owner, url: '/meetings',
     };
   } else if (row.linked_type) {
     linked = { type: row.linked_type, id: row.linked_id, title: 'Linked record no longer exists', missing: true };
@@ -279,7 +319,37 @@ exports.linkSearch = async (req, res) => {
       });
     }
 
-    return res.status(400).json({ message: 'type must be task, ticket or sales_meeting' });
+    if (type === 'meeting') {
+      // Upcoming client / team meetings from the Meetings module.
+      // Non-admins only see meetings they created or are a member of.
+      const scope = req.user.is_admin ? '' : 'AND (m.created_by = ? OR m.id IN (SELECT meeting_id FROM meeting_members WHERE user_id = ?))';
+      const params = [q, ...(req.user.is_admin ? [] : [req.user.id, req.user.id])];
+      const [rows] = await db.query(
+        `SELECT m.id, m.title, m.meeting_date, m.start_time, m.end_time, m.status, m.meeting_type,
+                CONCAT(u.first_name, ' ', u.last_name) AS assignee
+           FROM meetings m
+           LEFT JOIN users u ON u.id = m.created_by
+          WHERE m.deleted = 0 AND m.meeting_date >= CURDATE() AND m.status IN ('scheduled', 'in_progress')
+            AND m.title LIKE ?
+            ${scope}
+          ORDER BY m.meeting_date ASC, m.start_time ASC
+          LIMIT 30`,
+        params
+      );
+      return res.json({
+        items: rows.map((r) => ({
+          id: r.id,
+          title: r.title,
+          meeting_date: r.meeting_date,
+          meeting_time: r.start_time,
+          slot_label: timeRangeLabel(r.start_time, r.end_time),
+          status: r.meeting_type === 'client' ? 'Client meeting' : 'Team meeting',
+          assignee: r.assignee,
+        })),
+      });
+    }
+
+    return res.status(400).json({ message: 'type must be task, ticket, sales_meeting or meeting' });
   } catch (err) {
     console.error('CEO reminders link search error:', err.message);
     return res.status(500).json({ message: 'Server error' });
@@ -441,7 +511,7 @@ exports.create = async (req, res) => {
       if (!LINK_TYPES.includes(b.linked_type)) return res.status(400).json({ message: 'Invalid link type' });
       linkedId = toInt(b.linked_id);
       if (!linkedId) return res.status(400).json({ message: 'Select the item to link' });
-      linkedItem = await loadLinkedItem(b.linked_type, linkedId);
+      linkedItem = await loadLinkedItem(b.linked_type, linkedId, req.user);
       if (!linkedItem) return res.status(400).json({ message: 'The linked item was not found' });
       linkedType = b.linked_type;
     }
@@ -456,8 +526,8 @@ exports.create = async (req, res) => {
     let meetingTime = null;
     if (type === 'meeting' || type === 'discussion') {
       meetingDate = b.meeting_date
-        || (linkedType === 'sales_meeting' ? String(linkedItem.meeting_date).slice(0, 10) : null);
-      meetingTime = normTime(b.meeting_time);
+        || (linkedType === 'sales_meeting' || linkedType === 'meeting' ? String(linkedItem.meeting_date).slice(0, 10) : null);
+      meetingTime = normTime(b.meeting_time) || (linkedType === 'meeting' ? normTime(linkedItem.start_time) : null);
       if (!meetingDate) return res.status(400).json({ message: 'Meeting date is required' });
     }
 

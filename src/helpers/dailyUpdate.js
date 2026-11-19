@@ -15,6 +15,16 @@ const db = require('../config/db');
 
 const SUBMENU = 'daily_journal';
 
+/**
+ * A service is "live" (daily updates required) when its status is active, OR it has a
+ * running cycle. This stops a service that was marked completed by mistake, but still
+ * has an active cycle, from silently dropping out of the Daily Update list.
+ * Requires project_services aliased as ps.
+ */
+const LIVE_SERVICE_SQL = `(ps.status = 'active' OR EXISTS (
+  SELECT 1 FROM service_cycles sc_live
+  WHERE sc_live.project_service_id = ps.id AND sc_live.status = 'active'))`;
+
 /** Today's date in IST as YYYY-MM-DD. */
 function todayIST() {
   return new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -139,7 +149,7 @@ async function requiredServices(userIds = null) {
        LEFT JOIN leads l       ON l.id = p.client_id
        WHERE u.is_active = 1 AND u.deleted = 0 AND u.is_admin = 0
          AND p.deleted = 0 AND p.status = 'active'
-         AND ps.status = 'active'
+         AND ${LIVE_SERVICE_SQL}
          ${userFilter}
        ORDER BY u.first_name, p.title, s.name`,
       params
@@ -264,6 +274,7 @@ async function ensureDailyJournalSchema() {
 }
 
 module.exports = {
+  LIVE_SERVICE_SQL,
   todayIST,
   toDateStr,
   parseJson,

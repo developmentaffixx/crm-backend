@@ -6,6 +6,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const ctrl = require('../controllers/settings.controller');
 const docCtrl = require('../controllers/documentTemplates.controller');
 const docGenCtrl = require('../controllers/documentGenerate.controller');
+const onboardingCtrl = require('../controllers/onboarding.controller');
 
 // Multer for avatar upload
 const upload = multer({
@@ -18,8 +19,24 @@ const upload = multer({
   },
 });
 
-// All settings routes require authentication + admin
 router.use(authenticate);
+
+// Read-only endpoints used by the People Ops > On-boarding page (Document Templates tab).
+// Allowed for admins and users with on-boarding access; everything else below is admin only.
+async function requireAdminOrOnboarding(req, res, next) {
+  try {
+    if (await onboardingCtrl.hasOnboardingAccess(req.user, 'view')) return next();
+  } catch (err) {
+    console.error('requireAdminOrOnboarding error:', err);
+  }
+  return res.status(403).json({ message: 'Access denied' });
+}
+router.get('/users',                        requireAdminOrOnboarding, ctrl.getUsers);
+router.get('/document-templates',           requireAdminOrOnboarding, docCtrl.list);
+router.get('/document-templates/:key',      requireAdminOrOnboarding, docCtrl.getByKey);
+router.post('/document-templates/generate', requireAdminOrOnboarding, docGenCtrl.generate);
+
+// All remaining settings routes require admin
 router.use(requireAdmin);
 
 // ─── Roles ────────────────────────────────────────────────────────────────────
@@ -49,7 +66,6 @@ router.put('/users/:id/permission-overrides',    [param('id').isInt({ min: 1 })]
 router.delete('/users/:id/permission-overrides', [param('id').isInt({ min: 1 })], ctrl.clearUserPermissionOverrides);
 
 // ─── Users ────────────────────────────────────────────────────────────────────
-router.get('/users',              ctrl.getUsers);
 router.get('/users/next-emp-code', ctrl.getNextEmpCode);
 router.get('/users/:id',          [param('id').isInt({ min: 1 })], ctrl.getUserDetail);
 router.post('/users', [
@@ -81,9 +97,6 @@ router.put('/daily-targets', ctrl.updateDailyTargets);
 router.get('/audit-logs', ctrl.getAuditLogs);
 
 // ─── Document Templates ───────────────────────────────────────────────────────
-router.get('/document-templates',           docCtrl.list);
-router.post('/document-templates/generate', docGenCtrl.generate);
-router.get('/document-templates/:key',      docCtrl.getByKey);
 router.put('/document-templates/:key',      docCtrl.update);
 
 module.exports = router;

@@ -1,7 +1,7 @@
 const db = require('../config/db');
 const {
   todayIST, toDateStr, parseJson, parseEntry,
-  requiredServices, submittedKeys, userStatus, resolveEntryService,
+  requiredServices, submittedKeys, userStatus, resolveEntryService, LIVE_SERVICE_SQL,
 } = require('../helpers/dailyUpdate');
 
 const WORK_CATEGORIES = ['Content', 'Shoot', 'Ads', 'Design - Editing', 'Social Listenings'];
@@ -158,7 +158,7 @@ exports.myServices = async (req, res) => {
          JOIN projects p      ON p.id = ps.project_id
          LEFT JOIN services s ON s.id = ps.service_id
          LEFT JOIN leads l    ON l.id = p.client_id
-         WHERE p.deleted = 0 AND p.status = 'active' AND ps.status = 'active'
+         WHERE p.deleted = 0 AND p.status = 'active' AND ${LIVE_SERVICE_SQL}
          ORDER BY p.title, s.name`
       );
     } else {
@@ -170,7 +170,7 @@ exports.myServices = async (req, res) => {
          JOIN projects p          ON p.id = ps.project_id
          LEFT JOIN services s     ON s.id = ps.service_id
          LEFT JOIN leads l        ON l.id = p.client_id
-         WHERE psm.user_id = ? AND p.deleted = 0 AND p.status = 'active' AND ps.status = 'active'
+         WHERE psm.user_id = ? AND p.deleted = 0 AND p.status = 'active' AND ${LIVE_SERVICE_SQL}
          ORDER BY p.title, s.name`,
         [req.user.id]
       );
