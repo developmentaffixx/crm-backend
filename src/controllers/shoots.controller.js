@@ -592,7 +592,7 @@ exports.update = async (req, res) => {
     // (calendar shoots inherit it from their plan).
     let newLink = null;
     const linkSent = ['project_id', 'project_service_id', 'cycle_id'].some(k => req.body[k] !== undefined);
-    if (linkSent && !shoot.calendar_slot_id && !isCloseRequest) {
+    if (linkSent && (!shoot.calendar_slot_id || isAdmin) && !isCloseRequest) {
       try {
         newLink = await resolveShootLink(db, req.body);
       } catch (e) {
