@@ -238,7 +238,7 @@ exports.filterUsers = async (req, res) => {
 exports.list = async (req, res) => {
   try {
     const {
-      status, is_active, priority, search, exclude_done, assigned_to, project_id,
+      status, is_active, priority, search, exclude_done, assigned_to, project_id, service_id,
       team_id,
       page = 1, limit = 25,
       sort_by = 'deadline', sort_order = 'ASC'
@@ -342,6 +342,10 @@ exports.list = async (req, res) => {
     if (project_id) {
       where += ' AND EXISTS (SELECT 1 FROM project_tasks pt_f WHERE pt_f.task_id = t.id AND pt_f.project_id = ?)';
       params.push(project_id);
+    }
+    if (service_id) {
+      where += ' AND EXISTS (SELECT 1 FROM project_tasks pt_sf WHERE pt_sf.task_id = t.id AND pt_sf.service_id = ?)';
+      params.push(service_id);
     }
 
     // Team filter: narrow to tasks belonging to members of a specific team.
@@ -493,6 +497,10 @@ exports.list = async (req, res) => {
     if (project_id) {
       summaryWhere += ' AND EXISTS (SELECT 1 FROM project_tasks pt_fs WHERE pt_fs.task_id = t.id AND pt_fs.project_id = ?)';
       summaryParams.push(project_id);
+    }
+    if (service_id) {
+      summaryWhere += ' AND EXISTS (SELECT 1 FROM project_tasks pt_fss WHERE pt_fss.task_id = t.id AND pt_fss.service_id = ?)';
+      summaryParams.push(service_id);
     }
 
     // Mirror the team_id filter so tab counts match the filtered table.
