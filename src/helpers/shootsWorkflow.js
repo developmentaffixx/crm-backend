@@ -270,6 +270,12 @@ async function ensureShootsWorkflowSchema() {
     `ALTER TABLE content_calendar_shoots
        ADD COLUMN IF NOT EXISTS completed_at DATETIME DEFAULT NULL,
        ADD COLUMN IF NOT EXISTS completed_by INT UNSIGNED DEFAULT NULL`,
+    // 1 = slot was added from the Shoots page (not planned in the calendar)
+    `ALTER TABLE content_calendar_shoots
+       ADD COLUMN IF NOT EXISTS created_from_shoot TINYINT(1) NOT NULL DEFAULT 0`,
+    // Slots added by the old approve-time code were the only ones saved as 'confirmed'
+    `UPDATE content_calendar_shoots SET created_from_shoot = 1
+       WHERE status = 'confirmed' AND created_from_shoot = 0`,
   ];
   for (const sql of steps) {
     try { await db.query(sql); } catch (e) { console.error('⚠️  Shoots workflow schema (non-fatal):', e.message); }

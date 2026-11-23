@@ -1467,6 +1467,7 @@ exports.adminGetToday = async (req, res) => {
       `SELECT u.id, u.first_name, u.last_name, u.department, u.designation, u.avatar_url,
               a.id AS attendance_id, a.clock_in, a.clock_out, a.clock_in_status, a.total_served_seconds, a.total_afs_seconds,
               MAX(l.id) AS leave_id, MAX(l.leave_type) AS leave_type,
+              MAX(l.duration = 'full_day') AS leave_is_full_day, MAX(l.duration) AS leave_duration,
               MAX(t.id) AS current_task_id, MAX(t.title) AS current_task_title,
               MAX(afs.id) AS active_afs_id, MAX(afs.start_time) AS afs_start_time
        FROM users u
@@ -1562,6 +1563,7 @@ exports.adminGetToday = async (req, res) => {
         productive_seconds,
         on_leave: !!u.leave_id,
         leave_type: u.leave_type,
+        leave_duration: u.leave_id ? (u.leave_is_full_day ? 'full_day' : u.leave_duration) : null,
         current_task: u.current_task_id ? { id: u.current_task_id, title: u.current_task_title } : null,
         current_meeting: activeMeetingMap[u.id] || null,
         current_ticket: activeTicketMap[u.id] || null,

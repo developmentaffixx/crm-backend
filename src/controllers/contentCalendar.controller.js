@@ -227,9 +227,13 @@ exports.getOne = async (req, res) => {
     const [shoots] = await db.query(
       `SELECT cs.*,
               s.shoot_id_code AS linked_shoot_code, s.project_campaign_name AS shoot_name,
-              s.shoot_date AS linked_shoot_date, s.city AS shoot_city, s.location_type AS shoot_location_type
+              s.shoot_date AS linked_shoot_date, s.city AS shoot_city, s.location_type AS shoot_location_type,
+              s.id AS linked_shoot_id_resolved, s.status AS shoot_status
        FROM content_calendar_shoots cs
-       LEFT JOIN shoots s ON s.id = cs.linked_shoot_id
+       LEFT JOIN shoots s ON s.id = COALESCE(
+         cs.linked_shoot_id,
+         (SELECT sx.id FROM shoots sx WHERE sx.calendar_slot_id = cs.id AND sx.deleted = 0 ORDER BY sx.id DESC LIMIT 1)
+       )
        WHERE cs.plan_id = ?
        ORDER BY cs.id ASC`,
       [plan.id]
@@ -544,34 +548,76 @@ exports.update = async (req, res) => {
       }
     }
 
-    // Replace shoots — preserve assignment & linked data by position
+    // Shoots — update existing slots in place (by id) so shoots stay linked via
+    // shoots.calendar_slot_id; insert new slots; remove only the slots taken out.
     if (shoots !== undefined) {
       const [existingShoots] = await conn.query(
         'SELECT * FROM content_calendar_shoots WHERE plan_id = ? ORDER BY id ASC',
         [req.params.id]
       );
-      await conn.query('DELETE FROM content_calendar_shoots WHERE plan_id = ?', [req.params.id]);
-      if (shoots.length > 0) {
-        for (let i = 0; i < shoots.length; i++) {
-          const shoot = shoots[i];
-          const prev = existingShoots[i] || null;
-          const assignedTo = pick(shoot, prev, 'assigned_to');
-          const assignedBy = shoot.assigned_to
-            ? (prev && String(prev.assigned_to) === String(shoot.assigned_to) ? prev.assigned_by || req.user.id : req.user.id)
-            : (prev ? prev.assigned_by : null);
-          const slotStatus = resolveSlotStatus(shoot, prev, assignedTo);
+      const existingById = new Map(existingShoots.map(s => [Number(s.id), s]));
+      // Older clients send no ids → match by position, as before
+      const anyIds = shoots.some(s => toInt(s.id));
+      const incoming = shoots.map((s, i) => {
+        const id = anyIds ? toInt(s.id) : (existingShoots[i] ? Number(existingShoots[i].id) : null);
+        return { ...s, id: id && existingById.has(id) ? id : null };
+      });
+      const keepIds = new Set(incoming.filter(s => s.id).map(s => s.id));
+      const removed = existingShoots.filter(s => !keepIds.has(Number(s.id)));
+
+      // A removed slot must not leave a real shoot without its calendar slot
+      if (removed.length > 0) {
+        const removedIds = removed.map(s => s.id);
+        const [linked] = await conn.query(
+          `SELECT id, shoot_id_code, status FROM shoots
+           WHERE deleted = 0 AND calendar_slot_id IN (?) AND status <> 'draft'`,
+          [removedIds]
+        );
+        if (linked.length > 0) {
+          await conn.rollback(); conn.release();
+          return res.status(400).json({
+            message: `Cannot remove a shoot slot that has a shoot (${linked.map(s => s.shoot_id_code).join(', ')}). Delete or move that shoot from the Shoots page first.`,
+          });
+        }
+        // Unfilled placeholder shoots go with their slot
+        await conn.query(
+          `UPDATE shoots SET deleted = 1 WHERE deleted = 0 AND status = 'draft' AND calendar_slot_id IN (?)`,
+          [removedIds]
+        );
+        await conn.query('DELETE FROM content_calendar_shoots WHERE id IN (?)', [removedIds]);
+      }
+
+      for (const shoot of incoming) {
+        const prev = shoot.id ? existingById.get(shoot.id) : null;
+        const assignedTo = pick(shoot, prev, 'assigned_to');
+        const assignedBy = shoot.assigned_to
+          ? (prev && String(prev.assigned_to) === String(shoot.assigned_to) ? prev.assigned_by || req.user.id : req.user.id)
+          : (prev ? prev.assigned_by : null);
+        const slotStatus = resolveSlotStatus(shoot, prev, assignedTo);
+        // Fields the editor does not send keep their stored value
+        const keep = (key, fallback = null) => (shoot[key] !== undefined ? shoot[key] : (prev ? prev[key] : fallback));
+
+        if (prev) {
           await conn.query(
-            `INSERT INTO content_calendar_shoots 
-              (plan_id, assigned_to, assigned_by, linked_shoot_id, linked_shoot_ref_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status, slot_status, rejection_reason, submitted_at, approved_at, approved_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [req.params.id, assignedTo || null, assignedBy || null,
-             toInt(pick(shoot, prev, 'linked_shoot_id')), toInt(prev ? prev.linked_shoot_ref_id : null),
-             toNull(shoot.shoot_date), toNull(shoot.location),
-             toNull(shoot.description), shoot.num_videos || 0, shoot.num_photos || 0,
-             toNull(shoot.talent), toNull(shoot.production_notes),
-             shoot.status || (prev ? prev.status : 'planned') || 'planned', slotStatus,
-             prev ? prev.rejection_reason : null, prev ? prev.submitted_at : null,
-             prev ? prev.approved_at : null, prev ? prev.approved_by : null]
+            `UPDATE content_calendar_shoots SET
+               assigned_to = ?, assigned_by = ?, linked_shoot_id = ?, shoot_date = ?, location = ?, description = ?,
+               num_videos = ?, num_photos = ?, talent = ?, production_notes = ?, status = ?, slot_status = ?
+             WHERE id = ?`,
+            [assignedTo || null, assignedBy || null, toInt(pick(shoot, prev, 'linked_shoot_id')),
+             toNull(keep('shoot_date')), toNull(keep('location')), toNull(keep('description')),
+             keep('num_videos', 0) || 0, keep('num_photos', 0) || 0,
+             toNull(keep('talent')), toNull(keep('production_notes')),
+             shoot.status || prev.status || 'planned', slotStatus, prev.id]
+          );
+        } else {
+          await conn.query(
+            `INSERT INTO content_calendar_shoots
+              (plan_id, assigned_to, assigned_by, linked_shoot_id, shoot_date, location, description, num_videos, num_photos, talent, production_notes, status, slot_status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [req.params.id, assignedTo || null, assignedBy || null, toInt(shoot.linked_shoot_id),
+             toNull(shoot.shoot_date), toNull(shoot.location), toNull(shoot.description),
+             shoot.num_videos || 0, shoot.num_photos || 0,
+             toNull(shoot.talent), toNull(shoot.production_notes), shoot.status || 'planned', slotStatus]
           );
         }
       }

@@ -2,7 +2,7 @@ const { validationResult } = require('express-validator');
 const db = require('../config/db');
 const {
   parseIds, crewToJson, generateShootCode, logShootHistory, notifyShoot, setSlotStatus,
-  LinkError, resolveShootLink, linkFromPlan, attachLinkNames,
+  LinkError, resolveShootLink, linkFromPlan, attachLinkNames, toDateStr,
 } = require('../helpers/shootsWorkflow');
 
 const toNull = (val) => (val === '' || val === undefined || val === null) ? null : val;
@@ -65,86 +65,62 @@ async function notifyUser(userId, triggeredBy, payload, res) {
   }
 }
 
+// ─── Shoots page ⇄ Content Calendar ──────────────────────────────────────────
+// A shoot created on the Shoots page is placed as a shoot slot in the calendar
+// that already exists for its cycle. The calendar is never created from here.
+
+const NO_CALENDAR_MSG = 'No content calendar exists for this cycle. Create the calendar for this project / service / cycle first.';
+
+/** Calendar slot status that mirrors a shoot status. */
+const SLOT_STATUS_FOR_SHOOT = {
+  draft: 'assigned', pending_approval: 'submitted', rejected: 'rejected',
+  approved: 'approved', pending_completion: 'approved', completed: 'completed',
+};
+
+/** The cycle's Content Calendar plan id, or null. Never creates a plan. */
+async function findCyclePlanId(cycleId) {
+  if (!cycleId) return null;
+  const [rows] = await db.query(
+    'SELECT id FROM content_calendar_plans WHERE cycle_id = ? AND deleted = 0 ORDER BY id ASC LIMIT 1',
+    [cycleId]
+  );
+  return rows.length ? rows[0].id : null;
+}
+
 /**
- * Ensure an approved DIRECT shoot (one created from the Shoots page, with no
- * calendar_slot_id) appears on the Content Calendar. Attaches to the client's
- * month plan (creating that plan if none exists), inserts a content_calendar_shoots
- * slot in the 'approved' state, and links it both ways.
- * Returns the new calendar slot id, or null if it couldn't be placed.
+ * Add a slot for a Shoots-page shoot to an existing calendar plan and link both
+ * ways (shoots.calendar_slot_id + slot.linked_shoot_ref_id). Returns the slot id.
  */
-async function ensureCalendarSlotForDirectShoot(shoot, actingUserId) {
+async function addSlotForShoot(shoot, planId, actingUserId) {
+  const slotStatus = SLOT_STATUS_FOR_SHOOT[shoot.status] || 'submitted';
+  const approved = ['approved', 'completed'].includes(slotStatus);
+  const values = [
+    planId, shoot.shoot_manager_id || shoot.created_by || null, actingUserId, shoot.id,
+    toDateStr(shoot.shoot_date), shoot.city || null, shoot.project_campaign_name || null,
+    slotStatus, approved ? actingUserId : null,
+  ];
+  const cols = `plan_id, assigned_to, assigned_by, linked_shoot_ref_id, shoot_date, location, description,
+                status, slot_status, submitted_at, approved_at, approved_by`;
+  const vals = `?, ?, ?, ?, ?, ?, ?, 'planned', ?, NOW(), ${approved ? 'NOW()' : 'NULL'}, ?`;
+  let result;
   try {
-    if (shoot.calendar_slot_id) return shoot.calendar_slot_id; // already on calendar
-    const clientId = shoot.client_brand_id || null;
-
-    const base = shoot.shoot_date ? new Date(shoot.shoot_date) : new Date();
-    const planMonth = `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, '0')}-01`;
-
-    let planId = null;
-
-    // Preferred: the plan for the shoot's cycle (one plan per cycle), created if missing
-    if (shoot.cycle_id) {
-      const [cyclePlan] = await db.query(
-        'SELECT id FROM content_calendar_plans WHERE cycle_id = ? AND deleted = 0 ORDER BY id ASC LIMIT 1',
-        [shoot.cycle_id]
-      );
-      if (cyclePlan.length > 0) {
-        planId = cyclePlan[0].id;
-      } else {
-        const [cyc] = await db.query('SELECT start_date FROM service_cycles WHERE id = ?', [shoot.cycle_id]);
-        const cs = cyc[0]?.start_date ? new Date(cyc[0].start_date) : base;
-        const cycleMonth = `${cs.getFullYear()}-${String(cs.getMonth() + 1).padStart(2, '0')}-01`;
-        const [planResult] = await db.query(
-          `INSERT INTO content_calendar_plans (client_id, project_id, cycle_id, plan_month, status, created_by)
-           VALUES (?, ?, ?, ?, 'active', ?)`,
-          [clientId, shoot.project_id || null, shoot.cycle_id, cycleMonth, actingUserId]
-        );
-        planId = planResult.insertId;
-      }
-    }
-
-    // Legacy shoots without a cycle: the client's plan for the shoot month
-    const [existingPlan] = planId ? [[{ id: planId }]] : await db.query(
-      `SELECT id FROM content_calendar_plans
-       WHERE deleted = 0 AND plan_month = ?
-         AND ((client_id = ?) OR (? IS NULL AND client_id IS NULL))
-       ORDER BY id ASC LIMIT 1`,
-      [planMonth, clientId, clientId]
-    );
-    if (existingPlan.length > 0) {
-      planId = existingPlan[0].id;
-    } else {
-      const [planResult] = await db.query(
-        `INSERT INTO content_calendar_plans (client_id, plan_month, status, created_by)
-         VALUES (?, ?, 'active', ?)`,
-        [clientId, planMonth, actingUserId]
-      );
-      planId = planResult.insertId;
-    }
-
-    const [slotResult] = await db.query(
-      `INSERT INTO content_calendar_shoots
-        (plan_id, assigned_to, assigned_by, linked_shoot_ref_id, shoot_date, location, description,
-         status, slot_status, approved_at, approved_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed', 'approved', NOW(), ?)`,
-      [
-        planId,
-        shoot.shoot_manager_id || shoot.created_by || null,
-        actingUserId,
-        shoot.id,
-        shoot.shoot_date || null,
-        shoot.city || null,
-        shoot.project_campaign_name || null,
-        actingUserId,
-      ]
-    );
-    const slotId = slotResult.insertId;
-    await db.query('UPDATE shoots SET calendar_slot_id = ? WHERE id = ?', [slotId, shoot.id]);
-    return slotId;
-  } catch (err) {
-    console.error('ensureCalendarSlotForDirectShoot failed (shoot not placed on calendar):', err.message);
-    return null;
+    [result] = await db.query(
+      `INSERT INTO content_calendar_shoots (${cols}, created_from_shoot) VALUES (${vals}, 1)`, values);
+  } catch (e) {
+    if (e.code !== 'ER_BAD_FIELD_ERROR') throw e;
+    [result] = await db.query(`INSERT INTO content_calendar_shoots (${cols}) VALUES (${vals})`, values);
   }
+  await db.query('UPDATE shoots SET calendar_slot_id = ? WHERE id = ?', [result.insertId, shoot.id]);
+  return result.insertId;
+}
+
+/** Was this calendar slot created from the Shoots page (not planned in the calendar)? */
+async function isShootPageSlot(slotId) {
+  if (!slotId) return false;
+  try {
+    const [rows] = await db.query('SELECT created_from_shoot FROM content_calendar_shoots WHERE id = ?', [slotId]);
+    return !!rows[0]?.created_from_shoot;
+  } catch (e) { return false; }
 }
 
 // ─── LIST ────────────────────────────────────────────────────────────────────
@@ -409,6 +385,7 @@ exports.create = async (req, res) => {
     // Slot fills inherit it from the calendar plan; direct shoots must choose it.
     let link;
     let slotPlanId = null;
+    let directPlanId = null;
 
     // ── Permission ──
     if (slotIdVal) {
@@ -441,6 +418,9 @@ exports.create = async (req, res) => {
         if (link.cycle && !['active', 'upcoming'].includes(link.cycle.status)) {
           return res.status(400).json({ message: `Cycle "${link.cycle.title}" is ${link.cycle.status}. Pick an active or upcoming cycle.` });
         }
+        // Shoots-page shoots go into the cycle's existing calendar
+        directPlanId = await findCyclePlanId(link.cycle_id);
+        if (!directPlanId) return res.status(400).json({ message: NO_CALENDAR_MSG });
       }
     } catch (e) {
       if (e instanceof LinkError) return res.status(400).json({ message: e.message });
@@ -530,6 +510,15 @@ exports.create = async (req, res) => {
         type: 'slot_submitted', title: 'Shoot submitted for approval',
         message: 'Shoot details filled. Please review.', link: '/social/shoots',
       }, res);
+    } else if (directPlanId) {
+      // Show it on the cycle's calendar right away as "submitted"
+      try {
+        const [fresh] = await db.query('SELECT * FROM shoots WHERE id = ?', [insertId]);
+        const newSlotId = await addSlotForShoot(fresh[0], directPlanId, uid);
+        res.emitSocket('content-calendar:updated', { slot_id: newSlotId });
+      } catch (e) {
+        console.error('Placing shoot on calendar failed:', e.message);
+      }
     }
     await logShootHistory(insertId, 'submit', null, uid);
 
@@ -608,6 +597,13 @@ exports.update = async (req, res) => {
       if (newLink.client_id && req.body.client_brand_id === undefined) updates.client_brand_id = newLink.client_id;
     }
 
+    // Moving to another cycle → the slot moves to that cycle's existing calendar
+    let movePlanId = null;
+    if (newLink && newLink.cycle_id && String(newLink.cycle_id) !== String(shoot.cycle_id)) {
+      movePlanId = await findCyclePlanId(newLink.cycle_id);
+      if (!movePlanId) return res.status(400).json({ message: NO_CALENDAR_MSG });
+    }
+
     if (Object.keys(updates).length === 0 && !newLink) {
       return res.status(400).json({ message: 'No valid fields to update' });
     }
@@ -640,6 +636,26 @@ exports.update = async (req, res) => {
       await db.query(`UPDATE shoots SET ${setClauses} WHERE id = ?`, [...Object.values(updates), req.params.id]);
     }
     if (newLink) await saveShootLink(shoot.id, newLink);
+
+    // Keep the calendar slot in step with the shoot
+    try {
+      if (movePlanId && shoot.calendar_slot_id) {
+        await db.query('UPDATE content_calendar_shoots SET plan_id = ? WHERE id = ?', [movePlanId, shoot.calendar_slot_id]);
+        res.emitSocket('content-calendar:updated', { slot_id: shoot.calendar_slot_id });
+      } else if (movePlanId) {
+        const [fresh] = await db.query('SELECT * FROM shoots WHERE id = ?', [shoot.id]);
+        const newSlotId = await addSlotForShoot(fresh[0], movePlanId, uid);
+        shoot.calendar_slot_id = newSlotId;
+        res.emitSocket('content-calendar:updated', { slot_id: newSlotId });
+      }
+      // Shoots-page slots follow the shoot's date (calendar-planned slots keep their plan date)
+      if (updates.shoot_date && shoot.calendar_slot_id && await isShootPageSlot(shoot.calendar_slot_id)) {
+        await db.query('UPDATE content_calendar_shoots SET shoot_date = ? WHERE id = ?', [toDateStr(updates.shoot_date), shoot.calendar_slot_id]);
+        res.emitSocket('content-calendar:updated', { slot_id: shoot.calendar_slot_id });
+      }
+    } catch (e) {
+      console.error('Shoot → calendar slot sync failed:', e.message);
+    }
 
     if (updates.status === 'pending_completion') {
       try {
@@ -748,8 +764,17 @@ exports.approve = async (req, res) => {
         await setSlotStatus(shoot.calendar_slot_id, action === 'approve' ? 'approved' : 'rejected', uid, remarks);
         res.emitSocket('content-calendar:updated', { slot_id: shoot.calendar_slot_id });
       } else if (action === 'approve') {
-        const newSlotId = await ensureCalendarSlotForDirectShoot(shoot, uid);
-        if (newSlotId) res.emitSocket('content-calendar:updated', { slot_id: newSlotId });
+        // Older Shoots-page shoot with no slot yet: place it only if its cycle already has a calendar
+        try {
+          const planId = await findCyclePlanId(shoot.cycle_id);
+          if (planId) {
+            const [fresh] = await db.query('SELECT * FROM shoots WHERE id = ?', [shoot.id]);
+            const newSlotId = await addSlotForShoot(fresh[0], planId, uid);
+            res.emitSocket('content-calendar:updated', { slot_id: newSlotId });
+          }
+        } catch (e) {
+          console.error('Placing approved shoot on calendar failed:', e.message);
+        }
       }
       await notifyUser(shoot.created_by, uid, action === 'approve'
         ? { type: 'shoot_approved', slot_id: shoot.calendar_slot_id, title: 'Your shoot was approved', message: `${label} is approved.` }
@@ -875,8 +900,12 @@ exports.remove = async (req, res) => {
     await db.query('UPDATE shoots SET deleted = 1 WHERE id = ?', [shoot.id]);
     await logShootHistory(shoot.id, 'reject', 'Deleted', req.user.id);
 
-    // Free the calendar slot so it can be filled again
-    if (shoot.calendar_slot_id && shoot.status !== 'completed') {
+    if (shoot.calendar_slot_id && await isShootPageSlot(shoot.calendar_slot_id)) {
+      // The slot only existed for this Shoots-page shoot → remove it from the calendar
+      await db.query('DELETE FROM content_calendar_shoots WHERE id = ?', [shoot.calendar_slot_id]);
+      res.emitSocket('content-calendar:updated', { slot_id: shoot.calendar_slot_id });
+    } else if (shoot.calendar_slot_id && shoot.status !== 'completed') {
+      // Free the planned calendar slot so it can be filled again
       await setSlotStatus(shoot.calendar_slot_id, 'assigned', req.user.id);
       res.emitSocket('content-calendar:updated', { slot_id: shoot.calendar_slot_id });
     }
