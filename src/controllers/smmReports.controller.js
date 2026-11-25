@@ -341,7 +341,7 @@ exports.regenerate = async (req, res) => {
 
 // Optional: Gemini rewrites the wording only. Output is rejected if it introduces any number
 // that was not in the source text, so it cannot add unsupported figures.
-const POLISH_KEYS = ['overview', 'deliverables_summary', 'performance_note', 'platform_note', 'audience_note', 'content_notes', 'ads_note',
+const POLISH_KEYS = ['demographics_note', 'overview', 'deliverables_summary', 'performance_note', 'platform_note', 'audience_note', 'content_notes', 'ads_note',
   'worked', 'not_worked', 'improvements', 'attention', 'rec_content', 'rec_formats', 'rec_campaigns', 'rec_audience', 'rec_ads',
   'plan_direction', 'plan_priorities', 'plan_actions'];
 const numbersIn = (s) => new Set((String(s).match(/\d[\d,]*\.?\d*/g) || []).map(n => n.replace(/,/g, '').replace(/\.$/, '')));
@@ -494,8 +494,17 @@ exports.exportPptx = async (req, res) => {
     if (!analysis) return res.status(400).json({ message: 'Report has no analysis yet' });
 
     const branding = await loadBranding(row.client_id);
+    // Screenshots of the top-ranked content (ranks follow the table order on slide 6).
+    const contentImages = [];
+    const ranked = (analysis.facts.content && analysis.facts.content.items) || [];
+    for (let i = 0; i < Math.min(ranked.length, 6) && contentImages.length < 3; i++) {
+      if (!ranked[i].image_url) continue;
+      const data = await imageDataUri(ranked[i].image_url);
+      if (data) contentImages.push({ data, rank: i + 1 });
+    }
     const buf = await pptxBuilder.toBuffer({
       meta: {
+        contentImages,
         clientName: row.client_name || row.project_title || 'Client',
         month: row.reporting_month,
         nextMonthLabel: monthLabel(shiftMonth(row.reporting_month, 1)),

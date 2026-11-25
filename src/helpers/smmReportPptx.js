@@ -179,7 +179,14 @@ function build({ meta, facts, narrative, draft }) {
       if (facts.hasPrevious && inter.some(k => k.prev !== null)) series.unshift({ name: monthLabel(facts.previousMonth), labels: inter.map(k => k.label), values: inter.map(k => k.prev || 0) });
       s.addChart(pptx.charts.BAR, series, { ...chartBase, x: 0.5, y: 2.7, w: 7.0, h: 4.1, barDir: 'col', barGrouping: 'clustered', showValue: true, dataLabelFontSize: 8, dataLabelFormatCode: '#,##0' });
     }
-    box(s, 'Audience interaction', [...narrative.audience_note, ...(facts.engagementRate !== null ? [`Engagement rate: ${pct1(facts.engagementRate)} of reach.`] : [])], 7.7, 2.7, 5.15, 4.1);
+    const interaction = [...narrative.audience_note, ...(facts.engagementRate !== null ? [`Engagement rate: ${pct1(facts.engagementRate)} of reach.`] : [])];
+    const demo = narrative.demographics_note || [];
+    if (demo.length) {
+      box(s, 'Audience interaction', interaction, 7.7, 2.7, 5.15, 1.7);
+      box(s, 'Audience demographics', demo, 7.7, 4.5, 5.15, 2.3, { fontSize: 10 });
+    } else {
+      box(s, 'Audience interaction', interaction, 7.7, 2.7, 5.15, 4.1);
+    }
   }
 
   // 6 ─ Top content
@@ -194,7 +201,18 @@ function build({ meta, facts, narrative, draft }) {
       items.forEach((i, idx) => rows.push([td(idx + 1, { align: 'center', bold: true }), td(i.title, { bold: true }), td(i.platform ? platformLabel(i.platform.toLowerCase()) : '-'), td(i.format), td(fmt(i.reach), { align: 'center' }), td(fmt(i.likes), { align: 'center' }), td(fmt(i.comments), { align: 'center' }), td(fmt(i.shares), { align: 'center' }), td(fmt(i.saves), { align: 'center' }), td(fmt(i.score), { align: 'center', bold: true })]));
       s.addTable(rows, tableOpts({ x: 0.5, y: 1.3, w: 12.35, colW: [0.4, 3.6, 1.3, 1.1, 1.0, 0.9, 1.0, 0.9, 0.8, 1.35], rowH: 0.35 }));
     }
-    box(s, 'Key observations', narrative.content_notes, 0.5, 4.5, 12.35, 2.35);
+    // Screenshots of the best content (up to 3) sit left of the observations.
+    const shots = (meta.contentImages || []).filter(x => x && x.data).slice(0, 3);
+    if (shots.length) {
+      shots.forEach((img, i) => {
+        const x = 0.5 + i * 1.95;
+        s.addImage({ data: img.data, x, y: 4.5, w: 1.8, h: 2.05, sizing: { type: 'contain', w: 1.8, h: 2.05 } });
+        s.addText(`#${img.rank}`, { x, y: 6.55, w: 1.8, h: 0.3, fontSize: 9, bold: true, color: C.dark, align: 'center', fontFace: FONT });
+      });
+      box(s, 'Key observations', narrative.content_notes, 6.5, 4.5, 6.35, 2.35);
+    } else {
+      box(s, 'Key observations', narrative.content_notes, 0.5, 4.5, 12.35, 2.35);
+    }
   }
 
   // 7 ─ Ads

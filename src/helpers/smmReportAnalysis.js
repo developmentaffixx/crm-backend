@@ -133,13 +133,18 @@ function summarise(inputs) {
     spend: num(c.spend), reach: num(c.reach), impressions: num(c.impressions), clicks: num(c.clicks),
     leads: num(c.leads), conversions: num(c.conversions),
   }));
-  const pick = (k) => (num(a[k]) !== null ? num(a[k]) : (campaigns.some(c => c[k] !== null) ? sum(campaigns.map(c => c[k])) : null));
+  (a.campaigns || []).forEach((raw, i) => {
+    campaigns[i].gst = num(raw.gst); campaigns[i].messages = num(raw.messages); campaigns[i].calls = num(raw.calls);
+  });
+  const pick = (k) => (num(a[k]) !== null ? num(a[k]) : (campaigns.some(c => c[k] !== null && c[k] !== undefined) ? sum(campaigns.map(c => c[k])) : null));
   const ads = {
     enabled: !!a.enabled,
     spend: pick('spend'), reach: pick('reach'), impressions: pick('impressions'),
     clicks: pick('clicks'), leads: pick('leads'), conversions: pick('conversions'),
+    gst: pick('gst'), messages: pick('messages'), calls: pick('calls'),
     campaigns,
   };
+  ads.enquiries = ads.messages !== null || ads.calls !== null ? (ads.messages || 0) + (ads.calls || 0) : null;
   ads.cpl = ads.spend !== null && ads.leads ? ads.spend / ads.leads : null;
   ads.ctr = ads.clicks !== null && ads.impressions ? (ads.clicks / ads.impressions) * 100 : null;
   ads.cpc = ads.spend !== null && ads.clicks ? ads.spend / ads.clicks : null;
@@ -157,7 +162,7 @@ function rankContent(inputs) {
     return {
       title: c.title || c.link, platform: c.platform || '', format: (c.format || 'Post').trim(),
       reach: num(c.reach), likes: num(c.likes), comments: num(c.comments), shares: num(c.shares), saves: num(c.saves),
-      views: num(c.views), score, link: c.link || '', notes: c.notes || '',
+      views: num(c.views), score, link: c.link || '', notes: c.notes || '', image_url: c.image_url || '',
     };
   });
   items.sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -176,6 +181,15 @@ function rankContent(inputs) {
     bestVideo: items.find(i => isVideo(i.format) && i.score !== null) || null,
     formats,
   };
+}
+
+function summariseDemographics(inputs) {
+  const d = inputs.demographics || {};
+  const cities = (d.cities || []).filter(c => c && c.name && num(c.pct) !== null).map(c => ({ name: c.name, pct: num(c.pct) }));
+  const ageRanges = (d.age_ranges || []).filter(a => a && a.range && num(a.pct) !== null).map(a => ({ range: a.range, pct: num(a.pct) }));
+  const female = num(d.gender && d.gender.female_pct);
+  const male = num(d.gender && d.gender.male_pct);
+  return { cities, ageRanges, gender: { female, male }, hasData: !!(cities.length || ageRanges.length || female !== null || male !== null) };
 }
 
 function computeFacts(inputs, prevInputs) {
@@ -221,6 +235,7 @@ function computeFacts(inputs, prevInputs) {
     deliverables: { ...cur.deliverables, prevPct: prev ? prev.deliverables.pct : null, change: delChange },
     ads: { ...cur.ads, changes: adChanges, prev: prev ? { spend: prev.ads.spend, leads: prev.ads.leads, cpl: prev.ads.cpl, ctr: prev.ads.ctr } : null },
     content: rankContent(inputs),
+    demographics: summariseDemographics(inputs),
   };
 }
 
@@ -408,8 +423,21 @@ function buildNarrative(inputs, facts) {
       ...(facts.content.bestVideo ? [`Best reel/video: "${facts.content.bestVideo.title}" with ${fmt(facts.content.bestVideo.score)} interactions.`] : []),
       ...(info.best_content ? [info.best_content] : []),
     ],
+    demographics_note: (() => {
+      const dm = facts.demographics;
+      if (!dm || !dm.hasData) return [];
+      const lines = [];
+      if (dm.cities.length) lines.push(`Top cities: ${dm.cities.map(c => `${c.name} ${c.pct}%`).join(', ')}.`);
+      if (dm.ageRanges.length) {
+        const top = [...dm.ageRanges].sort((a, b) => b.pct - a.pct)[0];
+        lines.push(`Age groups: ${dm.ageRanges.map(a => `${a.range} ${a.pct}%`).join(', ')}. Largest group: ${top.range} (${top.pct}%).`);
+      }
+      if (dm.gender.female !== null || dm.gender.male !== null) lines.push(`Gender split: ${dm.gender.female !== null ? `Women ${dm.gender.female}%` : ''}${dm.gender.female !== null && dm.gender.male !== null ? ', ' : ''}${dm.gender.male !== null ? `Men ${dm.gender.male}%` : ''}.`);
+      return lines;
+    })(),
     ads_note: ads.enabled ? [
-      ...(ads.spend !== null ? [`Total ad spend: ${money(ads.spend)}.`] : []),
+      ...(ads.spend !== null ? [`Total ad spend: ${money(ads.spend)}${ads.gst !== null ? ` + GST ${money(ads.gst)} = ${money(ads.spend + ads.gst)}` : ''}.`] : []),
+      ...(ads.messages !== null || ads.calls !== null ? [`Messages: ${fmt(ads.messages || 0)}, calls: ${fmt(ads.calls || 0)}, total enquiries: ${fmt(ads.enquiries)}.`] : []),
       ...(ads.leads !== null ? [`Leads generated: ${fmt(ads.leads)}${ads.cpl !== null ? ` at ${money(ads.cpl)} per lead` : ''}.`] : []),
       ...(ads.ctr !== null ? [`Click-through rate: ${pct1(ads.ctr)}.`] : []),
     ] : [],
