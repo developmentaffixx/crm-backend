@@ -41,4 +41,11 @@ async function ensureSmmReportSchema() {
   )`);
 }
 
-module.exports = { ensureSmmReportSchema };
+// Runs once per process; a failed attempt is retried on the next request.
+let ready = null;
+function ensureSmmReportSchemaOnce() {
+  if (!ready) ready = ensureSmmReportSchema().catch((err) => { ready = null; throw err; });
+  return ready;
+}
+
+module.exports = { ensureSmmReportSchema, ensureSmmReportSchemaOnce };

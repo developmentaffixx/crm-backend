@@ -3,11 +3,18 @@ const { param } = require('express-validator');
 const { authenticate } = require('../middleware/auth');
 const { requireSocialAccess } = require('../middleware/socialAccess');
 const ctrl = require('../controllers/smmReports.controller');
+const { ensureSmmReportSchemaOnce } = require('../helpers/smmReportSchema');
 
 const router = express.Router();
 const id = param('id').isInt();
 
 router.use(authenticate);
+router.use(async (_req, res, next) => {
+  try { await ensureSmmReportSchemaOnce(); next(); } catch (err) {
+    console.error('SMM report schema error:', err);
+    res.status(500).json({ message: `Report tables could not be created: ${err.code || ''} ${err.message}` });
+  }
+});
 router.use(requireSocialAccess('report_centre'));
 
 router.get('/', ctrl.list);
