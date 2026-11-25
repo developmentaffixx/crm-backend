@@ -177,7 +177,7 @@ exports.list = async (req, res) => {
     return res.json({ reports: rows });
   } catch (err) {
     console.error('SMM report list error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -198,7 +198,7 @@ exports.prefill = async (req, res) => {
     });
   } catch (err) {
     console.error('SMM report prefill error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -226,7 +226,7 @@ exports.create = async (req, res) => {
     return res.status(201).json(shape(rows[0]));
   } catch (err) {
     console.error('SMM report create error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -243,7 +243,7 @@ exports.getOne = async (req, res) => {
     return res.json({ ...shape(row), history, can_approve: canApprove(req) });
   } catch (err) {
     console.error('SMM report get error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -270,7 +270,7 @@ exports.updateInputs = async (req, res) => {
     return res.json(shape(rows[0]));
   } catch (err) {
     console.error('SMM report update error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -292,7 +292,7 @@ exports.updateNarrative = async (req, res) => {
     return res.json(shape(rows[0]));
   } catch (err) {
     console.error('SMM report narrative error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -307,7 +307,7 @@ exports.regenerate = async (req, res) => {
     return res.json(shape(rows[0]));
   } catch (err) {
     console.error('SMM report regenerate error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -381,7 +381,7 @@ exports.submit = async (req, res) => {
     return res.json({ message: 'Report submitted for review' });
   } catch (err) {
     console.error('SMM report submit error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -398,7 +398,7 @@ exports.requestChanges = async (req, res) => {
     return res.json({ message: 'Report sent back for changes' });
   } catch (err) {
     console.error('SMM report request-changes error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -414,7 +414,7 @@ exports.approve = async (req, res) => {
     return res.json({ message: 'Report approved. The final PowerPoint is now available.' });
   } catch (err) {
     console.error('SMM report approve error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -433,7 +433,7 @@ exports.reopen = async (req, res) => {
     return res.json({ message: `Report reopened as version ${version}` });
   } catch (err) {
     console.error('SMM report reopen error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
@@ -448,7 +448,7 @@ exports.remove = async (req, res) => {
     return res.json({ message: 'Report deleted' });
   } catch (err) {
     console.error('SMM report delete error:', err);
-    return res.status(500).json({ message: 'Server error' });
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
   }
 };
 
