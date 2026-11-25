@@ -19,6 +19,7 @@ router.use(requireSocialAccess('report_centre'));
 
 router.get('/', ctrl.list);
 router.get('/prefill', ctrl.prefill);
+router.get('/services', ctrl.projectServices);
 router.post('/', ctrl.create);
 
 router.get('/:id', id, ctrl.getOne);

@@ -38,13 +38,15 @@ async function logHistory(reportId, version, action, remarks, userId) {
 }
 
 const REPORT_SELECT = `
-  SELECT r.*, p.title AS project_title, p.client_id, l.business_name AS client_name,
+  SELECT r.*, p.title AS project_title, p.client_id, l.business_name AS client_name, sv.name AS service_name,
          CONCAT(cu.first_name, ' ', cu.last_name) AS created_by_name,
          CONCAT(su.first_name, ' ', su.last_name) AS submitted_by_name,
          CONCAT(au.first_name, ' ', au.last_name) AS approved_by_name
   FROM smm_client_reports r
   LEFT JOIN projects p ON p.id = r.project_id
   LEFT JOIN leads l ON l.id = p.client_id
+  LEFT JOIN project_services pss ON pss.id = r.project_service_id
+  LEFT JOIN services sv ON sv.id = pss.service_id
   LEFT JOIN users cu ON cu.id = r.created_by
   LEFT JOIN users su ON su.id = r.submitted_by
   LEFT JOIN users au ON au.id = r.approved_by`;
@@ -60,12 +62,13 @@ async function loadReport(req, res) {
   return row;
 }
 
-async function previousInputs(projectId, month) {
+async function previousInputs(projectId, serviceId, month) {
   const prevMonth = shiftMonth(month, -1);
+  // <=> is null-safe, so reports created before services were tracked still match each other.
   const [rows] = await db.query(
     `SELECT inputs, reporting_month FROM smm_client_reports
-     WHERE project_id = ? AND reporting_month = ? AND inputs IS NOT NULL LIMIT 1`,
-    [projectId, prevMonth]
+     WHERE project_id = ? AND project_service_id <=> ? AND reporting_month = ? AND inputs IS NOT NULL LIMIT 1`,
+    [projectId, serviceId || null, prevMonth]
   );
   if (!rows.length) return null;
   const inputs = parseJson(rows[0].inputs, null);
@@ -79,7 +82,7 @@ function validateInputs(inputs) {
 }
 
 async function recompute(report, inputs, { forceNarrative = false } = {}) {
-  const prev = await previousInputs(report.project_id, report.reporting_month);
+  const prev = await previousInputs(report.project_id, report.project_service_id, report.reporting_month);
   const fresh = buildAnalysis({ ...inputs, reporting_month: report.reporting_month }, prev);
   const existing = parseJson(report.analysis, null);
   const keepEdited = !forceNarrative && report.narrative_edited && existing && existing.narrative;
@@ -159,16 +162,19 @@ exports.list = async (req, res) => {
     const { project_id, status, month } = req.query;
     const where = ['1=1']; const params = [];
     if (project_id) { where.push('r.project_id = ?'); params.push(Number(project_id)); }
+    if (req.query.project_service_id) { where.push('r.project_service_id = ?'); params.push(Number(req.query.project_service_id)); }
     if (status) { where.push('r.status = ?'); params.push(status); }
     if (month && MONTH_RE.test(month)) { where.push('r.reporting_month = ?'); params.push(month); }
     if (!canSeeAll(req)) { where.push('r.created_by = ?'); params.push(req.user.id); }
     const [rows] = await db.query(
-      `SELECT r.id, r.project_id, r.reporting_month, r.status, r.version, r.created_at, r.updated_at,
+      `SELECT r.id, r.project_id, r.project_service_id, r.reporting_month, r.status, r.version, r.created_at, r.updated_at,
               r.submitted_at, r.approved_at, p.title AS project_title, l.business_name AS client_name,
-              CONCAT(cu.first_name, ' ', cu.last_name) AS created_by_name
+              sv.name AS service_name, CONCAT(cu.first_name, ' ', cu.last_name) AS created_by_name
        FROM smm_client_reports r
        LEFT JOIN projects p ON p.id = r.project_id
        LEFT JOIN leads l ON l.id = p.client_id
+       LEFT JOIN project_services pss ON pss.id = r.project_service_id
+       LEFT JOIN services sv ON sv.id = pss.service_id
        LEFT JOIN users cu ON cu.id = r.created_by
        WHERE ${where.join(' AND ')}
        ORDER BY r.reporting_month DESC, r.updated_at DESC LIMIT 200`,
@@ -181,13 +187,32 @@ exports.list = async (req, res) => {
   }
 };
 
+// Services attached to a project, for the Project > Service dropdown.
+exports.projectServices = async (req, res) => {
+  try {
+    const projectId = Number(req.query.project_id);
+    if (!projectId) return res.status(400).json({ message: 'project_id is required' });
+    const [rows] = await db.query(
+      `SELECT ps.id AS project_service_id, ps.status, s.id AS service_id, s.name AS service_name
+       FROM project_services ps JOIN services s ON s.id = ps.service_id
+       WHERE ps.project_id = ? ORDER BY s.name`,
+      [projectId]
+    );
+    return res.json({ services: rows });
+  } catch (err) {
+    console.error('SMM report services error:', err);
+    return res.status(500).json({ message: 'Server error', detail: (err.code || "") + " " + (err.sqlMessage || err.message) });
+  }
+};
+
 // Starting values for a new report: previous month's platforms and deliverable types.
 exports.prefill = async (req, res) => {
   try {
     const { project_id, month } = req.query;
+    const serviceId = req.query.project_service_id ? Number(req.query.project_service_id) : null;
     if (!project_id || !MONTH_RE.test(month || '')) return res.status(400).json({ message: 'project_id and month (YYYY-MM) are required' });
-    const prev = await previousInputs(Number(project_id), month);
-    const [exists] = await db.query('SELECT id FROM smm_client_reports WHERE project_id = ? AND reporting_month = ?', [Number(project_id), month]);
+    const prev = await previousInputs(Number(project_id), serviceId, month);
+    const [exists] = await db.query('SELECT id FROM smm_client_reports WHERE project_id = ? AND project_service_id <=> ? AND reporting_month = ?', [Number(project_id), serviceId, month]);
     return res.json({
       existing_report_id: exists[0] ? exists[0].id : null,
       has_previous: !!prev,
@@ -205,21 +230,24 @@ exports.prefill = async (req, res) => {
 exports.create = async (req, res) => {
   try {
     const { project_id, reporting_month } = req.body;
+    const serviceId = Number(req.body.project_service_id);
     const inputs = req.body.inputs || {};
-    if (!project_id || !MONTH_RE.test(reporting_month || '')) return res.status(400).json({ message: 'Project and reporting month (YYYY-MM) are required' });
+    if (!project_id || !serviceId || !MONTH_RE.test(reporting_month || '')) return res.status(400).json({ message: 'Project, service and reporting month (YYYY-MM) are required' });
     const bad = validateInputs(inputs);
     if (bad) return res.status(400).json({ message: bad });
 
     const [proj] = await db.query('SELECT id FROM projects WHERE id = ? AND deleted = 0', [Number(project_id)]);
     if (!proj.length) return res.status(404).json({ message: 'Project not found' });
+    const [svc] = await db.query('SELECT id FROM project_services WHERE id = ? AND project_id = ?', [serviceId, Number(project_id)]);
+    if (!svc.length) return res.status(400).json({ message: 'That service does not belong to the selected project' });
 
-    const [dup] = await db.query('SELECT id FROM smm_client_reports WHERE project_id = ? AND reporting_month = ?', [Number(project_id), reporting_month]);
-    if (dup.length) return res.status(409).json({ message: 'A report already exists for this project and month', report_id: dup[0].id });
+    const [dup] = await db.query('SELECT id FROM smm_client_reports WHERE project_id = ? AND project_service_id = ? AND reporting_month = ?', [Number(project_id), serviceId, reporting_month]);
+    if (dup.length) return res.status(409).json({ message: 'A report already exists for this project, service and month', report_id: dup[0].id });
 
-    const analysis = await recompute({ project_id: Number(project_id), reporting_month, narrative_edited: 0, analysis: null }, inputs);
+    const analysis = await recompute({ project_id: Number(project_id), project_service_id: serviceId, reporting_month, narrative_edited: 0, analysis: null }, inputs);
     const [result] = await db.query(
-      'INSERT INTO smm_client_reports (project_id, reporting_month, status, version, inputs, analysis, created_by) VALUES (?, ?, "draft", 1, ?, ?, ?)',
-      [Number(project_id), reporting_month, JSON.stringify(inputs), JSON.stringify(analysis), req.user.id]
+      'INSERT INTO smm_client_reports (project_id, project_service_id, reporting_month, status, version, inputs, analysis, created_by) VALUES (?, ?, ?, "draft", 1, ?, ?, ?)',
+      [Number(project_id), serviceId, reporting_month, JSON.stringify(inputs), JSON.stringify(analysis), req.user.id]
     );
     await logHistory(result.insertId, 1, 'created', null, req.user.id);
     const [rows] = await db.query(`${REPORT_SELECT} WHERE r.id = ?`, [result.insertId]);

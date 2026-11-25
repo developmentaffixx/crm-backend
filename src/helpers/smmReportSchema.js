@@ -9,6 +9,7 @@ async function ensureSmmReportSchema() {
   await db.query(`CREATE TABLE IF NOT EXISTS smm_client_reports (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     project_id INT UNSIGNED NOT NULL,
+    project_service_id INT UNSIGNED NULL,
     reporting_month CHAR(7) NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'draft',
     version INT NOT NULL DEFAULT 1,
@@ -25,9 +26,17 @@ async function ensureSmmReportSchema() {
     approved_at DATETIME NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_project_month (project_id, reporting_month),
+    UNIQUE KEY uq_project_service_month (project_id, project_service_id, reporting_month),
     INDEX idx_status (status)
   )`);
+
+  // Upgrade tables created before reports were tied to a service.
+  const [cols] = await db.query("SHOW COLUMNS FROM smm_client_reports LIKE 'project_service_id'");
+  if (!cols.length) await db.query('ALTER TABLE smm_client_reports ADD COLUMN project_service_id INT UNSIGNED NULL AFTER project_id');
+  const [newIdx] = await db.query("SHOW INDEX FROM smm_client_reports WHERE Key_name = 'uq_project_service_month'");
+  if (!newIdx.length) await db.query('ALTER TABLE smm_client_reports ADD UNIQUE KEY uq_project_service_month (project_id, project_service_id, reporting_month)');
+  const [oldIdx] = await db.query("SHOW INDEX FROM smm_client_reports WHERE Key_name = 'uq_project_month'");
+  if (oldIdx.length) await db.query('ALTER TABLE smm_client_reports DROP INDEX uq_project_month');
 
   await db.query(`CREATE TABLE IF NOT EXISTS smm_client_report_history (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
