@@ -61,6 +61,7 @@ const plansRoutes              = require('./src/routes/plans.routes');
 const dailyJournalRoutes       = require('./src/routes/dailyJournal.routes');
 const adsCampaignsRoutes       = require('./src/routes/adsCampaigns.routes');
 const monthlyReportRoutes      = require('./src/routes/monthlyReport.routes');
+const smmReportsRoutes         = require('./src/routes/smmReports.routes');
 const socialOverviewRoutes     = require('./src/routes/socialOverview.routes');
 const clientPortalRoutes       = require('./src/routes/clientPortal.routes');
 const contentCalendarSlotsRoutes = require('./src/routes/contentCalendarSlots.routes');
@@ -171,6 +172,7 @@ app.use('/api/plans',                 plansRoutes);
 app.use('/api/daily-journal',         dailyJournalRoutes);
 app.use('/api/ads-campaigns',         adsCampaignsRoutes);
 app.use('/api/monthly-reports',       monthlyReportRoutes);
+app.use('/api/smm-reports',           smmReportsRoutes);
 app.use('/api/social-overview',       socialOverviewRoutes);
 app.use('/api/client-portal',        clientPortalRoutes);
 app.use('/api/content-calendar-slots', contentCalendarSlotsRoutes);
@@ -313,6 +315,9 @@ server.listen(PORT, () => {
   // ── Daily Update: per Project ▸ Service entries ─────────────────────────────
   require('./src/helpers/dailyUpdate').ensureDailyJournalSchema()
     .catch(err => console.error('⚠️  Daily Update schema error (non-fatal):', err.message));
+  // ── SMM client monthly reports (data entry → analysis → approval → PPTX) ────
+  require('./src/helpers/smmReportSchema').ensureSmmReportSchema()
+    .catch(err => console.error('⚠️  SMM report schema error (non-fatal):', err.message));
   const { startAdsActivationCron } = require('./src/jobs/adsActivationCron');
   startAdsActivationCron();
 });
