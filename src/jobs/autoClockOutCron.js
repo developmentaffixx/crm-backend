@@ -95,8 +95,8 @@ async function autoClockOut(isCatchUp = false) {
 
         // 1. Stop any running task timers for this user
         const [activeTaskTimers] = await db.query(
-          `SELECT id, task_id, started_at FROM task_active_timers WHERE user_id = ?`,
-          [record.user_id]
+          `SELECT id, task_id, started_at FROM task_active_timers WHERE user_id = ? AND started_at < ?`,
+          [record.user_id, clockOutTime]
         );
 
         for (const timer of activeTaskTimers) {
@@ -122,8 +122,8 @@ async function autoClockOut(isCatchUp = false) {
 
         // 2. Stop any running ticket timers
         const [activeTicketTimers] = await db.query(
-          `SELECT id, ticket_id, started_at FROM ticket_active_timers WHERE user_id = ?`,
-          [record.user_id]
+          `SELECT id, ticket_id, started_at FROM ticket_active_timers WHERE user_id = ? AND started_at < ?`,
+          [record.user_id, clockOutTime]
         );
 
         for (const timer of activeTicketTimers) {
@@ -142,8 +142,8 @@ async function autoClockOut(isCatchUp = false) {
 
         // 3. Stop any running meeting timers
         const [activeMeetingTimers] = await db.query(
-          `SELECT id, meeting_id, started_at FROM meeting_active_timers WHERE user_id = ?`,
-          [record.user_id]
+          `SELECT id, meeting_id, started_at FROM meeting_active_timers WHERE user_id = ? AND started_at < ?`,
+          [record.user_id, clockOutTime]
         );
 
         for (const timer of activeMeetingTimers) {
@@ -157,6 +157,25 @@ async function autoClockOut(isCatchUp = false) {
           );
 
           await db.query('DELETE FROM meeting_active_timers WHERE id = ?', [timer.id]);
+        }
+
+        // 3b. Stop any running shoot timers (previously left running forever)
+        const [activeShootTimers] = await db.query(
+          `SELECT id, shoot_id, started_at FROM shoot_active_timers WHERE user_id = ? AND started_at < ?`,
+          [record.user_id, clockOutTime]
+        );
+
+        for (const timer of activeShootTimers) {
+          const startedAt = new Date(timer.started_at);
+          const duration = Math.max(1, Math.floor((clockOutTime - startedAt) / 1000));
+
+          await db.query(
+            `INSERT INTO shoot_time_logs (shoot_id, user_id, started_at, ended_at, duration, note)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [timer.shoot_id, record.user_id, timer.started_at, clockOutTime, duration, 'Auto-stopped by system (forgot to clock out)']
+          );
+
+          await db.query('DELETE FROM shoot_active_timers WHERE id = ?', [timer.id]);
         }
 
         // 4. End any active AFS session

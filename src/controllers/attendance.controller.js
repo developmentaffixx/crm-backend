@@ -1972,6 +1972,12 @@ exports.correctClockOut = async (req, res) => {
       return res.status(400).json({ message: 'Corrected time must be after clock-in time' });
     }
 
+    // Corrected time must not be earlier than work already logged that day
+    const conflict = await findActivityAfterClockOut(userId, attendanceDate, correctedDateTime);
+    if (conflict) {
+      return res.status(400).json({ message: `Clock-out ${actual_clock_out_time} is too early: ${conflict}. Enter a later time.` });
+    }
+
     // Recalculate served seconds
     const newServedSeconds = Math.floor((correctedDateTime - clockInTime) / 1000);
 
@@ -2037,7 +2043,7 @@ exports.resolvePending = async (req, res) => {
     return res.json({ message: 'Pending issues resolved successfully' });
   } catch (err) {
     console.error('Resolve pending error:', err);
-    return res.status(500).json({ message: err.message || 'Server error' });
+    return res.status(400).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -2059,7 +2065,7 @@ exports.adminResolvePending = async (req, res) => {
     return res.json({ message: 'Pending issues resolved successfully by admin' });
   } catch (err) {
     console.error('Admin resolve pending error:', err);
-    return res.status(500).json({ message: err.message || 'Server error' });
+    return res.status(400).json({ message: err.message || 'Server error' });
   }
 };
 
@@ -2213,6 +2219,31 @@ async function getPendingResolutionData(userId) {
   };
 }
 
+// ─── Helper: Did the user log any work/AFS ending after a proposed clock-out? ─
+// Window is the attendance date in IST (00:00 to 24:00). Used so a typed
+// clock-out time can never contradict timers already logged that day.
+async function findActivityAfterClockOut(userId, attendanceDate, clockOutDateTime) {
+  const dayStart = new Date(`${attendanceDate}T00:00:00+05:30`);
+  const dayEnd = new Date(dayStart.getTime() + 24 * 3600 * 1000);
+
+  const checks = [
+    { label: 'task', sql: 'SELECT MAX(ended_at) AS t FROM task_time_logs WHERE user_id = ? AND started_at >= ? AND started_at < ? AND ended_at > started_at AND ended_at > ?' },
+    { label: 'meeting', sql: 'SELECT MAX(ended_at) AS t FROM meeting_time_logs WHERE user_id = ? AND started_at >= ? AND started_at < ? AND ended_at > started_at AND ended_at > ?' },
+    { label: 'shoot', sql: 'SELECT MAX(ended_at) AS t FROM shoot_time_logs WHERE user_id = ? AND started_at >= ? AND started_at < ? AND ended_at > started_at AND ended_at > ?' },
+    { label: 'ticket', sql: 'SELECT MAX(ended_at) AS t FROM ticket_time_logs WHERE user_id = ? AND started_at >= ? AND started_at < ? AND ended_at > started_at AND ended_at > ?' },
+    { label: 'AFS break', sql: 'SELECT MAX(end_time) AS t FROM afs_logs WHERE user_id = ? AND start_time >= ? AND start_time < ? AND end_time > start_time AND end_time > ?' },
+  ];
+
+  for (const c of checks) {
+    const [rows] = await db.query(c.sql, [userId, dayStart, dayEnd, clockOutDateTime]);
+    if (rows[0] && rows[0].t) {
+      const when = new Date(rows[0].t).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
+      return `${c.label} activity is logged until ${when}`;
+    }
+  }
+  return null;
+}
+
 // ─── Helper: Resolve pending for a user ─────────────────────────────────────
 async function resolveUserPending(userId, attendanceId, clockOutTime, timers) {
   // Verify the attendance record belongs to this user and is unclosed
@@ -2240,12 +2271,52 @@ async function resolveUserPending(userId, attendanceId, clockOutTime, timers) {
     throw new Error('Clock-out time must be after clock-in time');
   }
 
-  // Process each orphaned timer
+  // Clock-out must not be earlier than work already logged that day
+  const conflict = await findActivityAfterClockOut(userId, attendanceDate, clockOutDateTime);
+  if (conflict) {
+    throw new Error(`Clock-out ${clockOutTime} is too early: ${conflict}. Enter a later clock-out time.`);
+  }
+
+  // Validate every timer BEFORE writing anything (all-or-nothing).
+  // A stop time at/before the timer's start used to be saved as a 1-second log
+  // and the active timer was deleted, silently losing the real work.
+  const timerTables = {
+    task: 'task_active_timers',
+    ticket: 'ticket_active_timers',
+    meeting: 'meeting_active_timers',
+    shoot: 'shoot_active_timers',
+  };
+  const fmtIST = (d) => d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
+
   for (const timer of timers) {
     if (!timer.type || !timer.timer_id || !timer.stop_time) {
       throw new Error('Each timer requires type, timer_id, and stop_time');
     }
+    const table = timerTables[timer.type];
+    if (!table) throw new Error(`Unknown timer type: ${timer.type}`);
+    if (!/^\d{2}:\d{2}$/.test(timer.stop_time)) {
+      throw new Error('Timer stop time must be in HH:MM format');
+    }
 
+    const [rows] = await db.query(`SELECT started_at FROM ${table} WHERE id = ? AND user_id = ?`, [timer.timer_id, userId]);
+    if (rows.length === 0) continue;
+
+    const startedAt = new Date(rows[0].started_at);
+    const stopAt = new Date(`${attendanceDate}T${timer.stop_time}:00+05:30`);
+
+    if (isNaN(stopAt.getTime())) {
+      throw new Error('Invalid timer stop time');
+    }
+    if (stopAt <= startedAt) {
+      throw new Error(`A ${timer.type} timer started at ${fmtIST(startedAt)}. Its stop time must be after ${fmtIST(startedAt)}.`);
+    }
+    if (stopAt > clockOutDateTime) {
+      throw new Error(`A ${timer.type} timer stop time (${timer.stop_time}) cannot be after your clock-out time (${clockOutTime}).`);
+    }
+  }
+
+  // Process each orphaned timer
+  for (const timer of timers) {
     const stopDateTime = new Date(`${attendanceDate}T${timer.stop_time}:00+05:30`);
 
     if (timer.type === 'task') {
